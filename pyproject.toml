@@ -1,0 +1,23 @@
+[project]
+name = "spectral-neuron-paper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "jupyterlab>=4.6.0,<5.0.0",
+    "matplotlib>=3.11.0,<4.0.0",
+    "numpy>=2.4.6,<3.0.0",
+    "scipy>=1.18.0,<2.0.0",
+    "torch>=2.12.0,<3.0.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu" },
+]
