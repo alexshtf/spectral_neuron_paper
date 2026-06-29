@@ -407,6 +407,19 @@ wheels = [
 ]
 
 [[package]]
+name = "fitstream"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/46/54/221c57b2c79325b507edec1227525a9ecf3b21f499bc137bb8e638aafdec/fitstream-0.3.1.tar.gz", hash = "sha256:f062d9863cebb48b21fbf61e863c19da7ab9b4b83febb54b15e78cf1c952d615", size = 14873, upload-time = "2026-04-02T14:21:44.666Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/e0/84b9ea0f1381b83f9d5550c26ead729ffd58d78937649d4b58d8e8f61448/fitstream-0.3.1-py3-none-any.whl", hash = "sha256:f80449c18472cc908f265826149ddb362c0ee17e425082ab524810462e3a9288", size = 16510, upload-time = "2026-04-02T14:21:43.485Z" },
+]
+
+[[package]]
 name = "fonttools"
 version = "4.63.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1716,6 +1729,7 @@ name = "spectral-neuron-paper"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "fitstream" },
     { name = "jupyterlab" },
     { name = "matplotlib" },
     { name = "numpy" },
@@ -1726,6 +1740,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fitstream", specifier = ">=0.3.1,<0.4.0" },
     { name = "jupyterlab", specifier = ">=4.6.0,<5.0.0" },
     { name = "matplotlib", specifier = ">=3.11.0,<4.0.0" },
     { name = "numpy", specifier = ">=2.4.6,<3.0.0" },
