@@ -1,4 +1,3 @@
-import itertools
 import math
 
 import fitstream as fts
@@ -39,7 +38,10 @@ class Synthetic1DStream:
             ys_batch = self.func(xs_batch)
             if self.noise_std > 0:
                 ys_batch += self.rng.normal(0, self.noise_std, size=ys_batch.shape)
-            yield torch.as_tensor(xs_batch), torch.as_tensor(ys_batch).squeeze(-1)
+            yield (
+                torch.as_tensor(xs_batch, dtype=torch.get_default_dtype()),
+                torch.as_tensor(ys_batch, dtype=torch.get_default_dtype()).squeeze(-1),
+            )
 
     def test(self, loss_fn, model):
         with torch.no_grad():
@@ -70,11 +72,11 @@ def train_on_stream(
 
         yield {
             "step": step,
-            "test_rmse": math.sqrt(test_mse.item()),
+            "test_rmse": math.sqrt(test_mse),
         }
 
 
-def compute_scaling_law(model_fn, stream_provider, n_batches=200):
+def compute_scaling_law(stream_provider, model_fn, n_batches=200):
     train_logs = []
     for lr in np.geomspace(1e-4, 1e-1, 10):
         events = fts.pipe(

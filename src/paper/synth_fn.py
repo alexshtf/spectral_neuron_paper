@@ -3,7 +3,11 @@ import scipy.interpolate as interp
 
 
 def random_func(
-    m: int, sigma: float = 1.0, lower=-4, upper=4, rng: np.random.Generator = None
+    m: int,
+    sigma: float = 1.0,
+    lower=-4,
+    upper=4,
+    rng: np.random.Generator | None = None,
 ):
     if rng is None:
         rng = np.random.default_rng(42)
@@ -14,7 +18,11 @@ def random_func(
 
 
 def random_inc_func(
-    m: int, sigma: float = 1.0, lower=-4, upper=4, rng: np.random.Generator = None
+    m: int,
+    sigma: float = 1.0,
+    lower=-4,
+    upper=4,
+    rng: np.random.Generator | None = None,
 ):
     if rng is None:
         rng = np.random.default_rng(42)
