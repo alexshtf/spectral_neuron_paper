@@ -43,6 +43,11 @@ class KthEigval(nn.Module):
         return eigvals[..., self.k]
 
 
+def square_plus(x):
+    # (x + sqrt(1 + x^2)) / 2,
+    return (x + torch.hypot(torch.as_tensor(1, dtype=x.dtype), x)) / 2
+
+
 class KthEigval1DMonotone(nn.Module):
     def __init__(self, dim, k=None, alpha=0.1):
         super().__init__()
@@ -52,9 +57,12 @@ class KthEigval1DMonotone(nn.Module):
         self.k = k or dim // 2
 
     def forward(self, x):
-        feat_diag = nn.functional.softplus(self.feat_vec)
-        mat = self.tril_emb(self.bias_mat)[None] + torch.diag_embed(
-            x[:, None] * feat_diag
+        # feat_diag = nn.functional.softplus(self.feat_vec)
+        feat_diag = square_plus(self.feat_vec)
+        mat = (
+            self.tril_emb(self.bias_mat)[None] # 1 × dim × dim
+            +
+            torch.diag_embed(x[..., None] * feat_diag) # B × 1 × dim × dim
         )
-        eigvals = torch.linalg.eigvalsh(mat)
-        return eigvals[..., self.k]
+        eigvals = torch.linalg.eigvalsh(mat) # B × 1 × dim
+        return eigvals[..., self.k].squeeze(-1)
