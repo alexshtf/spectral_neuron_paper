@@ -1,10 +1,26 @@
 import math
+from collections.abc import Iterable
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from paper.targets import TargetSpec, make_target
+
+SCALING_COLUMNS = {
+    "complexity",
+    "model",
+    "dim",
+    "budget",
+    "median_test_rmse",
+    "q25_test_rmse",
+    "q75_test_rmse",
+}
+
+MODEL_LINESTYLES = {
+    "unconstrained": "-",
+    "monotone": "--",
+}
 
 
 def _subplot_matrix(
@@ -40,20 +56,53 @@ def _subplot_grid(n_items: int, *, cell_width: float, cell_height: float):
     return fig, axes
 
 
-def _plot_curve(ax, group: pd.DataFrame, *, label: str) -> None:
+def _scaling_dim_colors(dims: list[int]) -> dict[int, str]:
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    return {dim: color_cycle[i % len(color_cycle)] for i, dim in enumerate(dims)}
+
+
+def _scaling_model_linestyles(models: list[str]) -> dict[str, str]:
+    fallback_styles = ("-", "--", ":", "-.")
+    return {
+        model: MODEL_LINESTYLES.get(model, fallback_styles[i % len(fallback_styles)])
+        for i, model in enumerate(models)
+    }
+
+
+def _ordered_models(models: Iterable[str]) -> list[str]:
+    model_set = set(models)
+    preferred = [model for model in MODEL_LINESTYLES if model in model_set]
+    remaining = sorted(model for model in model_set if model not in MODEL_LINESTYLES)
+    return preferred + remaining
+
+
+def _scaling_label(model: str, dim: int) -> str:
+    return f"dim={dim}, {model}"
+
+
+def _plot_curve(
+    ax,
+    group: pd.DataFrame,
+    *,
+    label: str,
+    color: str | None = None,
+    linestyle: str | None = None,
+) -> None:
     group = group.sort_values("budget")
-    ax.plot(
-        group["budget"].to_numpy(),
-        group["median_test_rmse"].to_numpy(),
-        marker="o",
-        label=label,
-    )
-    ax.fill_between(
-        group["budget"].to_numpy(),
-        group["q25_test_rmse"].to_numpy(),
-        group["q75_test_rmse"].to_numpy(),
-        alpha=0.15,
-    )
+    x = group["budget"].to_numpy()
+    median = group["median_test_rmse"].to_numpy()
+    q25 = group["q25_test_rmse"].to_numpy()
+    q75 = group["q75_test_rmse"].to_numpy()
+    plot_kwargs = {"marker": "o", "label": label}
+    fill_kwargs = {"alpha": 0.15}
+    if color is not None:
+        plot_kwargs["color"] = color
+        fill_kwargs["color"] = color
+        fill_kwargs["linewidth"] = 0
+    if linestyle is not None:
+        plot_kwargs["linestyle"] = linestyle
+    ax.plot(x, median, **plot_kwargs)
+    ax.fill_between(x, q25, q75, **fill_kwargs)
 
 
 def _use_pairwise_scaling(
@@ -87,26 +136,51 @@ def _add_shared_legend(fig, axes) -> None:
         )
 
 
+def _check_scaling_columns(summary: pd.DataFrame) -> None:
+    missing = SCALING_COLUMNS.difference(summary.columns)
+    if missing:
+        raise ValueError(f"summary is missing columns: {sorted(missing)}")
+
+
 def plot_scaling(
     summary: pd.DataFrame,
     *,
     pair_by_dim: bool | None = None,
     model_pair: tuple[str, str] = ("unconstrained", "monotone"),
 ):
+    _check_scaling_columns(summary)
     if pair_by_dim is None:
         pair_by_dim = _use_pairwise_scaling(summary, model_pair)
     if pair_by_dim:
         return plot_pairwise_scaling(summary, model_pair=model_pair)
 
     complexities = sorted(summary["complexity"].unique())
+    dims = sorted(summary["dim"].unique())
+    models = _ordered_models(summary["model"].unique())
+    dim_colors = _scaling_dim_colors(dims)
+    model_linestyles = _scaling_model_linestyles(models)
     fig, axes = _subplot_grid(
         len(complexities), cell_width=4.5, cell_height=3.5
     )
 
     for complexity, ax in zip(complexities, axes):
         sub = summary.loc[summary["complexity"] == complexity]
-        for (model, dim), group in sub.groupby(["model", "dim"], sort=True):
-            _plot_curve(ax, group, label=f"{model}, dim={dim}")
+        for dim in dims:
+            for model in models:
+                group = sub.loc[(sub["dim"] == dim) & (sub["model"] == model)]
+                if group.empty:
+                    continue
+
+                color = dim_colors[dim]
+                linestyle = model_linestyles[model]
+                label = _scaling_label(model, dim)
+                _plot_curve(
+                    ax,
+                    group,
+                    label=label,
+                    color=color,
+                    linestyle=linestyle,
+                )
         ax.set_title(f"complexity={complexity}")
         ax.set_xlabel("budget")
         ax.set_ylabel("test RMSE")
@@ -124,6 +198,7 @@ def plot_pairwise_scaling(
     *,
     model_pair: tuple[str, str] = ("unconstrained", "monotone"),
 ):
+    _check_scaling_columns(summary)
     paired = summary.loc[summary["model"].isin(model_pair)].copy()
     complexities = sorted(paired["complexity"].unique())
     dims = sorted(paired["dim"].unique())
