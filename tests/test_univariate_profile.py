@@ -45,7 +45,7 @@ def test_tiny_profile_produces_raw_logs_and_summary():
 
 
 def test_make_seeded_model_preserves_torch_rng_state():
-    spec = ModelSpec("spectral", "spectral", dim=3)
+    spec = ModelSpec("unconstrained", "unconstrained", dim=3)
     torch.manual_seed(123)
     rng_state = torch.random.get_rng_state().clone()
 

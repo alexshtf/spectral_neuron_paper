@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-type ModelKind = Literal["spectral", "monotone_spectral_1d"]
+type ModelKind = Literal["unconstrained", "monotone"]
 
 
 class TrilEmbed(nn.Module):
@@ -90,9 +90,9 @@ class ModelSpec:
 
 def make_model(spec: ModelSpec, input_dim: int) -> nn.Module:
     match spec.kind:
-        case "spectral":
+        case "unconstrained":
             return KthEigval(input_dim, spec.dim, spec.eig_idx)
-        case "monotone_spectral_1d":
+        case "monotone":
             return KthEigval1DMonotone(spec.dim, spec.eig_idx)
         case _:
             raise ValueError(spec.kind)

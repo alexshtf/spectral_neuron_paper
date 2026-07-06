@@ -17,7 +17,7 @@ def _row(
         "complexity": 5,
         "target_seed": target_seed,
         "noise_std": 0.0,
-        "model": "spectral",
+        "model": "unconstrained",
         "dim": 5,
         "eig_idx": 2,
         "lr": lr,
