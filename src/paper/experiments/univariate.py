@@ -1,10 +1,16 @@
 import argparse
+from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import partial
+from itertools import product
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 import pandas as pd
 import torch
+from tqdm.auto import tqdm
+from tqdm.contrib.concurrent import process_map
 
 from paper.models import ModelSpec, make_model
 from paper.targets import TargetKind, TargetSpec, make_target
@@ -44,6 +50,70 @@ class Profile:
     @property
     def steps(self) -> int:
         return max(self.budgets)
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    target_spec: TargetSpec
+    noise_std: float
+    model_spec: ModelSpec
+    lr: float
+    init_seed: int
+
+
+@dataclass(frozen=True)
+class RunGrid:
+    profile: Profile
+    target_kind: TargetKind = "monotone"
+
+    @property
+    def model_specs(self) -> tuple[ModelSpec, ...]:
+        return tuple(
+            model_spec
+            for dim in self.profile.dims
+            for model_spec in _model_specs(dim)
+        )
+
+    def __len__(self) -> int:
+        return (
+            len(self.profile.complexities)
+            * len(self.profile.target_seeds)
+            * len(self.profile.noise_stds)
+            * len(self.model_specs)
+            * len(self.profile.lrs)
+            * len(self.profile.init_seeds)
+        )
+
+    def __iter__(self) -> Iterator[RunConfig]:
+        for complexity, target_seed, noise_std, model_spec, lr, init_seed in product(
+            self.profile.complexities,
+            self.profile.target_seeds,
+            self.profile.noise_stds,
+            self.model_specs,
+            self.profile.lrs,
+            self.profile.init_seeds,
+        ):
+            target_spec = TargetSpec(
+                kind=self.target_kind,
+                complexity=complexity,
+                seed=target_seed,
+            )
+            yield RunConfig(
+                target_spec=target_spec,
+                noise_std=noise_std,
+                model_spec=model_spec,
+                lr=lr,
+                init_seed=init_seed,
+            )
+
+
+@dataclass(frozen=True)
+class RunSettings:
+    batch_size: int
+    steps: int
+    budgets: tuple[int, ...]
+    val_size: int
+    test_size: int
 
 
 PROFILES: dict[str, Profile] = {
@@ -99,24 +169,48 @@ def _make_seeded_model(
 def _with_metadata(
     df: pd.DataFrame,
     *,
-    target_spec: TargetSpec,
-    noise_std: float,
-    model_spec: ModelSpec,
-    lr: float,
-    init_seed: int,
+    config: RunConfig,
 ) -> pd.DataFrame:
     metadata = {
-        "target_kind": target_spec.kind,
-        "complexity": target_spec.complexity,
-        "target_seed": target_spec.seed,
-        "noise_std": noise_std,
-        "model": model_spec.name,
-        "dim": model_spec.dim,
-        "eig_idx": _resolved_eig_idx(model_spec),
-        "lr": lr,
-        "init_seed": init_seed,
+        "target_kind": config.target_spec.kind,
+        "complexity": config.target_spec.complexity,
+        "target_seed": config.target_spec.seed,
+        "noise_std": config.noise_std,
+        "model": config.model_spec.name,
+        "dim": config.model_spec.dim,
+        "eig_idx": _resolved_eig_idx(config.model_spec),
+        "lr": config.lr,
+        "init_seed": config.init_seed,
     }
     return df.assign(**metadata).loc[:, RAW_COLUMNS]
+
+
+def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
+    target = make_target(config.target_spec)
+    task = make_univariate_task(
+        target,
+        lower=config.target_spec.lower,
+        upper=config.target_spec.upper,
+        batch_size=settings.batch_size,
+        val_size=settings.val_size,
+        test_size=settings.test_size,
+        seed=config.target_spec.seed,
+        noise_std=config.noise_std,
+    )
+    model = _make_seeded_model(
+        config.model_spec,
+        input_dim=task.input_dim,
+        init_seed=config.init_seed,
+    )
+    df = run_one_stream(
+        task,
+        model,
+        lr=config.lr,
+        train_seed=config.init_seed,
+        steps=settings.steps,
+        checkpoints=set(settings.budgets),
+    )
+    return _with_metadata(df, config=config)
 
 
 def run_profile(
@@ -125,60 +219,51 @@ def run_profile(
     target_kind: TargetKind = "monotone",
     val_size: int = 4096,
     test_size: int = 4096,
+    workers: int = 1,
+    progress: bool = False,
+    progress_file: TextIO | None = None,
 ) -> pd.DataFrame:
-    dfs = []
+    if workers < 1:
+        raise ValueError(f"workers must be positive; got {workers}")
 
-    for complexity in profile.complexities:
-        for target_seed in profile.target_seeds:
-            target_spec = TargetSpec(
-                kind=target_kind,
-                complexity=complexity,
-                seed=target_seed,
-            )
-            target = make_target(target_spec)
+    configs = RunGrid(profile, target_kind=target_kind)
+    settings = RunSettings(
+        batch_size=profile.batch_size,
+        steps=profile.steps,
+        budgets=profile.budgets,
+        val_size=val_size,
+        test_size=test_size,
+    )
+    if workers == 1:
+        items = tqdm(
+            configs,
+            total=len(configs),
+            unit="experiment",
+            disable=not progress,
+            file=progress_file,
+        )
+        dfs = [run_config(config, settings) for config in items]
+    else:
+        dfs = process_map(
+            partial(run_config, settings=settings),
+            configs,
+            max_workers=workers,
+            chunksize=1,
+            unit="experiment",
+            disable=not progress,
+            file=progress_file,
+        )
 
-            for noise_std in profile.noise_stds:
-                task = make_univariate_task(
-                    target,
-                    lower=target_spec.lower,
-                    upper=target_spec.upper,
-                    batch_size=profile.batch_size,
-                    val_size=val_size,
-                    test_size=test_size,
-                    seed=target_seed,
-                    noise_std=noise_std,
-                )
-
-                for dim in profile.dims:
-                    for model_spec in _model_specs(dim):
-                        for lr in profile.lrs:
-                            for init_seed in profile.init_seeds:
-                                model = _make_seeded_model(
-                                    model_spec,
-                                    input_dim=task.input_dim,
-                                    init_seed=init_seed,
-                                )
-
-                                df = run_one_stream(
-                                    task,
-                                    model,
-                                    lr=lr,
-                                    train_seed=init_seed,
-                                    steps=profile.steps,
-                                    checkpoints=set(profile.budgets),
-                                )
-                                dfs.append(
-                                    _with_metadata(
-                                        df,
-                                        target_spec=target_spec,
-                                        noise_std=noise_std,
-                                        model_spec=model_spec,
-                                        lr=lr,
-                                        init_seed=init_seed,
-                                    )
-                                )
-
+    if not dfs:
+        return pd.DataFrame(columns=RAW_COLUMNS)
     return pd.concat(dfs, ignore_index=True)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -186,6 +271,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=PROFILES.keys(), default="sanity")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--summary-out", type=Path, default=None)
+    parser.add_argument("--workers", type=_positive_int, default=1)
+    parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -204,7 +291,7 @@ def main(argv: list[str] | None = None) -> None:
     profile = PROFILES[args.profile]
     out = args.out or Path("runs") / f"univariate_{args.profile}.csv"
 
-    raw = run_profile(profile)
+    raw = run_profile(profile, workers=args.workers, progress=not args.quiet)
     _write_csv(raw, out, overwrite=args.overwrite)
 
     if args.summary_out is not None:

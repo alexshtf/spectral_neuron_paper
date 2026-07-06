@@ -1,8 +1,12 @@
+from io import StringIO
+
+import pandas as pd
 import torch
 
 from paper.experiments.univariate import (
     RAW_COLUMNS,
     Profile,
+    RunGrid,
     _make_seeded_model,
     run_profile,
 )
@@ -10,8 +14,8 @@ from paper.models import ModelSpec
 from paper.tuning import summarize_raw
 
 
-def test_tiny_profile_produces_raw_logs_and_summary():
-    profile = Profile(
+def tiny_profile() -> Profile:
+    return Profile(
         complexities=(3,),
         target_seeds=range(1),
         init_seeds=range(1),
@@ -20,6 +24,10 @@ def test_tiny_profile_produces_raw_logs_and_summary():
         budgets=(1, 2),
         batch_size=4,
     )
+
+
+def test_tiny_profile_produces_raw_logs_and_summary():
+    profile = tiny_profile()
 
     raw = run_profile(profile, val_size=16, test_size=16)
     summary = summarize_raw(raw, profile.budgets)
@@ -42,6 +50,53 @@ def test_tiny_profile_produces_raw_logs_and_summary():
         "mean_test_rmse",
         "n",
     }.issubset(summary.columns)
+
+
+def test_run_grid_has_known_length():
+    profile = Profile(
+        complexities=(3, 5),
+        target_seeds=range(2),
+        init_seeds=range(3),
+        dims=(3, 5),
+        lrs=(1e-2, 1e-3),
+        budgets=(1,),
+        batch_size=4,
+        noise_stds=(0.0, 0.1),
+    )
+
+    grid = RunGrid(profile)
+
+    assert len(grid) == 2 * 2 * 2 * (2 * 2) * 2 * 3
+    assert len(list(grid)) == len(grid)
+
+
+def test_run_profile_reports_progress():
+    progress = StringIO()
+
+    run_profile(
+        tiny_profile(),
+        val_size=8,
+        test_size=8,
+        progress=True,
+        progress_file=progress,
+    )
+
+    text = progress.getvalue()
+    assert "2/2" in text
+    assert "experiment" in text
+
+
+def test_parallel_profile_matches_serial_results():
+    profile = tiny_profile()
+
+    serial = run_profile(profile, val_size=8, test_size=8, workers=1)
+    parallel = run_profile(profile, val_size=8, test_size=8, workers=2)
+
+    result_columns = [col for col in RAW_COLUMNS if col != "seconds"]
+    pd.testing.assert_frame_equal(
+        serial[result_columns],
+        parallel[result_columns],
+    )
 
 
 def test_make_seeded_model_preserves_torch_rng_state():

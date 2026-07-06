@@ -14,6 +14,7 @@ dependencies = [
     "scipy>=1.18.0,<2.0.0",
     "seaborn>=0.13.2",
     "torch>=2.12.0,<3.0.0",
+    "tqdm>=4.67.1,<5.0.0",
 ]
 
 [[tool.uv.index]]
