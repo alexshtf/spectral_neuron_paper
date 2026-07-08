@@ -12,7 +12,7 @@ import torch
 from tqdm.auto import tqdm
 from tqdm.contrib.concurrent import process_map
 
-from paper.models import ModelSpec, make_model
+from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import TargetKind, TargetSpec, make_target
 from paper.tasks import make_univariate_task
 from paper.training import run_one_stream
@@ -53,6 +53,18 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class FitKind:
+    target_kind: TargetKind
+    model_kind: ModelKind
+
+
+@dataclass(frozen=True)
+class FitSpec:
+    target_spec: TargetSpec
+    model_spec: ModelSpec
+
+
+@dataclass(frozen=True)
 class RunConfig:
     target_spec: TargetSpec
     noise_std: float
@@ -64,44 +76,39 @@ class RunConfig:
 @dataclass(frozen=True)
 class RunGrid:
     profile: Profile
-    target_kind: TargetKind = "monotone"
 
     @property
-    def model_specs(self) -> tuple[ModelSpec, ...]:
+    def fit_specs(self) -> tuple[FitSpec, ...]:
         return tuple(
-            model_spec
+            FitSpec(
+                target_spec=TargetSpec(kind=fit_kind.target_kind, complexity=complexity, seed=target_seed),
+                model_spec=ModelSpec.from_kind_dim(fit_kind.model_kind, dim)
+            )
             for dim in self.profile.dims
-            for model_spec in _model_specs(dim)
+            for complexity in self.profile.complexities
+            for target_seed in self.profile.target_seeds
+            for fit_kind in _fit_kinds()
         )
 
     def __len__(self) -> int:
         return (
-            len(self.profile.complexities)
-            * len(self.profile.target_seeds)
+            len(self.fit_specs)
             * len(self.profile.noise_stds)
-            * len(self.model_specs)
             * len(self.profile.lrs)
             * len(self.profile.init_seeds)
         )
 
     def __iter__(self) -> Iterator[RunConfig]:
-        for complexity, target_seed, noise_std, model_spec, lr, init_seed in product(
-            self.profile.complexities,
-            self.profile.target_seeds,
+        for fit_spec, noise_std, lr, init_seed in product(
+            self.fit_specs,
             self.profile.noise_stds,
-            self.model_specs,
             self.profile.lrs,
             self.profile.init_seeds,
         ):
-            target_spec = TargetSpec(
-                kind=self.target_kind,
-                complexity=complexity,
-                seed=target_seed,
-            )
             yield RunConfig(
-                target_spec=target_spec,
+                target_spec=fit_spec.target_spec,
                 noise_std=noise_std,
-                model_spec=model_spec,
+                model_spec=fit_spec.model_spec,
                 lr=lr,
                 init_seed=init_seed,
             )
@@ -147,10 +154,11 @@ PROFILES: dict[str, Profile] = {
 }
 
 
-def _model_specs(dim: int) -> tuple[ModelSpec, ...]:
+def _fit_kinds() -> tuple[FitKind, ...]:
     return (
-        ModelSpec("unconstrained", "unconstrained", dim),
-        ModelSpec("monotone", "monotone", dim),
+        FitKind(target_kind="general", model_kind="unconstrained"),
+        FitKind(target_kind="monotone", model_kind="unconstrained"),
+        FitKind(target_kind="monotone", model_kind="monotone"),
     )
 
 
@@ -216,7 +224,6 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
 def run_profile(
     profile: Profile,
     *,
-    target_kind: TargetKind = "monotone",
     val_size: int = 4096,
     test_size: int = 4096,
     workers: int = 1,
@@ -226,7 +233,7 @@ def run_profile(
     if workers < 1:
         raise ValueError(f"workers must be positive; got {workers}")
 
-    configs = RunGrid(profile, target_kind=target_kind)
+    configs = RunGrid(profile)
     settings = RunSettings(
         batch_size=profile.batch_size,
         steps=profile.steps,

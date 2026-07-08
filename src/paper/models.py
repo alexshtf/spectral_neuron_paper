@@ -87,6 +87,10 @@ class ModelSpec:
     dim: int
     eig_idx: int | None = None
 
+    @classmethod
+    def from_kind_dim(cls, kind: ModelKind, dim: int):
+        return cls(name=kind, kind=kind, dim=dim)
+
 
 def make_model(spec: ModelSpec, input_dim: int) -> nn.Module:
     match spec.kind:
