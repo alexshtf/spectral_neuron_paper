@@ -14,6 +14,13 @@ from paper.models import ModelSpec
 from paper.tuning import summarize_raw
 
 
+EXPECTED_FIT_PAIRS = {
+    ("general", "unconstrained"),
+    ("monotone", "unconstrained"),
+    ("monotone", "monotone"),
+}
+
+
 def tiny_profile() -> Profile:
     return Profile(
         complexities=(3,),
@@ -65,9 +72,22 @@ def test_run_grid_has_known_length():
     )
 
     grid = RunGrid(profile)
+    configs = list(grid)
 
-    assert len(grid) == 2 * 2 * 2 * (2 * 2) * 2 * 3
-    assert len(list(grid)) == len(grid)
+    assert len(grid) == (
+        len(profile.dims)
+        * len(profile.complexities)
+        * len(profile.target_seeds)
+        * len(EXPECTED_FIT_PAIRS)
+        * len(profile.noise_stds)
+        * len(profile.lrs)
+        * len(profile.init_seeds)
+    )
+    assert len(configs) == len(grid)
+    assert {
+        (config.target_spec.kind, config.model_spec.name)
+        for config in configs
+    } == EXPECTED_FIT_PAIRS
 
 
 def test_run_profile_reports_progress():
@@ -82,7 +102,7 @@ def test_run_profile_reports_progress():
     )
 
     text = progress.getvalue()
-    assert "2/2" in text
+    assert "3/3" in text
     assert "experiment" in text
 
 
