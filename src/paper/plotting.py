@@ -142,6 +142,18 @@ def _check_scaling_columns(summary: pd.DataFrame) -> None:
         raise ValueError(f"summary is missing columns: {sorted(missing)}")
 
 
+def _check_single_target_kind(summary: pd.DataFrame) -> None:
+    if "target_kind" not in summary:
+        return
+
+    target_kinds = sorted(summary["target_kind"].dropna().unique())
+    if len(target_kinds) > 1:
+        raise ValueError(
+            "plot_scaling expects a single target_kind; "
+            f"filter summary first, got {target_kinds}"
+        )
+
+
 def plot_scaling(
     summary: pd.DataFrame,
     *,
@@ -149,6 +161,7 @@ def plot_scaling(
     model_pair: tuple[str, str] = ("unconstrained", "monotone"),
 ):
     _check_scaling_columns(summary)
+    _check_single_target_kind(summary)
     if pair_by_dim is None:
         pair_by_dim = _use_pairwise_scaling(summary, model_pair)
     if pair_by_dim:
@@ -199,6 +212,7 @@ def plot_pairwise_scaling(
     model_pair: tuple[str, str] = ("unconstrained", "monotone"),
 ):
     _check_scaling_columns(summary)
+    _check_single_target_kind(summary)
     paired = summary.loc[summary["model"].isin(model_pair)].copy()
     complexities = sorted(paired["complexity"].unique())
     dims = sorted(paired["dim"].unique())

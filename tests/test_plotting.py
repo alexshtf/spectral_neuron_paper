@@ -4,6 +4,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import pytest
 
 from paper.plotting import plot_scaling
 
@@ -97,3 +98,22 @@ def test_plot_scaling_styles_models_and_dimensions():
         assert lines["dim=5, monotone"].get_linestyle() == "--"
     finally:
         plt.close(fig)
+
+
+def test_plot_scaling_rejects_mixed_target_kinds():
+    summary = pd.DataFrame(
+        [
+            _row(
+                complexity=5,
+                dim=5,
+                model="unconstrained",
+                budget=budget,
+                target_kind=target_kind,
+            )
+            for target_kind in ("general", "monotone")
+            for budget in (1, 2)
+        ]
+    )
+
+    with pytest.raises(ValueError, match="single target_kind"):
+        plot_scaling(summary)
