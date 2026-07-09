@@ -150,6 +150,7 @@ PROFILES: dict[str, Profile] = {
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
         budgets=(1, 2, 5, 10, 20, 50, 100, 200, 500),
         batch_size=32,
+        noise_stds=(0., 1e-1)
     ),
 }
 

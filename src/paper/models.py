@@ -43,6 +43,10 @@ class KthEigval(nn.Module):
         return eigvals[..., self.eig_idx]
 
 
+def square_plus(x: torch.Tensor) -> torch.Tensor:
+    return (torch.hypot(torch.as_tensor(1.), x) + x) / 2
+
+
 class KthEigval1DMonotone(nn.Module):
     """
     f(x) = lambda_k(A0 + x diag(p)), p >= 0.
@@ -74,7 +78,8 @@ class KthEigval1DMonotone(nn.Module):
         x = x[..., 0]
 
         a0 = self.tril_emb(self.bias_mat)
-        p = F.softplus(self.feat_vec)
+        # p = F.softplus(self.feat_vec)
+        p = square_plus(self.feat_vec)
 
         mat = a0 + torch.diag_embed(x[..., None] * p)
         return torch.linalg.eigvalsh(mat)[..., self.eig_idx]
