@@ -95,3 +95,8 @@ Follow the user's exact commit scope.
 - "Commit and push" means do both.
 
 For notebook-heavy diffs, inspect code cells structurally rather than relying on raw `.ipynb` output noise.
+
+## Code guideline
+- Simplicity, conciseness, elegance, beauty, "taste", consistent formatting, and good engineering are of paramount importance.
+- Use the allowed Python version, standard library and installed libraries to the maximum extent possible to achieve the above.
+- The above guidelines are not at the expense of correctness or performance, unless performance impact is negligible or trivial.
