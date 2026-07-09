@@ -16,11 +16,12 @@ def _row(
     model: str,
     budget: int,
     target_kind: str = "monotone",
+    noise_std: float = 0.0,
 ) -> dict:
     return {
         "target_kind": target_kind,
         "complexity": complexity,
-        "noise_std": 0.0,
+        "noise_std": noise_std,
         "model": model,
         "dim": dim,
         "eig_idx": dim // 2,
@@ -117,3 +118,46 @@ def test_plot_scaling_rejects_mixed_target_kinds():
 
     with pytest.raises(ValueError, match="single target_kind"):
         plot_scaling(summary)
+
+
+@pytest.mark.parametrize(
+    ("target_kind", "models", "expected_axes", "lines_per_axis"),
+    [
+        ("monotone", ("unconstrained", "monotone"), 4, 2),
+        ("general", ("unconstrained",), 2, 2),
+    ],
+)
+def test_plot_scaling_separates_noise_before_choosing_target_layout(
+    target_kind, models, expected_axes, lines_per_axis
+):
+    summary = pd.DataFrame(
+        [
+            _row(
+                complexity=complexity,
+                dim=dim,
+                model=model,
+                budget=budget,
+                target_kind=target_kind,
+                noise_std=noise_std,
+            )
+            for noise_std in (0.0, 0.1)
+            for complexity in (5, 10)
+            for dim in (3, 5)
+            for model in models
+            for budget in (1, 2)
+        ]
+    )
+
+    fig = plot_scaling(summary)
+    try:
+        assert [subfigure._suptitle.get_text() for subfigure in fig.subfigs] == [
+            "Noiseless training (σ = 0)",
+            "Noisy training (σ = 0.1)",
+        ]
+        for subfigure in fig.subfigs:
+            axes = [ax for ax in subfigure.axes if ax.get_visible()]
+            assert len(axes) == expected_axes
+            assert all(len(ax.lines) == lines_per_axis for ax in axes)
+            assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
+    finally:
+        plt.close(fig)

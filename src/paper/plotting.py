@@ -4,6 +4,7 @@ from collections.abc import Iterable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure, SubFigure
 
 from paper.targets import TargetSpec, make_target
 
@@ -22,31 +23,47 @@ MODEL_LINESTYLES = {
     "monotone": "--",
 }
 
+type FigureContainer = Figure | SubFigure
+
 
 def _subplot_matrix(
-    n_rows: int, n_cols: int, *, cell_width: float, cell_height: float
+    n_rows: int,
+    n_cols: int,
+    *,
+    cell_width: float,
+    cell_height: float,
+    container: FigureContainer | None = None,
 ):
     if n_rows == 0 or n_cols == 0:
         raise ValueError("at least one item is required")
 
-    fig, axs = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(cell_width * n_cols, cell_height * n_rows),
-        squeeze=False,
-        layout="constrained",
-    )
-    return fig, axs
+    if container is None:
+        container = plt.figure(
+            figsize=(cell_width * n_cols, cell_height * n_rows),
+            layout="constrained",
+        )
+    axs = container.subplots(n_rows, n_cols, squeeze=False)
+    return container, axs
 
 
-def _subplot_grid(n_items: int, *, cell_width: float, cell_height: float):
+def _subplot_grid(
+    n_items: int,
+    *,
+    cell_width: float,
+    cell_height: float,
+    container: FigureContainer | None = None,
+):
     if n_items == 0:
         raise ValueError("at least one item is required")
 
     n_cols = int(math.ceil(math.sqrt(n_items)))
     n_rows = int(math.ceil(n_items / n_cols))
     fig, axs = _subplot_matrix(
-        n_rows, n_cols, cell_width=cell_width, cell_height=cell_height
+        n_rows,
+        n_cols,
+        cell_width=cell_width,
+        cell_height=cell_height,
+        container=container,
     )
     axes = axs.ravel()
 
@@ -154,26 +171,43 @@ def _check_single_target_kind(summary: pd.DataFrame) -> None:
         )
 
 
-def plot_scaling(
-    summary: pd.DataFrame,
-    *,
-    pair_by_dim: bool | None = None,
-    model_pair: tuple[str, str] = ("unconstrained", "monotone"),
-):
-    _check_scaling_columns(summary)
-    _check_single_target_kind(summary)
-    if pair_by_dim is None:
-        pair_by_dim = _use_pairwise_scaling(summary, model_pair)
-    if pair_by_dim:
-        return plot_pairwise_scaling(summary, model_pair=model_pair)
+def _noise_stds(summary: pd.DataFrame) -> list[float]:
+    if "noise_std" not in summary:
+        return []
+    return sorted(summary["noise_std"].dropna().unique().tolist())
 
+
+def _noise_title(noise_std: float) -> str:
+    if noise_std == 0:
+        return "Noiseless training (σ = 0)"
+    return f"Noisy training (σ = {noise_std:g})"
+
+
+def _scaling_figure_size(
+    summary: pd.DataFrame, *, pair_by_dim: bool
+) -> tuple[float, float]:
+    complexities = summary["complexity"].nunique()
+    if pair_by_dim:
+        return 4.0 * summary["dim"].nunique(), 3.0 * complexities
+
+    n_cols = int(math.ceil(math.sqrt(complexities)))
+    n_rows = int(math.ceil(complexities / n_cols))
+    return 4.5 * n_cols, 3.5 * n_rows
+
+
+def _plot_scaling_grid(
+    summary: pd.DataFrame, *, container: FigureContainer | None = None
+) -> FigureContainer:
     complexities = sorted(summary["complexity"].unique())
     dims = sorted(summary["dim"].unique())
     models = _ordered_models(summary["model"].unique())
     dim_colors = _scaling_dim_colors(dims)
     model_linestyles = _scaling_model_linestyles(models)
     fig, axes = _subplot_grid(
-        len(complexities), cell_width=4.5, cell_height=3.5
+        len(complexities),
+        cell_width=4.5,
+        cell_height=3.5,
+        container=container,
     )
 
     for complexity, ax in zip(complexities, axes):
@@ -206,18 +240,21 @@ def plot_scaling(
     return fig
 
 
-def plot_pairwise_scaling(
+def _plot_pairwise_scaling(
     summary: pd.DataFrame,
     *,
-    model_pair: tuple[str, str] = ("unconstrained", "monotone"),
-):
-    _check_scaling_columns(summary)
-    _check_single_target_kind(summary)
+    model_pair: tuple[str, str],
+    container: FigureContainer | None = None,
+) -> FigureContainer:
     paired = summary.loc[summary["model"].isin(model_pair)].copy()
     complexities = sorted(paired["complexity"].unique())
     dims = sorted(paired["dim"].unique())
     fig, axs = _subplot_matrix(
-        len(complexities), len(dims), cell_width=4.0, cell_height=3.0
+        len(complexities),
+        len(dims),
+        cell_width=4.0,
+        cell_height=3.0,
+        container=container,
     )
 
     for row, complexity in enumerate(complexities):
@@ -246,6 +283,72 @@ def plot_pairwise_scaling(
     _add_shared_legend(fig, axs.ravel())
 
     return fig
+
+
+def _plot_noise_subfigures(
+    summary: pd.DataFrame,
+    *,
+    pair_by_dim: bool,
+    model_pair: tuple[str, str],
+) -> Figure:
+    noise_stds = _noise_stds(summary)
+    width, height = _scaling_figure_size(summary, pair_by_dim=pair_by_dim)
+    fig = plt.figure(
+        figsize=(width, height * len(noise_stds)),
+        layout="constrained",
+    )
+    subfigures = fig.subfigures(len(noise_stds), 1, squeeze=False).ravel()
+
+    for noise_std, subfigure in zip(noise_stds, subfigures):
+        noise_summary = summary.loc[summary["noise_std"] == noise_std]
+        subfigure.suptitle(_noise_title(noise_std), x=0.01, ha="left")
+        if pair_by_dim:
+            _plot_pairwise_scaling(
+                noise_summary,
+                model_pair=model_pair,
+                container=subfigure,
+            )
+        else:
+            _plot_scaling_grid(noise_summary, container=subfigure)
+
+    return fig
+
+
+def plot_scaling(
+    summary: pd.DataFrame,
+    *,
+    pair_by_dim: bool | None = None,
+    model_pair: tuple[str, str] = ("unconstrained", "monotone"),
+):
+    _check_scaling_columns(summary)
+    _check_single_target_kind(summary)
+    if pair_by_dim is None:
+        pair_by_dim = _use_pairwise_scaling(summary, model_pair)
+    if len(_noise_stds(summary)) > 1:
+        return _plot_noise_subfigures(
+            summary,
+            pair_by_dim=pair_by_dim,
+            model_pair=model_pair,
+        )
+    if pair_by_dim:
+        return _plot_pairwise_scaling(summary, model_pair=model_pair)
+    return _plot_scaling_grid(summary)
+
+
+def plot_pairwise_scaling(
+    summary: pd.DataFrame,
+    *,
+    model_pair: tuple[str, str] = ("unconstrained", "monotone"),
+):
+    _check_scaling_columns(summary)
+    _check_single_target_kind(summary)
+    if len(_noise_stds(summary)) > 1:
+        return _plot_noise_subfigures(
+            summary,
+            pair_by_dim=True,
+            model_pair=model_pair,
+        )
+    return _plot_pairwise_scaling(summary, model_pair=model_pair)
 
 
 def plot_target_gallery(specs: list[TargetSpec]):
