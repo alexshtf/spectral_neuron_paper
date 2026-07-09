@@ -35,6 +35,8 @@ RAW_COLUMNS = [
     "seconds",
 ]
 
+DEFAULT_RUNS_DIR = Path("notebooks") / "runs"
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -274,6 +276,10 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _default_raw_path(profile_name: str) -> Path:
+    return DEFAULT_RUNS_DIR / f"univariate_{profile_name}.csv"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=PROFILES.keys(), default="sanity")
@@ -297,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     profile = PROFILES[args.profile]
-    out = args.out or Path("runs") / f"univariate_{args.profile}.csv"
+    out = args.out or _default_raw_path(args.profile)
 
     raw = run_profile(profile, workers=args.workers, progress=not args.quiet)
     _write_csv(raw, out, overwrite=args.overwrite)

@@ -4,9 +4,11 @@ import pandas as pd
 import torch
 
 from paper.experiments.univariate import (
+    DEFAULT_RUNS_DIR,
     RAW_COLUMNS,
     Profile,
     RunGrid,
+    _default_raw_path,
     _make_seeded_model,
     run_profile,
 )
@@ -88,6 +90,10 @@ def test_run_grid_has_known_length():
         (config.target_spec.kind, config.model_spec.name)
         for config in configs
     } == EXPECTED_FIT_PAIRS
+
+
+def test_default_output_path_uses_notebook_runs_dir():
+    assert _default_raw_path("sanity") == DEFAULT_RUNS_DIR / "univariate_sanity.csv"
 
 
 def test_run_profile_reports_progress():
