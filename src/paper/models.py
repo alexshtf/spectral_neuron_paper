@@ -84,10 +84,15 @@ class KthEigvalLastMonotone(nn.Module):
                 f"expected input shape (..., {self.num_features}); got {tuple(x.shape)}"
             )
 
-        dense_tril = self.dense_tril[0] + x[..., :-1].matmul(self.dense_tril[1:])
-        mat = self.tril_emb(dense_tril)
-        mat = mat + torch.diag_embed(x[..., -1:] * square_plus(self.last_diag))
-        return torch.linalg.eigvalsh(mat)[..., self.eig_idx]
+        # compute batchd A_0 + x_11 A_1 + ... + x_{n-1} A_{n-1}
+        all_but_last_tril = self.dense_tril[0] + x[..., :-1].matmul(self.dense_tril[1:])
+        all_but_last_mat = self.tril_emb(all_but_last_tril)
+
+        # compute x_n diag(a_n)
+        last_mat = torch.diag_embed(x[..., -1:] * square_plus(self.last_diag))
+
+        # compute eigenvalues
+        return torch.linalg.eigvalsh(all_but_last_mat + last_mat)[..., self.eig_idx]
 
 
 @dataclass(frozen=True)
