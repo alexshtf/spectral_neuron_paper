@@ -32,7 +32,7 @@ RAW_COLUMNS = [
     "train_rmse",
     "val_rmse",
     "test_rmse",
-    "seconds",
+    "elapsed_seconds",
 ]
 
 DEFAULT_RUNS_DIR = Path("notebooks") / "runs"

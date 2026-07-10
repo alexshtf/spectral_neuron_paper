@@ -118,7 +118,7 @@ def test_parallel_profile_matches_serial_results():
     serial = run_profile(profile, val_size=8, test_size=8, workers=1)
     parallel = run_profile(profile, val_size=8, test_size=8, workers=2)
 
-    result_columns = [col for col in RAW_COLUMNS if col != "seconds"]
+    result_columns = [col for col in RAW_COLUMNS if col != "elapsed_seconds"]
     pd.testing.assert_frame_equal(
         serial[result_columns],
         parallel[result_columns],
