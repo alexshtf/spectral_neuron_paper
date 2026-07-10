@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 type ModelKind = Literal["unconstrained", "monotone"]
@@ -47,41 +46,47 @@ def square_plus(x: torch.Tensor) -> torch.Tensor:
     return (torch.hypot(torch.as_tensor(1.), x) + x) / 2
 
 
-class KthEigval1DMonotone(nn.Module):
+class KthEigvalLastMonotone(nn.Module):
     """
-    f(x) = lambda_k(A0 + x diag(p)), p >= 0.
+    f(x) = lambda_k(A0 + x1 A1 + ... + xn An), An = diag(p), p >= 0.
 
-    eig_idx is zero-based.
+    The last input feature is monotone. eig_idx is zero-based.
     """
 
-    def __init__(self, dim: int, eig_idx: int | None = None):
+    def __init__(
+        self, num_features: int, dim: int, eig_idx: int | None = None
+    ) -> None:
         super().__init__()
+        if num_features < 1:
+            raise ValueError(f"num_features must be positive; got {num_features}")
+
+        self.num_features = num_features
         self.dim = dim
         self.eig_idx = dim // 2 if eig_idx is None else eig_idx
         if not 0 <= self.eig_idx < dim:
             raise ValueError(f"eig_idx must be in [0, {dim}); got {self.eig_idx}")
 
-        self.bias_mat = nn.Parameter(torch.empty(dim * (dim + 1) // 2))
-        self.feat_vec = nn.Parameter(torch.empty(dim))
+        num_tril = dim * (dim + 1) // 2
+        self.dense_tril = nn.Parameter(torch.empty(num_features, num_tril))
+        self.last_diag = nn.Parameter(torch.empty(dim))
         self.tril_emb = TrilEmbed(dim)
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         bound = self.dim**-0.5
-        nn.init.uniform_(self.bias_mat, -bound, bound)
-        nn.init.uniform_(self.feat_vec, -bound, bound)
+        nn.init.uniform_(self.dense_tril, -bound, bound)
+        nn.init.uniform_(self.last_diag, -bound, bound)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1:] != (1,):
-            raise ValueError(f"expected input shape (..., 1); got {tuple(x.shape)}")
-        x = x[..., 0]
+        if x.shape[-1:] != (self.num_features,):
+            raise ValueError(
+                f"expected input shape (..., {self.num_features}); got {tuple(x.shape)}"
+            )
 
-        a0 = self.tril_emb(self.bias_mat)
-        # p = F.softplus(self.feat_vec)
-        p = square_plus(self.feat_vec)
-
-        mat = a0 + torch.diag_embed(x[..., None] * p)
+        dense_tril = self.dense_tril[0] + x[..., :-1].matmul(self.dense_tril[1:])
+        mat = self.tril_emb(dense_tril)
+        mat = mat + torch.diag_embed(x[..., -1:] * square_plus(self.last_diag))
         return torch.linalg.eigvalsh(mat)[..., self.eig_idx]
 
 
@@ -102,6 +107,6 @@ def make_model(spec: ModelSpec, input_dim: int) -> nn.Module:
         case "unconstrained":
             return KthEigval(input_dim, spec.dim, spec.eig_idx)
         case "monotone":
-            return KthEigval1DMonotone(spec.dim, spec.eig_idx)
+            return KthEigvalLastMonotone(input_dim, spec.dim, spec.eig_idx)
         case _:
             raise ValueError(spec.kind)
