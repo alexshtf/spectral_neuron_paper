@@ -49,6 +49,20 @@ def random_general_1d(
     spline = interp.CubicSpline(knots, values, bc_type="natural", extrapolate=True)
     return lambda x_np: _eval_1d(spline, x_np)
 
+def random_general_2d(
+    complexity: int,
+    *,
+    lower: float = -4.0,
+    upper: float = 4.0,
+    rng: np.random.Generator | None = None,
+) -> ArrayTarget:
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    knots = np.linspace(lower, upper, complexity)
+    xg, yg = np.meshgrid(knots, knots, indexing="ij")
+    values = rng.normal(0.0, 1.0, size=(complexity, complexity))
+    return interp.RegularGridInterpolator((knots, knots), values, method="cubic", bounds_error=False, fill_value=None)
 
 def random_general_2d(
     complexity: int,
