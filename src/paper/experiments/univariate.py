@@ -35,6 +35,8 @@ RAW_COLUMNS = [
     "elapsed_seconds",
 ]
 
+WRITE_MODES = ("overwrite", "append")
+
 DEFAULT_RUNS_DIR = Path("notebooks") / "runs"
 
 
@@ -287,15 +289,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-out", type=Path, default=None)
     parser.add_argument("--workers", type=_positive_int, default=1)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--write-mode",
+        choices=WRITE_MODES,
+        default="overwrite",
+        help="How to write output files (default: overwrite).",
+    )
     return parser
 
 
-def _write_csv(df: pd.DataFrame, path: Path, *, overwrite: bool) -> None:
-    if path.exists() and not overwrite:
-        raise SystemExit(f"{path} exists; pass --overwrite to replace it")
+def _write_csv(df: pd.DataFrame, path: Path, *, write_mode: str) -> None:
+    if write_mode not in WRITE_MODES:
+        raise ValueError(f"unknown write mode: {write_mode}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
+    append = write_mode == "append"
+    has_content = path.exists() and path.stat().st_size > 0
+    df.to_csv(
+        path,
+        mode="a" if append else "w",
+        header=not append or not has_content,
+        index=False,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -306,11 +321,11 @@ def main(argv: list[str] | None = None) -> None:
     out = args.out or _default_raw_path(args.profile)
 
     raw = run_profile(profile, workers=args.workers, progress=not args.quiet)
-    _write_csv(raw, out, overwrite=args.overwrite)
+    _write_csv(raw, out, write_mode=args.write_mode)
 
     if args.summary_out is not None:
         summary = summarize_raw(raw, profile.budgets)
-        _write_csv(summary, args.summary_out, overwrite=args.overwrite)
+        _write_csv(summary, args.summary_out, write_mode=args.write_mode)
 
 
 if __name__ == "__main__":

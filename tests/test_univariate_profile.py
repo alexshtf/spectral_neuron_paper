@@ -1,6 +1,7 @@
 from io import StringIO
 
 import pandas as pd
+import pytest
 import torch
 
 from paper.experiments.univariate import (
@@ -10,6 +11,8 @@ from paper.experiments.univariate import (
     RunGrid,
     _default_raw_path,
     _make_seeded_model,
+    _write_csv,
+    build_arg_parser,
     run_profile,
 )
 from paper.models import ModelSpec
@@ -94,6 +97,42 @@ def test_run_grid_has_known_length():
 
 def test_default_output_path_uses_notebook_runs_dir():
     assert _default_raw_path("sanity") == DEFAULT_RUNS_DIR / "univariate_sanity.csv"
+
+
+def test_write_mode_defaults_to_overwrite_and_removes_legacy_overwrite_flag():
+    parser = build_arg_parser()
+
+    assert parser.parse_args([]).write_mode == "overwrite"
+    assert parser.parse_args(["--write-mode", "append"]).write_mode == "append"
+    assert parser.parse_args(["--write-mode", "overwrite"]).write_mode == "overwrite"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--overwrite"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--write-mode", "replace"])
+
+
+def test_write_csv_append_preserves_rows_and_overwrite_replaces_them(tmp_path):
+    path = tmp_path / "results.csv"
+    first = pd.DataFrame({"value": [1]})
+    second = pd.DataFrame({"value": [2]})
+    replacement = pd.DataFrame({"value": [3]})
+
+    _write_csv(first, path, write_mode="append")
+    _write_csv(second, path, write_mode="append")
+
+    pd.testing.assert_frame_equal(
+        pd.read_csv(path),
+        pd.DataFrame({"value": [1, 2]}),
+    )
+
+    _write_csv(replacement, path, write_mode="overwrite")
+
+    pd.testing.assert_frame_equal(
+        pd.read_csv(path),
+        replacement,
+    )
 
 
 def test_run_profile_reports_progress():
