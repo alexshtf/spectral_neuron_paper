@@ -4,14 +4,16 @@ import pandas as pd
 import pytest
 import torch
 
-from paper.experiments.univariate import (
+from paper.experiments.synthetic import (
     DEFAULT_RUNS_DIR,
     RAW_COLUMNS,
     Profile,
     RunGrid,
-    _default_raw_path,
     _make_seeded_model,
     _write_csv,
+)
+from paper.experiments.univariate import (
+    _default_raw_path,
     build_arg_parser,
     run_profile,
 )

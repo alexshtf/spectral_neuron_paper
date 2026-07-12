@@ -205,3 +205,19 @@ def make_target(spec: TargetSpec) -> ArrayTarget:
             )
         case _:
             raise ValueError(spec.kind)
+
+
+def make_bivariate_target(spec: TargetSpec) -> ArrayTarget:
+    rng = np.random.default_rng(spec.seed)
+
+    match spec.kind:
+        case "general":
+            return random_general_2d(
+                spec.complexity, lower=spec.lower, upper=spec.upper, rng=rng
+            )
+        case "monotone":
+            return random_monotone_2d(
+                spec.complexity, lower=spec.lower, upper=spec.upper, rng=rng
+            )
+        case _:
+            raise ValueError(f"unsupported bivariate target kind: {spec.kind}")

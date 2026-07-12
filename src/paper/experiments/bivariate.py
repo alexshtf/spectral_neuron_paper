@@ -7,8 +7,8 @@ import pandas as pd
 
 from paper.experiments import synthetic
 from paper.experiments.synthetic import Profile
-from paper.targets import make_target
-from paper.tasks import make_univariate_task
+from paper.targets import make_bivariate_target
+from paper.tasks import make_bivariate_task
 
 
 DEFAULT_RUNS_DIR = synthetic.DEFAULT_RUNS_DIR
@@ -57,8 +57,8 @@ def run_profile(
 ) -> pd.DataFrame:
     return synthetic.run_profile(
         profile,
-        make_target=make_target,
-        make_task=make_univariate_task,
+        make_target=make_bivariate_target,
+        make_task=make_bivariate_task,
         val_size=val_size,
         test_size=test_size,
         workers=workers,
@@ -68,7 +68,7 @@ def run_profile(
 
 
 def _default_raw_path(profile_name: str) -> Path:
-    return synthetic.default_raw_path("univariate", profile_name)
+    return synthetic.default_raw_path("bivariate", profile_name)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
