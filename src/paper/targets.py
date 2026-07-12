@@ -62,7 +62,8 @@ def random_general_2d(
 
     knots = np.linspace(lower, upper, complexity)
     values = rng.normal(0.0, 1.0, size=(complexity, complexity))
-    return interp.RegularGridInterpolator((knots, knots), values, method='cubic')
+    method = "cubic" if complexity >= 4 else "linear"
+    return interp.RegularGridInterpolator((knots, knots), values, method=method)
 
 
 def random_monotone_2d(

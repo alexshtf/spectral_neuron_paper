@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
 
-from paper.plotting import plot_scaling
+from paper.plotting import plot_bivariate_target_gallery, plot_scaling
+from paper.targets import TargetSpec
 
 
 def _row(
@@ -159,5 +160,26 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
             assert len(axes) == expected_axes
             assert all(len(ax.lines) == lines_per_axis for ax in axes)
             assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
+    finally:
+        plt.close(fig)
+
+
+def test_plot_bivariate_target_gallery_draws_contours():
+    specs = [
+        TargetSpec(kind="general", complexity=5, seed=0),
+        TargetSpec(kind="monotone", complexity=5, seed=0),
+    ]
+
+    fig = plot_bivariate_target_gallery(specs, resolution=20)
+    try:
+        axes = [ax for ax in fig.axes if ax.get_title()]
+
+        assert [ax.get_title() for ax in axes] == [
+            "general, complexity=5, seed=0",
+            "monotone, complexity=5, seed=0",
+        ]
+        assert all(ax.collections for ax in axes)
+        assert all(ax.get_xlabel() == "$x_1$" for ax in axes)
+        assert all(ax.get_ylabel() == "$x_2$" for ax in axes)
     finally:
         plt.close(fig)

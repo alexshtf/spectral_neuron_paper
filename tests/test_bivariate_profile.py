@@ -14,7 +14,7 @@ from paper.tuning import summarize_raw
 
 def tiny_profile() -> Profile:
     return Profile(
-        complexities=(5,),
+        complexities=(3,),
         target_seeds=range(1),
         init_seeds=range(1),
         dims=(3,),

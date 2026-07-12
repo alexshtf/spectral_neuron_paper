@@ -25,7 +25,7 @@ PROFILES: dict[str, Profile] = {
         batch_size=32,
     ),
     "small": Profile(
-        complexities=(5, 10, 20),
+        complexities=(5, 9, 13),
         target_seeds=range(8),
         init_seeds=range(2),
         dims=(5, 9, 15),
@@ -34,7 +34,7 @@ PROFILES: dict[str, Profile] = {
         batch_size=32,
     ),
     "full": Profile(
-        complexities=(5, 10, 20),
+        complexities=(5, 9, 13),
         target_seeds=range(32),
         init_seeds=range(3),
         dims=(5, 9, 15),
