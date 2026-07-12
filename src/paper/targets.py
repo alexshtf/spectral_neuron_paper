@@ -72,14 +72,40 @@ def random_monotone_2d(
     upper: float = 4.0,
     rng: np.random.Generator | None = None,
 ) -> ArrayTarget:
-    """Build a random target that is monotone in its second coordinate.
+    """Build a random target monotone in its second coordinate.
 
-    Positive cumulative increments define one monotone PCHIP curve in x2 for
-    each x1 knot. Between adjacent x1 knots, the two curves are blended with a
-    quintic smootherstep weight. Because that weight stays in [0, 1], the
-    result is a convex combination of monotone curves; it remains monotone in
-    x2. The smootherstep has zero first and second derivatives at each x1 knot,
-    so the row transitions are C2 in x1.
+    Let κ₀ < ⋯ < κₘ₋₁ be the shared grid, and let pᵢ be the PCHIP
+    interpolant through a positive affine standardization of row i of
+
+        Yᵢⱼ = Σₗ₌₀ʲ exp(Zᵢₗ),    Zᵢₗ ∼ N(0, 1).
+
+    Each pᵢ is nondecreasing. For x₁ ∈ [κᵢ, κᵢ₊₁], set
+
+        t = (x₁ − κᵢ) / (κᵢ₊₁ − κᵢ),
+        w(t) = 6t⁵ − 15t⁴ + 10t³,
+        f(x₁, x₂) = (1 − w(t))pᵢ(x₂) + w(t)pᵢ₊₁(x₂).
+
+    The quintic is the unique lowest-degree polynomial satisfying
+
+        w(0) = 0,  w(1) = 1,
+        w′(0) = w′(1) = w″(0) = w″(1) = 0.
+
+    Its endpoint values select the two rows, while its vanishing first and
+    second derivatives make adjacent x₁ cells meet C²-smoothly. Its range is
+    also contained in [0, 1], which makes the blend convex.
+
+    Since 0 ≤ w(t) ≤ 1, for x₂′ ≥ x₂,
+
+        f(x₁, x₂′) − f(x₁, x₂)
+        = (1 − w)[pᵢ(x₂′) − pᵢ(x₂)]
+          + w[pᵢ₊₁(x₂′) − pᵢ₊₁(x₂)] ≥ 0.
+
+    Thus f is monotone in x₂ on the target domain. This resembles a
+    tensor-product spline: PCHIP supplies the x₂ curves, and the same local
+    x₁ blending polynomial is used in every cell. It is deliberately not a
+    tensor-product spline interpolant: no spline is fit across x₁ and no
+    bivariate spline coefficients are solved for. The local convex blend
+    preserves the row-wise PCHIP monotonicity; PCHIP makes f C¹ in x₂.
     """
     if rng is None:
         rng = np.random.default_rng(42)
