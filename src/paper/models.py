@@ -42,6 +42,88 @@ class KthEigval(nn.Module):
         return eigvals[..., self.eig_idx]
 
 
+class SparseLinear(nn.Module):
+    """A linear logit over a fixed number of active categorical features."""
+
+    def __init__(self, num_features: int, num_fields: int):
+        super().__init__()
+        self.num_fields = num_fields
+        self.weight = nn.Embedding(num_features, 1, sparse=True)
+        self.bias = nn.Parameter(torch.zeros(()))
+        nn.init.zeros_(self.weight.weight)
+
+    def forward(self, feature_ids: torch.Tensor) -> torch.Tensor:
+        self._check_input(feature_ids)
+        return self.weight(feature_ids).sum(dim=-2).squeeze(-1) + self.bias
+
+    def _check_input(self, feature_ids: torch.Tensor) -> None:
+        if feature_ids.shape[-1:] != (self.num_fields,):
+            raise ValueError(
+                f"expected input shape (..., {self.num_fields}); "
+                f"got {tuple(feature_ids.shape)}"
+            )
+
+
+class FactorizationMachine(SparseLinear):
+    """A second-order factorization machine with linear and latent weights."""
+
+    def __init__(self, num_features: int, num_fields: int, rank: int):
+        if rank < 1:
+            raise ValueError(f"rank must be positive; got {rank}")
+        super().__init__(num_features, num_fields)
+        self.rank = rank
+        self.embedding = nn.Embedding(num_features, rank, sparse=True)
+        nn.init.normal_(self.embedding.weight, std=1e-2)
+
+    def forward(self, feature_ids: torch.Tensor) -> torch.Tensor:
+        self._check_input(feature_ids)
+        linear = self.weight(feature_ids).sum(dim=-2).squeeze(-1) + self.bias
+        vectors = self.embedding(feature_ids)
+        interaction = 0.5 * (
+            vectors.sum(dim=-2).square().sum(dim=-1)
+            - vectors.square().sum(dim=(-2, -1))
+        )
+        return linear + interaction
+
+
+class SparseKthEigval(nn.Module):
+    """A spectral neuron whose active categorical features contribute matrices."""
+
+    def __init__(
+        self,
+        num_features: int,
+        num_fields: int,
+        dim: int,
+        eig_idx: int | None = None,
+    ):
+        super().__init__()
+        self.num_fields = num_fields
+        self.dim = dim
+        self.eig_idx = dim // 2 if eig_idx is None else eig_idx
+        if not 0 <= self.eig_idx < dim:
+            raise ValueError(f"eig_idx must be in [0, {dim}); got {self.eig_idx}")
+
+        num_tril = dim * (dim + 1) // 2
+        self.feature_tril = nn.Embedding(num_features, num_tril, sparse=True)
+        self.base_tril = nn.Parameter(torch.empty(num_tril))
+        self.tril_emb = TrilEmbed(dim)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        bound = self.num_fields**-0.5
+        nn.init.uniform_(self.feature_tril.weight, -bound, bound)
+        nn.init.uniform_(self.base_tril, -bound, bound)
+
+    def forward(self, feature_ids: torch.Tensor) -> torch.Tensor:
+        if feature_ids.shape[-1:] != (self.num_fields,):
+            raise ValueError(
+                f"expected input shape (..., {self.num_fields}); "
+                f"got {tuple(feature_ids.shape)}"
+            )
+        tril = self.base_tril + self.feature_tril(feature_ids).sum(dim=-2)
+        return torch.linalg.eigvalsh(self.tril_emb(tril))[..., self.eig_idx]
+
+
 def square_plus(x: torch.Tensor) -> torch.Tensor:
     return (torch.hypot(torch.as_tensor(1.), x) + x) / 2
 

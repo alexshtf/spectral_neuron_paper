@@ -1,7 +1,13 @@
 import pytest
 import torch
 
-from paper.models import KthEigvalLastMonotone, TrilEmbed
+from paper.models import (
+    FactorizationMachine,
+    KthEigvalLastMonotone,
+    SparseKthEigval,
+    SparseLinear,
+    TrilEmbed,
+)
 
 
 def test_tril_embed_outputs_symmetric():
@@ -67,3 +73,62 @@ def test_last_monotone_model_rejects_wrong_feature_count():
 
     with pytest.raises(ValueError, match=r"expected input shape \(\.\.\., 3\)"):
         model(torch.zeros(7, 2))
+
+
+def test_sparse_models_preserve_leading_shape():
+    feature_ids = torch.tensor([[[0, 1], [2, 3]], [[1, 2], [3, 4]]])
+
+    assert SparseLinear(5, 2)(feature_ids).shape == (2, 2)
+    assert FactorizationMachine(5, 2, rank=3)(feature_ids).shape == (2, 2)
+    assert SparseKthEigval(5, 2, dim=3)(feature_ids).shape == (2, 2)
+
+
+def test_fm_and_spectral_match_parameters_per_feature():
+    num_features = 17
+    fm = FactorizationMachine(num_features, num_fields=3, rank=14)
+    spectral = SparseKthEigval(num_features, num_fields=3, dim=5)
+
+    fm_lookup_parameters = fm.weight.weight.numel() + fm.embedding.weight.numel()
+    spectral_lookup_parameters = spectral.feature_tril.weight.numel()
+
+    assert fm_lookup_parameters == spectral_lookup_parameters == 15 * num_features
+
+
+def test_factorization_machine_matches_pairwise_definition():
+    model = FactorizationMachine(num_features=4, num_fields=3, rank=2)
+    with torch.no_grad():
+        model.bias.fill_(0.25)
+        model.weight.weight.copy_(torch.tensor([[1.0], [2.0], [3.0], [4.0]]))
+        model.embedding.weight.copy_(
+            torch.tensor([[1.0, 0.0], [0.0, 2.0], [3.0, 4.0], [0.0, 0.0]])
+        )
+
+    ids = torch.tensor([[0, 1, 2]])
+    vectors = model.embedding(ids[0])
+    expected_interaction = sum(
+        torch.dot(vectors[i], vectors[j])
+        for i in range(3)
+        for j in range(i + 1, 3)
+    )
+    expected = 0.25 + 1.0 + 2.0 + 3.0 + expected_interaction
+
+    assert torch.allclose(model(ids), expected.reshape(1))
+
+
+def test_sparse_spectral_model_sums_feature_matrices():
+    model = SparseKthEigval(num_features=3, num_fields=2, dim=2, eig_idx=1)
+    with torch.no_grad():
+        model.base_tril.copy_(torch.tensor([1.0, 0.0, 2.0]))
+        model.feature_tril.weight.copy_(
+            torch.tensor(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 1.0, 3.0],
+                ]
+            )
+        )
+
+    expected = torch.linalg.eigvalsh(torch.tensor([[2.0, 1.0], [1.0, 5.0]]))[1]
+
+    assert torch.allclose(model(torch.tensor([[0, 2]])), expected.reshape(1))
