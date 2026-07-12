@@ -50,6 +50,81 @@ def random_general_1d(
     return lambda x_np: _eval_1d(spline, x_np)
 
 
+def random_general_2d(
+    complexity: int,
+    *,
+    lower: float = -4.0,
+    upper: float = 4.0,
+    rng: np.random.Generator | None = None,
+) -> ArrayTarget:
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    knots = np.linspace(lower, upper, complexity)
+    values = rng.normal(0.0, 1.0, size=(complexity, complexity))
+    return interp.RegularGridInterpolator((knots, knots), values, method='cubic')
+
+
+def random_monotone_2d(
+    complexity: int,
+    *,
+    lower: float = -4.0,
+    upper: float = 4.0,
+    rng: np.random.Generator | None = None,
+) -> ArrayTarget:
+    """Build a random target that is monotone in its second coordinate.
+
+    Positive cumulative increments define one monotone PCHIP curve in x2 for
+    each x1 knot. Between adjacent x1 knots, the two curves are blended with a
+    quintic smootherstep weight. Because that weight stays in [0, 1], the
+    result is a convex combination of monotone curves; it remains monotone in
+    x2. The smootherstep has zero first and second derivatives at each x1 knot,
+    so the row transitions are C2 in x1.
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+    if complexity < 2:
+        raise ValueError("complexity must be at least 2")
+    if not np.isfinite((lower, upper)).all() or lower >= upper:
+        raise ValueError("expected finite lower < upper")
+
+    knots = np.linspace(lower, upper, complexity)
+    values = np.cumsum(
+        np.exp(rng.normal(0.0, 1.0, size=(complexity, complexity))), axis=1
+    )
+    rows = interp.PchipInterpolator(
+        knots, _standardize(values).T, axis=0, extrapolate=False
+    )
+
+    def target(x_np: np.ndarray) -> np.ndarray:
+        x = np.asarray(x_np, dtype=float)
+        if x.ndim == 0 or x.shape[-1] != 2:
+            raise ValueError("expected input shape (..., 2)")
+
+        if not np.isfinite(x).all() or np.any((x < lower) | (x > upper)):
+            raise ValueError(f"expected inputs in [{lower}, {upper}]")
+
+        x1 = x[..., 0]
+        left = np.clip(
+            np.searchsorted(knots, x1, side="right") - 1,
+            0,
+            complexity - 2,
+        )
+        t = (x1 - knots[left]) / (knots[left + 1] - knots[left])
+        # Quintic smootherstep: a C2 convex blend between the adjacent rows.
+        weight = t**3 * (10.0 + t * (-15.0 + 6.0 * t))
+        row_values = rows(x[..., 1])
+        left_values = np.take_along_axis(
+            row_values, left[..., None], axis=-1
+        )[..., 0]
+        right_values = np.take_along_axis(
+            row_values, (left + 1)[..., None], axis=-1
+        )[..., 0]
+        return np.asarray((1.0 - weight) * left_values + weight * right_values)
+
+    return target
+
+
 def random_monotone_1d(
     complexity: int,
     *,
