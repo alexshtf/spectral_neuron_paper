@@ -77,10 +77,17 @@ def test_last_monotone_model_rejects_wrong_feature_count():
 
 def test_sparse_models_preserve_leading_shape():
     feature_ids = torch.tensor([[[0, 1], [2, 3]], [[1, 2], [3, 4]]])
+    feature_values = torch.ones_like(feature_ids, dtype=torch.float32)
 
-    assert SparseLinear(5, 2)(feature_ids).shape == (2, 2)
-    assert FactorizationMachine(5, 2, rank=3)(feature_ids).shape == (2, 2)
-    assert SparseKthEigval(5, 2, dim=3)(feature_ids).shape == (2, 2)
+    assert SparseLinear(5, 2)(feature_ids, feature_values).shape == (2, 2)
+    assert (
+        FactorizationMachine(5, 2, rank=3)(feature_ids, feature_values).shape
+        == (2, 2)
+    )
+    assert SparseKthEigval(5, 2, dim=3)(feature_ids, feature_values).shape == (
+        2,
+        2,
+    )
 
 
 def test_fm_and_spectral_match_parameters_per_feature():
@@ -104,15 +111,16 @@ def test_factorization_machine_matches_pairwise_definition():
         )
 
     ids = torch.tensor([[0, 1, 2]])
-    vectors = model.embedding(ids[0])
+    values = torch.tensor([[1.0, 2.0, 0.5]])
+    vectors = model.embedding(ids[0]) * values[0, :, None]
     expected_interaction = sum(
         torch.dot(vectors[i], vectors[j])
         for i in range(3)
         for j in range(i + 1, 3)
     )
-    expected = 0.25 + 1.0 + 2.0 + 3.0 + expected_interaction
+    expected = 0.25 + 1.0 + 2.0 * 2.0 + 0.5 * 3.0 + expected_interaction
 
-    assert torch.allclose(model(ids), expected.reshape(1))
+    assert torch.allclose(model(ids, values), expected.reshape(1))
 
 
 def test_sparse_spectral_model_sums_feature_matrices():
@@ -129,6 +137,8 @@ def test_sparse_spectral_model_sums_feature_matrices():
             )
         )
 
-    expected = torch.linalg.eigvalsh(torch.tensor([[2.0, 1.0], [1.0, 5.0]]))[1]
+    ids = torch.tensor([[0, 2]])
+    values = torch.tensor([[2.0, 0.5]])
+    expected = torch.linalg.eigvalsh(torch.tensor([[3.0, 0.5], [0.5, 3.5]]))[1]
 
-    assert torch.allclose(model(torch.tensor([[0, 2]])), expected.reshape(1))
+    assert torch.allclose(model(ids, values), expected.reshape(1))

@@ -11,6 +11,10 @@ raw file; later runs reuse it.
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
 training split. Each model then makes one pass over a fixed random permutation of that
 split, with validation measurements taken at every requested training-size checkpoint.
+The default run compares five variants: linear, FM, and spectral models with bucketed
+numerics, plus linear and spectral models with hybrid numerical preprocessing. In the
+hybrid representation, missing, zero, and negative values are indicators while positive
+values use standardized `log1p` magnitudes.
 
 ```bash
 uv run python -m paper.experiments.criteo_scaling \
@@ -20,4 +24,6 @@ uv run python -m paper.experiments.criteo_scaling \
 ```
 
 Use `--cache-dir` to place the cache elsewhere, `--out` to override the raw CSV path,
-and `--summary-out` to also write validation-selected aggregate results.
+and `--summary-out` to also write validation-selected aggregate results. Pass, for
+example, `--variant spectral-new` to run one variant; its name is included in the
+default output filename.

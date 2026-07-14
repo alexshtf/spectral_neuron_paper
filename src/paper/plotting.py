@@ -1,9 +1,11 @@
 import math
 from collections.abc import Iterable
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from matplotlib.figure import Figure, SubFigure
 
 from paper.targets import TargetSpec, make_bivariate_target, make_target
@@ -356,92 +358,221 @@ def plot_pairwise_scaling(
     return _plot_pairwise_scaling(summary, model_pair=model_pair)
 
 
-def _criteo_curve_label(model: str, group: pd.DataFrame) -> str:
-    parameters = int(group["parameters_per_feature"].iloc[0])
-    if model == "linear":
-        return "Linear (1/feature)"
-    if model == "fm":
-        rank = int(group["fm_rank"].iloc[0])
-        return f"FM (rank {rank}, {parameters}/feature)"
-    dim = int(group["matrix_dim"].iloc[0])
-    return f"Spectral (dim {dim}, {parameters}/feature)"
+CRITEO_MODEL_LABELS = {
+    "linear": "Linear",
+    "linear-new": "Linear-new",
+    "fm": "FM",
+    "spectral-old": "Spectral-old",
+    "spectral-new": "Spectral-new",
+}
+
+CRITEO_MODEL_COLORS = {
+    "Linear": "#555555",
+    "Linear-new": "#CC78BC",
+    "FM": "#0173B2",
+    "Spectral-old": "#DE8F05",
+    "Spectral-new": "#029E73",
+}
+
+CRITEO_MODEL_MARKERS = {
+    "Linear": "o",
+    "Linear-new": "P",
+    "FM": "s",
+    "Spectral-old": "^",
+    "Spectral-new": "D",
+}
+
+CRITEO_MODEL_DASHES = {
+    "Linear": "",
+    "Linear-new": (2, 2),
+    "FM": "",
+    "Spectral-old": (4, 2),
+    "Spectral-new": "",
+}
+
+type CriteoSpectralVariant = Literal["spectral-old", "spectral-new"]
 
 
-def plot_criteo_scaling(
-    summary: pd.DataFrame,
-    *,
-    metric: str = "logloss",
-) -> Figure:
-    """Plot validation-selected Criteo test performance against training size."""
+def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
     if metric not in CRITEO_METRIC_LABELS:
         raise ValueError(
             f"metric must be one of {sorted(CRITEO_METRIC_LABELS)}; got {metric!r}"
         )
 
-    value = f"median_test_{metric}"
-    q25 = f"q25_test_{metric}"
-    q75 = f"q75_test_{metric}"
+    value = f"test_{metric}"
     required = {
         "train_size",
         "model",
         "matrix_dim",
-        "fm_rank",
         "parameters_per_feature",
         value,
-        q25,
-        q75,
     }
-    missing = required.difference(summary.columns)
+    missing = required.difference(results.columns)
     if missing:
-        raise ValueError(f"summary is missing columns: {sorted(missing)}")
+        raise ValueError(f"results are missing columns: {sorted(missing)}")
+    return value
 
-    fig, ax = plt.subplots(figsize=(8.5, 4.5), layout="constrained")
-    capacities = sorted(
-        summary.loc[summary["model"] != "linear", "parameters_per_feature"].unique()
-    )
-    colors = _scaling_dim_colors(capacities)
-    curves = [("linear", 1)] + [
-        (model, capacity)
-        for capacity in capacities
-        for model in ("fm", "spectral")
-    ]
-    styles = {
-        "linear": ("#555555", "-", "o"),
-        "fm": (None, "-", "s"),
-        "spectral": (None, "--", "^"),
-    }
 
-    for model, capacity in curves:
-        group = summary.loc[
-            (summary["model"] == model)
-            & (summary["parameters_per_feature"] == capacity)
-        ].sort_values("train_size")
-        if group.empty:
-            continue
+def _spectral_dimensions(results: pd.DataFrame) -> list[int]:
+    values = results.loc[
+        results["model"].isin(("spectral-old", "spectral-new")),
+        "matrix_dim",
+    ].unique()
+    dimensions = sorted(map(int, values))
+    if not dimensions:
+        raise ValueError("results contain no spectral models")
+    return dimensions
 
-        default_color, linestyle, marker = styles[model]
-        color = default_color or colors[capacity]
-        x = group["train_size"].to_numpy()
-        ax.plot(
-            x,
-            group[value],
-            color=color,
-            linestyle=linestyle,
-            marker=marker,
-            label=_criteo_curve_label(model, group),
-        )
-        ax.fill_between(x, group[q25], group[q75], color=color, alpha=0.12)
 
+def _finish_criteo_grid(grid: sns.FacetGrid, *, metric: str, title: str) -> Figure:
     label = CRITEO_METRIC_LABELS[metric]
-    ax.set(
-        title=f"Criteo {label}",
-        xlabel="training impressions",
-        ylabel=f"{label} ↓",
+    grid.set_axis_labels("training impressions", f"{label} ↓")
+    for ax in grid.axes.flat:
+        ax.set_xscale("log", base=2)
+        ax.grid(True, alpha=0.25)
+    grid.figure.suptitle(title, y=1.02)
+    return grid.figure
+
+
+def _criteo_relplot(
+    results: pd.DataFrame,
+    *,
+    metric: str,
+    title: str,
+    hue: str,
+    style: str,
+    hue_order: list | None = None,
+    palette=None,
+    markers=True,
+    dashes=True,
+    col: str | None = None,
+) -> Figure:
+    value = _check_criteo_results(results, metric)
+    facet = {"col": col, "col_wrap": 2} if col is not None else {}
+    grid = sns.relplot(
+        data=results,
+        x="train_size",
+        y=value,
+        hue=hue,
+        style=style,
+        hue_order=hue_order,
+        style_order=hue_order,
+        palette=palette,
+        markers=markers,
+        dashes=dashes,
+        kind="line",
+        estimator=np.median,
+        errorbar=("pi", 50),
+        err_kws={"alpha": 0.12},
+        height=3.5,
+        aspect=1.25,
+        facet_kws={"sharex": True, "sharey": True},
+        **facet,
     )
-    ax.set_xscale("log", base=2)
-    ax.grid(True, alpha=0.25)
-    ax.legend(frameon=False, fontsize="small", ncols=2)
-    return fig
+    if col is not None:
+        grid.set_titles("dim={col_name}")
+    if grid.legend is not None:
+        grid.legend.set_title("model" if hue == "model_label" else "dimension")
+    return _finish_criteo_grid(grid, metric=metric, title=title)
+
+
+def _label_criteo_models(results: pd.DataFrame) -> pd.DataFrame:
+    labeled = results.copy()
+    labeled["model_label"] = labeled["model"].map(CRITEO_MODEL_LABELS)
+    return labeled
+
+
+def plot_criteo_models_by_dimension(
+    results: pd.DataFrame,
+    *,
+    metric: str = "logloss",
+) -> Figure:
+    """Compare parameter-matched models in one facet per spectral dimension."""
+    _check_criteo_results(results, metric)
+    dimensions = _spectral_dimensions(results)
+    dimension_by_capacity = {dim * (dim + 1) // 2: dim for dim in dimensions}
+
+    nonlinear = results.loc[
+        results["model"].isin(("fm", "spectral-old", "spectral-new"))
+    ].copy()
+    nonlinear["dimension"] = nonlinear["parameters_per_feature"].map(
+        dimension_by_capacity
+    )
+    if nonlinear["dimension"].isna().any():
+        raise ValueError("some nonlinear models have no matched spectral dimension")
+
+    linears = results.loc[
+        results["model"].isin(("linear", "linear-new"))
+    ].merge(
+        pd.DataFrame({"dimension": dimensions}), how="cross"
+    )
+    faceted = _label_criteo_models(pd.concat((linears, nonlinear)))
+    model_order = list(CRITEO_MODEL_LABELS.values())
+    return _criteo_relplot(
+        faceted,
+        metric=metric,
+        title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: matched models",
+        hue="model_label",
+        style="model_label",
+        hue_order=model_order,
+        palette=CRITEO_MODEL_COLORS,
+        markers=CRITEO_MODEL_MARKERS,
+        dashes=CRITEO_MODEL_DASHES,
+        col="dimension",
+    )
+
+
+def plot_criteo_spectral_comparison(
+    results: pd.DataFrame,
+    *,
+    metric: str = "logloss",
+) -> Figure:
+    """Compare old and new spectral preprocessing in one facet per dimension."""
+    spectral = _label_criteo_models(
+        results.loc[results["model"].isin(("spectral-old", "spectral-new"))]
+    )
+    model_order = ["Spectral-old", "Spectral-new"]
+    return _criteo_relplot(
+        spectral,
+        metric=metric,
+        title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: spectral preprocessing",
+        hue="model_label",
+        style="model_label",
+        hue_order=model_order,
+        palette=CRITEO_MODEL_COLORS,
+        markers=CRITEO_MODEL_MARKERS,
+        dashes=CRITEO_MODEL_DASHES,
+        col="matrix_dim",
+    )
+
+
+def plot_criteo_spectral_dimensions(
+    results: pd.DataFrame,
+    variant: CriteoSpectralVariant,
+    *,
+    metric: str = "logloss",
+) -> Figure:
+    """Compare all dimensions of one spectral preprocessing variant."""
+    if variant not in ("spectral-old", "spectral-new"):
+        raise ValueError(f"unknown spectral variant {variant!r}")
+    spectral = results.loc[results["model"] == variant]
+    dimensions = _spectral_dimensions(spectral)
+    palette = dict(zip(dimensions, sns.color_palette("colorblind", len(dimensions))))
+    markers = dict(zip(dimensions, ("o", "s", "^", "D")))
+    return _criteo_relplot(
+        spectral,
+        metric=metric,
+        title=(
+            f"Criteo {CRITEO_METRIC_LABELS[metric]}: "
+            f"{CRITEO_MODEL_LABELS[variant]} across dimensions"
+        ),
+        hue="matrix_dim",
+        style="matrix_dim",
+        hue_order=dimensions,
+        palette=palette,
+        markers=markers,
+        dashes=False,
+    )
 
 
 def plot_target_gallery(specs: list[TargetSpec]):

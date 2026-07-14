@@ -11,7 +11,7 @@ from torch import nn
 from paper.tasks import Task
 
 type Event = dict[str, Any]
-type TensorBatch = tuple[torch.Tensor, torch.Tensor]
+type TensorBatch = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 type BatchFactory = Callable[[], Iterable[TensorBatch]]
 
 
@@ -128,8 +128,10 @@ def train_binary_scaling_events(
 
     for train_size in checkpoints:
         model.train()
-        for feature_ids, labels in task.train_batches(start, train_size):
-            logits = model(feature_ids)
+        for feature_ids, feature_values, labels in task.train_batches(
+            start, train_size
+        ):
+            logits = model(feature_ids, feature_values)
             loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
             optimizer.zero_grad()
@@ -158,8 +160,8 @@ def evaluate_binary(
     total_samples = 0
     try:
         with torch.inference_mode():
-            for feature_ids, labels in batches:
-                logits = model(feature_ids)
+            for feature_ids, feature_values, labels in batches:
+                logits = model(feature_ids, feature_values)
                 total_logloss += nn.functional.binary_cross_entropy_with_logits(
                     logits, labels, reduction="sum"
                 ).item()

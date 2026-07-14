@@ -16,9 +16,10 @@ from tqdm.contrib.concurrent import process_map
 from paper.criteo import (
     NUM_FIELDS,
     CriteoCorpus,
-    CriteoPreprocessor,
     CriteoTask,
-    fit_preprocessor,
+    PreprocessingKind,
+    fit_preprocessors,
+    load_preprocessor,
     prepare_corpus,
 )
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, _write_csv
@@ -29,7 +30,21 @@ from paper.training import (
 )
 
 
-type SparseModelKind = Literal["linear", "fm", "spectral"]
+type Variant = Literal[
+    "linear",
+    "linear-new",
+    "fm",
+    "spectral-old",
+    "spectral-new",
+]
+
+VARIANTS: tuple[Variant, ...] = (
+    "linear",
+    "linear-new",
+    "fm",
+    "spectral-old",
+    "spectral-new",
+)
 
 PROTOCOL = "one_pass"
 
@@ -40,6 +55,7 @@ RAW_COLUMNS = [
     "train_size",
     "data_seed",
     "model",
+    "preprocessing",
     "matrix_dim",
     "eig_idx",
     "fm_rank",
@@ -67,6 +83,7 @@ EXPERIMENT_COLUMNS = [
 MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "train_size",
     "model",
+    "preprocessing",
     "matrix_dim",
     "eig_idx",
     "fm_rank",
@@ -78,6 +95,7 @@ RUN_COLUMNS = EXPERIMENT_COLUMNS + [
     "train_size",
     "data_seed",
     "model",
+    "preprocessing",
     "matrix_dim",
     "eig_idx",
     "fm_rank",
@@ -131,25 +149,33 @@ PROFILES: dict[str, Profile] = {
 
 @dataclass(frozen=True)
 class ModelSpec:
-    kind: SparseModelKind
+    variant: Variant
     matrix_dim: int = 0
     fm_rank: int = 0
     parameters_per_feature: int = 1
+
+    @property
+    def preprocessing(self) -> PreprocessingKind:
+        return "hybrid" if self.variant.endswith("-new") else "bucket"
 
     @classmethod
     def fm_for_dim(cls, dim: int) -> "ModelSpec":
         parameters = dim * (dim + 1) // 2
         return cls(
-            kind="fm",
+            variant="fm",
             fm_rank=parameters - 1,
             parameters_per_feature=parameters,
         )
 
     @classmethod
-    def spectral(cls, dim: int) -> "ModelSpec":
+    def spectral(
+        cls,
+        variant: Literal["spectral-old", "spectral-new"],
+        dim: int,
+    ) -> "ModelSpec":
         parameters = dim * (dim + 1) // 2
         return cls(
-            kind="spectral",
+            variant=variant,
             matrix_dim=dim,
             parameters_per_feature=parameters,
         )
@@ -166,14 +192,21 @@ class RunConfig:
 @dataclass(frozen=True)
 class RunGrid:
     profile: Profile
+    variants: tuple[Variant, ...] = VARIANTS
 
     @property
     def model_specs(self) -> tuple[ModelSpec, ...]:
-        return (ModelSpec("linear"),) + tuple(
+        specs = [ModelSpec("linear"), ModelSpec("linear-new")]
+        specs.extend(
             spec
             for dim in self.profile.dims
-            for spec in (ModelSpec.fm_for_dim(dim), ModelSpec.spectral(dim))
+            for spec in (
+                ModelSpec.fm_for_dim(dim),
+                ModelSpec.spectral("spectral-old", dim),
+                ModelSpec.spectral("spectral-new", dim),
+            )
         )
+        return tuple(spec for spec in specs if spec.variant in self.variants)
 
     def __len__(self) -> int:
         return (
@@ -198,7 +231,7 @@ class RunSettings:
     cache_dir: Path
     train_sizes: tuple[int, ...]
     batch_size: int
-    preprocessor_path: Path
+    preprocessor_paths: dict[PreprocessingKind, Path]
     preprocessor_sample_size: int
     preprocessor_seed: int
     threads_per_worker: int | None
@@ -211,15 +244,15 @@ class SelectedRun:
 
 
 def make_model(spec: ModelSpec, num_features: int) -> nn.Module:
-    match spec.kind:
-        case "linear":
+    match spec.variant:
+        case "linear" | "linear-new":
             return SparseLinear(num_features, NUM_FIELDS)
         case "fm":
             return FactorizationMachine(num_features, NUM_FIELDS, spec.fm_rank)
-        case "spectral":
+        case "spectral-old" | "spectral-new":
             return SparseKthEigval(num_features, NUM_FIELDS, spec.matrix_dim)
         case _:
-            raise ValueError(spec.kind)
+            raise ValueError(spec.variant)
 
 
 def _make_seeded_model(
@@ -237,7 +270,8 @@ def _make_task_model(
         torch.set_num_threads(settings.threads_per_worker)
 
     corpus = CriteoCorpus.open(settings.cache_dir)
-    preprocessor = CriteoPreprocessor.load(settings.preprocessor_path)
+    preprocessing = config.model_spec.preprocessing
+    preprocessor = load_preprocessor(settings.preprocessor_paths[preprocessing])
     order = np.load(corpus.order_path(config.data_seed), mmap_mode="r")
     task = CriteoTask(
         corpus=corpus,
@@ -263,11 +297,12 @@ def _metadata(
         "preprocessor_sample_size": settings.preprocessor_sample_size,
         "preprocessor_seed": settings.preprocessor_seed,
         "data_seed": config.data_seed,
-        "model": config.model_spec.kind,
+        "model": config.model_spec.variant,
+        "preprocessing": config.model_spec.preprocessing,
         "matrix_dim": config.model_spec.matrix_dim,
         "eig_idx": (
             config.model_spec.matrix_dim // 2
-            if config.model_spec.kind == "spectral"
+            if config.model_spec.variant.startswith("spectral-")
             else -1
         ),
         "fm_rank": config.model_spec.fm_rank,
@@ -335,11 +370,14 @@ def run_profile(
     cache_dir: Path,
     chunk_size: int = 1_000_000,
     workers: int = 1,
+    variant: Variant | None = None,
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> pd.DataFrame:
     if workers < 1:
         raise ValueError(f"workers must be positive; got {workers}")
+    if variant is not None and variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}")
     if not profile.train_sizes or profile.train_sizes != tuple(
         sorted(set(profile.train_sizes))
     ):
@@ -361,8 +399,14 @@ def run_profile(
         )
 
     sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
-    preprocessor_path = fit_preprocessor(
+    variants = (variant,) if variant is not None else VARIANTS
+    configs = RunGrid(profile, variants)
+    preprocessing_kinds = tuple(
+        dict.fromkeys(spec.preprocessing for spec in configs.model_specs)
+    )
+    preprocessor_paths = fit_preprocessors(
         corpus,
+        preprocessing_kinds,
         sample_size=sample_size,
         sample_seed=profile.preprocessor_seed,
         min_count=profile.min_count,
@@ -373,12 +417,11 @@ def run_profile(
     for data_seed in profile.data_seeds:
         corpus.order_path(data_seed)
 
-    configs = RunGrid(profile)
     settings = RunSettings(
         cache_dir=cache_dir,
         train_sizes=profile.train_sizes,
         batch_size=profile.batch_size,
-        preprocessor_path=preprocessor_path,
+        preprocessor_paths=preprocessor_paths,
         preprocessor_sample_size=sample_size,
         preprocessor_seed=profile.preprocessor_seed,
         threads_per_worker=1 if workers > 1 else None,
@@ -479,8 +522,9 @@ def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def default_raw_path(profile_name: str) -> Path:
-    return DEFAULT_RUNS_DIR / f"criteo_scaling_{profile_name}.csv"
+def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
+    suffix = f"_{variant}" if variant is not None else ""
+    return DEFAULT_RUNS_DIR / f"criteo_scaling_{profile_name}{suffix}.csv"
 
 
 def build_arg_parser(
@@ -492,6 +536,7 @@ def build_arg_parser(
     )
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
+    parser.add_argument("--variant", choices=VARIANTS, default=None)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--summary-out", type=Path, default=None)
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
@@ -504,18 +549,19 @@ def build_arg_parser(
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     profile = PROFILES[args.profile]
-    cache_dir = args.cache_dir or args.data.with_name(f".{args.data.name}.cache")
+    cache_dir = args.cache_dir or args.data.with_name(f".{args.data.name}.cache-v2")
     raw = run_profile(
         profile,
         raw_path=args.data,
         cache_dir=cache_dir,
         chunk_size=args.chunk_size,
         workers=args.workers,
+        variant=args.variant,
         progress=not args.quiet,
     )
     _write_csv(
         raw,
-        args.out or default_raw_path(args.profile),
+        args.out or default_raw_path(args.profile, args.variant),
         write_mode=args.write_mode,
     )
     if args.summary_out is not None:

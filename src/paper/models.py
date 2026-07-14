@@ -42,8 +42,24 @@ class KthEigval(nn.Module):
         return eigvals[..., self.eig_idx]
 
 
+def _check_sparse_input(
+    feature_ids: torch.Tensor,
+    feature_values: torch.Tensor,
+    num_fields: int,
+) -> None:
+    if feature_ids.shape[-1:] != (num_fields,):
+        raise ValueError(
+            f"expected input shape (..., {num_fields}); got {tuple(feature_ids.shape)}"
+        )
+    if feature_values.shape != feature_ids.shape:
+        raise ValueError(
+            f"feature values must have shape {tuple(feature_ids.shape)}; "
+            f"got {tuple(feature_values.shape)}"
+        )
+
+
 class SparseLinear(nn.Module):
-    """A linear logit over a fixed number of active categorical features."""
+    """A linear logit over weighted sparse features."""
 
     def __init__(self, num_features: int, num_fields: int):
         super().__init__()
@@ -52,16 +68,14 @@ class SparseLinear(nn.Module):
         self.bias = nn.Parameter(torch.zeros(()))
         nn.init.zeros_(self.weight.weight)
 
-    def forward(self, feature_ids: torch.Tensor) -> torch.Tensor:
-        self._check_input(feature_ids)
-        return self.weight(feature_ids).sum(dim=-2).squeeze(-1) + self.bias
-
-    def _check_input(self, feature_ids: torch.Tensor) -> None:
-        if feature_ids.shape[-1:] != (self.num_fields,):
-            raise ValueError(
-                f"expected input shape (..., {self.num_fields}); "
-                f"got {tuple(feature_ids.shape)}"
-            )
+    def forward(
+        self,
+        feature_ids: torch.Tensor,
+        feature_values: torch.Tensor,
+    ) -> torch.Tensor:
+        _check_sparse_input(feature_ids, feature_values, self.num_fields)
+        weighted = self.weight(feature_ids).squeeze(-1) * feature_values
+        return weighted.sum(dim=-1) + self.bias
 
 
 class FactorizationMachine(SparseLinear):
@@ -75,10 +89,17 @@ class FactorizationMachine(SparseLinear):
         self.embedding = nn.Embedding(num_features, rank, sparse=True)
         nn.init.normal_(self.embedding.weight, std=1e-2)
 
-    def forward(self, feature_ids: torch.Tensor) -> torch.Tensor:
-        self._check_input(feature_ids)
-        linear = self.weight(feature_ids).sum(dim=-2).squeeze(-1) + self.bias
-        vectors = self.embedding(feature_ids)
+    def forward(
+        self,
+        feature_ids: torch.Tensor,
+        feature_values: torch.Tensor,
+    ) -> torch.Tensor:
+        _check_sparse_input(feature_ids, feature_values, self.num_fields)
+        linear = (
+            (self.weight(feature_ids).squeeze(-1) * feature_values).sum(dim=-1)
+            + self.bias
+        )
+        vectors = self.embedding(feature_ids) * feature_values.unsqueeze(-1)
         interaction = 0.5 * (
             vectors.sum(dim=-2).square().sum(dim=-1)
             - vectors.square().sum(dim=(-2, -1))
@@ -114,13 +135,14 @@ class SparseKthEigval(nn.Module):
         nn.init.uniform_(self.feature_tril.weight, -bound, bound)
         nn.init.uniform_(self.base_tril, -bound, bound)
 
-    def forward(self, feature_ids: torch.Tensor) -> torch.Tensor:
-        if feature_ids.shape[-1:] != (self.num_fields,):
-            raise ValueError(
-                f"expected input shape (..., {self.num_fields}); "
-                f"got {tuple(feature_ids.shape)}"
-            )
-        tril = self.base_tril + self.feature_tril(feature_ids).sum(dim=-2)
+    def forward(
+        self,
+        feature_ids: torch.Tensor,
+        feature_values: torch.Tensor,
+    ) -> torch.Tensor:
+        _check_sparse_input(feature_ids, feature_values, self.num_fields)
+        weighted = self.feature_tril(feature_ids) * feature_values.unsqueeze(-1)
+        tril = self.base_tril + weighted.sum(dim=-2)
         return torch.linalg.eigvalsh(self.tril_emb(tril))[..., self.eig_idx]
 
 

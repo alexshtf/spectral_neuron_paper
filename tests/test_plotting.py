@@ -8,7 +8,9 @@ import pytest
 
 from paper.plotting import (
     plot_bivariate_target_gallery,
-    plot_criteo_scaling,
+    plot_criteo_models_by_dimension,
+    plot_criteo_spectral_comparison,
+    plot_criteo_spectral_dimensions,
     plot_scaling,
 )
 from paper.targets import TargetSpec
@@ -189,45 +191,81 @@ def test_plot_bivariate_target_gallery_draws_contours():
         plt.close(fig)
 
 
-def test_plot_criteo_scaling_pairs_models_by_parameter_count():
+def _criteo_results() -> pd.DataFrame:
     rows = []
     for train_size in (2**14, 2**18):
-        for model, dim, rank, parameters in (
-            ("linear", 0, 0, 1),
-            ("fm", 0, 5, 6),
-            ("spectral", 3, 0, 6),
-            ("fm", 0, 14, 15),
-            ("spectral", 5, 0, 15),
-        ):
+        for seed in range(3):
             rows.append(
                 {
                     "train_size": train_size,
-                    "model": model,
-                    "matrix_dim": dim,
-                    "fm_rank": rank,
-                    "parameters_per_feature": parameters,
-                    "median_test_logloss": 0.5,
-                    "q25_test_logloss": 0.49,
-                    "q75_test_logloss": 0.51,
+                    "model": "linear",
+                    "matrix_dim": 0,
+                    "parameters_per_feature": 1,
+                    "test_logloss": 0.5 + seed / 100,
                 }
             )
+            rows.append(
+                {
+                    "train_size": train_size,
+                    "model": "linear-new",
+                    "matrix_dim": 0,
+                    "parameters_per_feature": 1,
+                    "test_logloss": 0.49 + seed / 100,
+                }
+            )
+            for dim, parameters in ((3, 6), (5, 15)):
+                for model in ("fm", "spectral-old", "spectral-new"):
+                    rows.append(
+                        {
+                            "train_size": train_size,
+                            "model": model,
+                            "matrix_dim": dim if model.startswith("spectral") else 0,
+                            "parameters_per_feature": parameters,
+                            "test_logloss": 0.5 + dim / 100 + seed / 1000,
+                        }
+                    )
+    return pd.DataFrame(rows)
 
-    fig = plot_criteo_scaling(pd.DataFrame(rows))
+
+def _legend_labels(fig) -> list[str]:
+    return [text.get_text() for text in fig.legends[0].get_texts()]
+
+
+def test_plot_criteo_models_by_dimension_facets_matched_models():
+    fig = plot_criteo_models_by_dimension(_criteo_results())
     try:
-        ax = fig.axes[0]
-        lines = {line.get_label(): line for line in ax.lines}
+        assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
+        assert _legend_labels(fig) == [
+            "Linear",
+            "Linear-new",
+            "FM",
+            "Spectral-old",
+            "Spectral-new",
+        ]
+        assert fig.legends[0].get_title().get_text() == "model"
+        assert len(fig.axes[1].lines) == 5
+        assert all(ax.get_xscale() == "log" for ax in fig.axes)
+    finally:
+        plt.close(fig)
 
-        assert len(lines) == 5
-        assert (
-            lines["FM (rank 5, 6/feature)"].get_color()
-            == lines["Spectral (dim 3, 6/feature)"].get_color()
-        )
-        assert (
-            lines["FM (rank 14, 15/feature)"].get_color()
-            == lines["Spectral (dim 5, 15/feature)"].get_color()
-        )
-        assert lines["FM (rank 5, 6/feature)"].get_linestyle() == "-"
-        assert lines["Spectral (dim 3, 6/feature)"].get_linestyle() == "--"
-        assert ax.get_xscale() == "log"
+
+def test_plot_criteo_spectral_comparison_facets_dimensions():
+    fig = plot_criteo_spectral_comparison(_criteo_results())
+    try:
+        assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
+        assert _legend_labels(fig) == ["Spectral-old", "Spectral-new"]
+        assert fig.legends[0].get_title().get_text() == "model"
+        assert len(fig.axes[1].lines) == 2
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("variant", ["spectral-old", "spectral-new"])
+def test_plot_criteo_spectral_dimensions_uses_one_axis(variant):
+    fig = plot_criteo_spectral_dimensions(_criteo_results(), variant)
+    try:
+        assert len(fig.axes) == 1
+        assert _legend_labels(fig) == ["3", "5"]
+        assert fig.legends[0].get_title().get_text() == "dimension"
     finally:
         plt.close(fig)

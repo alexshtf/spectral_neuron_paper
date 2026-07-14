@@ -3,6 +3,7 @@ import pytest
 import torch
 from torch import nn
 
+from paper.models import SparseLinear
 from paper.tasks import Task
 from paper.training import (
     fit_and_test_binary_scaling,
@@ -69,9 +70,13 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
             for batch_start in range(start, stop, 2):
                 rows = list(range(batch_start, min(batch_start + 2, stop)))
                 seen.extend(rows)
-                yield torch.ones(len(rows), 1), torch.zeros(len(rows))
+                yield (
+                    torch.zeros(len(rows), 1, dtype=torch.long),
+                    torch.ones(len(rows), 1),
+                    torch.zeros(len(rows)),
+                )
 
-    model = CountingLinear([0])
+    model = SparseLinear(num_features=1, num_fields=1)
     events = list(
         train_binary_scaling_events(
             RecordingTask(),
@@ -92,15 +97,23 @@ def test_binary_scaling_tests_only_selected_checkpoints():
         @staticmethod
         def train_batches(start: int, stop: int):
             seen.extend(range(start, stop))
-            yield torch.ones(stop - start, 1), torch.zeros(stop - start)
+            yield (
+                torch.zeros(stop - start, 1, dtype=torch.long),
+                torch.ones(stop - start, 1),
+                torch.zeros(stop - start),
+            )
 
         @staticmethod
         def test_batches():
-            yield torch.ones(1, 1), torch.zeros(1)
+            yield (
+                torch.zeros(1, 1, dtype=torch.long),
+                torch.ones(1, 1),
+                torch.zeros(1),
+            )
 
     result = fit_and_test_binary_scaling(
         RecordingTask(),
-        CountingLinear([0]),
+        SparseLinear(num_features=1, num_fields=1),
         lr=0.1,
         checkpoints=(3, 5, 7),
         test_checkpoints=(3, 7),
