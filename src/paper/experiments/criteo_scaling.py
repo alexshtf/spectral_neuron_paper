@@ -23,12 +23,20 @@ from paper.criteo import (
 )
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, _write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
-from paper.training import fit_and_test_binary, tune_binary_stream
+from paper.training import (
+    fit_and_test_binary_scaling,
+    tune_binary_scaling_stream,
+)
 
 
 type SparseModelKind = Literal["linear", "fm", "spectral"]
 
+PROTOCOL = "one_pass"
+
 RAW_COLUMNS = [
+    "protocol",
+    "preprocessor_sample_size",
+    "preprocessor_seed",
     "train_size",
     "data_seed",
     "model",
@@ -39,8 +47,6 @@ RAW_COLUMNS = [
     "num_parameters",
     "lr",
     "init_seed",
-    "epoch",
-    "epochs_run",
     "train_logloss",
     "val_logloss",
     "val_brier",
@@ -52,7 +58,13 @@ RAW_COLUMNS = [
 TEST_COLUMNS = ["test_logloss", "test_brier"]
 TUNING_COLUMNS = [column for column in RAW_COLUMNS if column not in TEST_COLUMNS]
 
-MODEL_COLUMNS = [
+EXPERIMENT_COLUMNS = [
+    "protocol",
+    "preprocessor_sample_size",
+    "preprocessor_seed",
+]
+
+MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "train_size",
     "model",
     "matrix_dim",
@@ -62,7 +74,7 @@ MODEL_COLUMNS = [
     "num_parameters",
 ]
 
-RUN_COLUMNS = [
+RUN_COLUMNS = EXPERIMENT_COLUMNS + [
     "train_size",
     "data_seed",
     "model",
@@ -84,8 +96,8 @@ class Profile:
     init_seeds: range
     data_seeds: range = range(1)
     batch_size: int = 4096
-    max_epochs: int = 20
-    patience: int = 2
+    preprocessor_fraction: float = 0.1
+    preprocessor_seed: int = 0
     min_count: int = 10
     buckets_per_field: int = 2**15
 
@@ -97,8 +109,6 @@ PROFILES: dict[str, Profile] = {
         lrs=(1e-2,),
         init_seeds=range(1),
         batch_size=256,
-        max_epochs=2,
-        patience=1,
         min_count=2,
         buckets_per_field=2**8,
     ),
@@ -112,7 +122,7 @@ PROFILES: dict[str, Profile] = {
     "full": Profile(
         train_sizes=(*tuple(2**power for power in range(14, 26, 2)), 2**25, 36_672_493),
         dims=(3, 5, 9, 15),
-        lrs=tuple(np.geomspace(1e-3, 1e-1, 3).tolist()),
+        lrs=tuple(np.geomspace(1e-3, 1e-1, 8).tolist()),
         init_seeds=range(3),
         batch_size=4096,
     ),
@@ -147,7 +157,6 @@ class ModelSpec:
 
 @dataclass(frozen=True)
 class RunConfig:
-    train_size: int
     data_seed: int
     model_spec: ModelSpec
     lr: float
@@ -168,39 +177,37 @@ class RunGrid:
 
     def __len__(self) -> int:
         return (
-            len(self.profile.train_sizes)
-            * len(self.profile.data_seeds)
+            len(self.profile.data_seeds)
             * len(self.model_specs)
             * len(self.profile.lrs)
             * len(self.profile.init_seeds)
         )
 
     def __iter__(self) -> Iterator[RunConfig]:
-        for train_size, data_seed, model_spec, lr, init_seed in product(
-            self.profile.train_sizes,
+        for data_seed, model_spec, lr, init_seed in product(
             self.profile.data_seeds,
             self.model_specs,
             self.profile.lrs,
             self.profile.init_seeds,
         ):
-            yield RunConfig(train_size, data_seed, model_spec, lr, init_seed)
+            yield RunConfig(data_seed, model_spec, lr, init_seed)
 
 
 @dataclass(frozen=True)
 class RunSettings:
     cache_dir: Path
+    train_sizes: tuple[int, ...]
     batch_size: int
-    max_epochs: int
-    patience: int
-    min_count: int
-    buckets_per_field: int
+    preprocessor_path: Path
+    preprocessor_sample_size: int
+    preprocessor_seed: int
     threads_per_worker: int | None
 
 
 @dataclass(frozen=True)
 class SelectedRun:
     config: RunConfig
-    epoch: int
+    train_sizes: tuple[int, ...]
 
 
 def make_model(spec: ModelSpec, num_features: int) -> nn.Module:
@@ -230,21 +237,13 @@ def _make_task_model(
         torch.set_num_threads(settings.threads_per_worker)
 
     corpus = CriteoCorpus.open(settings.cache_dir)
-    preprocessor_path = fit_preprocessor(
-        corpus,
-        train_size=config.train_size,
-        data_seed=config.data_seed,
-        min_count=settings.min_count,
-        buckets_per_field=settings.buckets_per_field,
-    )
-    preprocessor = CriteoPreprocessor.load(preprocessor_path)
+    preprocessor = CriteoPreprocessor.load(settings.preprocessor_path)
     order = np.load(corpus.order_path(config.data_seed), mmap_mode="r")
     task = CriteoTask(
         corpus=corpus,
         preprocessor=preprocessor,
-        train_rows=order[: config.train_size],
+        train_rows=order[: max(settings.train_sizes)],
         batch_size=settings.batch_size,
-        train_seed=config.init_seed,
     )
     model = _make_seeded_model(
         config.model_spec,
@@ -254,9 +253,15 @@ def _make_task_model(
     return task, model
 
 
-def _metadata(config: RunConfig, model: nn.Module) -> dict[str, int | float | str]:
+def _metadata(
+    config: RunConfig,
+    model: nn.Module,
+    settings: RunSettings,
+) -> dict[str, int | float | str]:
     return {
-        "train_size": config.train_size,
+        "protocol": PROTOCOL,
+        "preprocessor_sample_size": settings.preprocessor_sample_size,
+        "preprocessor_seed": settings.preprocessor_seed,
         "data_seed": config.data_seed,
         "model": config.model_spec.kind,
         "matrix_dim": config.model_spec.matrix_dim,
@@ -275,26 +280,52 @@ def _metadata(config: RunConfig, model: nn.Module) -> dict[str, int | float | st
 
 def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
     task, model = _make_task_model(config, settings)
-    result = tune_binary_stream(
+    result = tune_binary_scaling_stream(
         task,
         model,
         lr=config.lr,
-        max_epochs=settings.max_epochs,
-        patience=settings.patience,
+        checkpoints=settings.train_sizes,
     )
-    return result.assign(**_metadata(config, model)).loc[:, TUNING_COLUMNS]
+    return result.assign(**_metadata(config, model, settings)).loc[:, TUNING_COLUMNS]
 
 
 def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
     task, model = _make_task_model(selected.config, settings)
-    metrics = fit_and_test_binary(
+    checkpoints = tuple(
+        size for size in settings.train_sizes if size <= max(selected.train_sizes)
+    )
+    result = fit_and_test_binary_scaling(
         task,
         model,
         lr=selected.config.lr,
-        epochs=selected.epoch,
+        checkpoints=checkpoints,
+        test_checkpoints=selected.train_sizes,
     )
-    test = {f"test_{key}": value for key, value in metrics.items()}
-    return pd.DataFrame([_metadata(selected.config, model) | test])
+    return result.assign(**_metadata(selected.config, model, settings)).loc[
+        :, RUN_COLUMNS + TEST_COLUMNS
+    ]
+
+
+def _selected_runs(tuning: pd.DataFrame) -> list[SelectedRun]:
+    train_sizes: dict[RunConfig, list[int]] = {}
+    for row in select_lr(tuning).itertuples(index=False):
+        config = RunConfig(
+            data_seed=row.data_seed,
+            model_spec=ModelSpec(
+                row.model,
+                matrix_dim=row.matrix_dim,
+                fm_rank=row.fm_rank,
+                parameters_per_feature=row.parameters_per_feature,
+            ),
+            lr=row.lr,
+            init_seed=row.init_seed,
+        )
+        train_sizes.setdefault(config, []).append(row.train_size)
+
+    return [
+        SelectedRun(config, tuple(sorted(set(sizes))))
+        for config, sizes in train_sizes.items()
+    ]
 
 
 def run_profile(
@@ -309,6 +340,12 @@ def run_profile(
 ) -> pd.DataFrame:
     if workers < 1:
         raise ValueError(f"workers must be positive; got {workers}")
+    if not profile.train_sizes or profile.train_sizes != tuple(
+        sorted(set(profile.train_sizes))
+    ):
+        raise ValueError("train_sizes must be non-empty, unique, and increasing")
+    if not 0 < profile.preprocessor_fraction <= 1:
+        raise ValueError("preprocessor_fraction must be in (0, 1]")
 
     corpus = prepare_corpus(
         raw_path,
@@ -323,27 +360,27 @@ def run_profile(
             f"but the 80% split contains {corpus.train_stop}"
         )
 
+    sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
+    preprocessor_path = fit_preprocessor(
+        corpus,
+        sample_size=sample_size,
+        sample_seed=profile.preprocessor_seed,
+        min_count=profile.min_count,
+        buckets_per_field=profile.buckets_per_field,
+        progress=progress,
+        progress_file=progress_file,
+    )
     for data_seed in profile.data_seeds:
         corpus.order_path(data_seed)
-        for train_size in profile.train_sizes:
-            fit_preprocessor(
-                corpus,
-                train_size=train_size,
-                data_seed=data_seed,
-                min_count=profile.min_count,
-                buckets_per_field=profile.buckets_per_field,
-                progress=progress,
-                progress_file=progress_file,
-            )
 
     configs = RunGrid(profile)
     settings = RunSettings(
         cache_dir=cache_dir,
+        train_sizes=profile.train_sizes,
         batch_size=profile.batch_size,
-        max_epochs=profile.max_epochs,
-        patience=profile.patience,
-        min_count=profile.min_count,
-        buckets_per_field=profile.buckets_per_field,
+        preprocessor_path=preprocessor_path,
+        preprocessor_sample_size=sample_size,
+        preprocessor_seed=profile.preprocessor_seed,
         threads_per_worker=1 if workers > 1 else None,
     )
     tune = partial(run_config, settings=settings)
@@ -351,7 +388,8 @@ def run_profile(
         items = tqdm(
             configs,
             total=len(configs),
-            unit="fit",
+            desc="Tuning",
+            unit="trajectory",
             disable=not progress,
             file=progress_file,
         )
@@ -362,7 +400,8 @@ def run_profile(
             configs,
             max_workers=workers,
             chunksize=1,
-            unit="fit",
+            desc="Tuning",
+            unit="trajectory",
             disable=not progress,
             file=progress_file,
         )
@@ -370,30 +409,14 @@ def run_profile(
     if not tuning_results:
         return pd.DataFrame(columns=RAW_COLUMNS)
     tuning = pd.concat(tuning_results, ignore_index=True)
-    selected_runs = [
-        SelectedRun(
-            config=RunConfig(
-                train_size=row.train_size,
-                data_seed=row.data_seed,
-                model_spec=ModelSpec(
-                    row.model,
-                    matrix_dim=row.matrix_dim,
-                    fm_rank=row.fm_rank,
-                    parameters_per_feature=row.parameters_per_feature,
-                ),
-                lr=row.lr,
-                init_seed=row.init_seed,
-            ),
-            epoch=row.epoch,
-        )
-        for row in select_lr(tuning).itertuples(index=False)
-    ]
+    selected_runs = _selected_runs(tuning)
 
     test = partial(run_selected, settings=settings)
     if workers == 1:
         items = tqdm(
             selected_runs,
-            unit="test",
+            desc="Testing",
+            unit="trajectory",
             disable=not progress,
             file=progress_file,
         )
@@ -404,7 +427,8 @@ def run_profile(
             selected_runs,
             max_workers=workers,
             chunksize=1,
-            unit="test",
+            desc="Testing",
+            unit="trajectory",
             disable=not progress,
             file=progress_file,
         )
@@ -447,6 +471,8 @@ def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
             q25_test_logloss=("test_logloss", lambda s: s.quantile(0.25)),
             q75_test_logloss=("test_logloss", lambda s: s.quantile(0.75)),
             median_test_brier=("test_brier", "median"),
+            q25_test_brier=("test_brier", lambda s: s.quantile(0.25)),
+            q75_test_brier=("test_brier", lambda s: s.quantile(0.75)),
             n=("test_logloss", "size"),
         )
         .reset_index()

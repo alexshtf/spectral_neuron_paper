@@ -6,7 +6,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
 
-from paper.plotting import plot_bivariate_target_gallery, plot_scaling
+from paper.plotting import (
+    plot_bivariate_target_gallery,
+    plot_criteo_scaling,
+    plot_scaling,
+)
 from paper.targets import TargetSpec
 
 
@@ -181,5 +185,49 @@ def test_plot_bivariate_target_gallery_draws_contours():
         assert all(ax.collections for ax in axes)
         assert all(ax.get_xlabel() == "$x_1$" for ax in axes)
         assert all(ax.get_ylabel() == "$x_2$" for ax in axes)
+    finally:
+        plt.close(fig)
+
+
+def test_plot_criteo_scaling_pairs_models_by_parameter_count():
+    rows = []
+    for train_size in (2**14, 2**18):
+        for model, dim, rank, parameters in (
+            ("linear", 0, 0, 1),
+            ("fm", 0, 5, 6),
+            ("spectral", 3, 0, 6),
+            ("fm", 0, 14, 15),
+            ("spectral", 5, 0, 15),
+        ):
+            rows.append(
+                {
+                    "train_size": train_size,
+                    "model": model,
+                    "matrix_dim": dim,
+                    "fm_rank": rank,
+                    "parameters_per_feature": parameters,
+                    "median_test_logloss": 0.5,
+                    "q25_test_logloss": 0.49,
+                    "q75_test_logloss": 0.51,
+                }
+            )
+
+    fig = plot_criteo_scaling(pd.DataFrame(rows))
+    try:
+        ax = fig.axes[0]
+        lines = {line.get_label(): line for line in ax.lines}
+
+        assert len(lines) == 5
+        assert (
+            lines["FM (rank 5, 6/feature)"].get_color()
+            == lines["Spectral (dim 3, 6/feature)"].get_color()
+        )
+        assert (
+            lines["FM (rank 14, 15/feature)"].get_color()
+            == lines["Spectral (dim 5, 15/feature)"].get_color()
+        )
+        assert lines["FM (rank 5, 6/feature)"].get_linestyle() == "-"
+        assert lines["Spectral (dim 3, 6/feature)"].get_linestyle() == "--"
+        assert ax.get_xscale() == "log"
     finally:
         plt.close(fig)

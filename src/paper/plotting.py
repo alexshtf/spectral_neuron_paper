@@ -23,6 +23,11 @@ MODEL_LINESTYLES = {
     "monotone": "--",
 }
 
+CRITEO_METRIC_LABELS = {
+    "logloss": "test log loss",
+    "brier": "test Brier score",
+}
+
 type FigureContainer = Figure | SubFigure
 
 
@@ -349,6 +354,94 @@ def plot_pairwise_scaling(
             model_pair=model_pair,
         )
     return _plot_pairwise_scaling(summary, model_pair=model_pair)
+
+
+def _criteo_curve_label(model: str, group: pd.DataFrame) -> str:
+    parameters = int(group["parameters_per_feature"].iloc[0])
+    if model == "linear":
+        return "Linear (1/feature)"
+    if model == "fm":
+        rank = int(group["fm_rank"].iloc[0])
+        return f"FM (rank {rank}, {parameters}/feature)"
+    dim = int(group["matrix_dim"].iloc[0])
+    return f"Spectral (dim {dim}, {parameters}/feature)"
+
+
+def plot_criteo_scaling(
+    summary: pd.DataFrame,
+    *,
+    metric: str = "logloss",
+) -> Figure:
+    """Plot validation-selected Criteo test performance against training size."""
+    if metric not in CRITEO_METRIC_LABELS:
+        raise ValueError(
+            f"metric must be one of {sorted(CRITEO_METRIC_LABELS)}; got {metric!r}"
+        )
+
+    value = f"median_test_{metric}"
+    q25 = f"q25_test_{metric}"
+    q75 = f"q75_test_{metric}"
+    required = {
+        "train_size",
+        "model",
+        "matrix_dim",
+        "fm_rank",
+        "parameters_per_feature",
+        value,
+        q25,
+        q75,
+    }
+    missing = required.difference(summary.columns)
+    if missing:
+        raise ValueError(f"summary is missing columns: {sorted(missing)}")
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.5), layout="constrained")
+    capacities = sorted(
+        summary.loc[summary["model"] != "linear", "parameters_per_feature"].unique()
+    )
+    colors = _scaling_dim_colors(capacities)
+    curves = [("linear", 1)] + [
+        (model, capacity)
+        for capacity in capacities
+        for model in ("fm", "spectral")
+    ]
+    styles = {
+        "linear": ("#555555", "-", "o"),
+        "fm": (None, "-", "s"),
+        "spectral": (None, "--", "^"),
+    }
+
+    for model, capacity in curves:
+        group = summary.loc[
+            (summary["model"] == model)
+            & (summary["parameters_per_feature"] == capacity)
+        ].sort_values("train_size")
+        if group.empty:
+            continue
+
+        default_color, linestyle, marker = styles[model]
+        color = default_color or colors[capacity]
+        x = group["train_size"].to_numpy()
+        ax.plot(
+            x,
+            group[value],
+            color=color,
+            linestyle=linestyle,
+            marker=marker,
+            label=_criteo_curve_label(model, group),
+        )
+        ax.fill_between(x, group[q25], group[q75], color=color, alpha=0.12)
+
+    label = CRITEO_METRIC_LABELS[metric]
+    ax.set(
+        title=f"Criteo {label}",
+        xlabel="training impressions",
+        ylabel=f"{label} ↓",
+    )
+    ax.set_xscale("log", base=2)
+    ax.grid(True, alpha=0.25)
+    ax.legend(frameon=False, fontsize="small", ncols=2)
+    return fig
 
 
 def plot_target_gallery(specs: list[TargetSpec]):

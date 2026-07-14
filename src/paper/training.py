@@ -1,5 +1,4 @@
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -17,7 +16,7 @@ type BatchFactory = Callable[[], Iterable[TensorBatch]]
 
 
 class BinaryTask(Protocol):
-    def train_batches(self, epoch: int) -> Iterable[TensorBatch]: ...
+    def train_batches(self, start: int, stop: int) -> Iterable[TensorBatch]: ...
 
     def val_batches(self) -> Iterable[TensorBatch]: ...
 
@@ -109,20 +108,27 @@ def run_one_stream(
     return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
 
 
-def train_binary_events(
+def train_binary_scaling_events(
     task: BinaryTask,
     model: nn.Module,
     *,
     lr: float,
-    max_epochs: int,
+    checkpoints: Iterable[int],
 ) -> Iterator[Event]:
-    optimizer = torch.optim.Adagrad(model.parameters(), lr=lr)
+    checkpoints = tuple(map(int, checkpoints))
+    if not checkpoints or checkpoints != tuple(sorted(set(checkpoints))):
+        raise ValueError("checkpoints must be non-empty, unique, and increasing")
+    if checkpoints[0] <= 0:
+        raise ValueError("checkpoints must be positive")
 
-    for epoch in range(1, max_epochs + 1):
+    optimizer = torch.optim.Adagrad(model.parameters(), lr=lr)
+    total_loss = 0.0
+    total_samples = 0
+    start = 0
+
+    for train_size in checkpoints:
         model.train()
-        total_loss = 0.0
-        total_samples = 0
-        for feature_ids, labels in task.train_batches(epoch):
+        for feature_ids, labels in task.train_batches(start, train_size):
             logits = model(feature_ids)
             loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
@@ -134,8 +140,9 @@ def train_binary_events(
             total_loss += loss.detach().item() * len(labels)
             total_samples += len(labels)
 
+        start = train_size
         yield {
-            "epoch": epoch,
+            "train_size": train_size,
             "model": model,
             "train_logloss": total_loss / total_samples,
         }
@@ -177,54 +184,42 @@ def binary_metrics_on(name: str, batches: BatchFactory) -> Callable[[Event], Eve
     return augment
 
 
-@dataclass
-class BestEpoch:
-    key: str
-    value: float = float("inf")
-    epoch: int = 0
-
-    def update(self, event: Event) -> None:
-        value = float(event[self.key])
-        if value < self.value:
-            self.value = value
-            self.epoch = int(event["epoch"])
-
-
-def tune_binary_stream(
+def tune_binary_scaling_stream(
     task: BinaryTask,
     model: nn.Module,
     *,
     lr: float,
-    max_epochs: int,
-    patience: int,
+    checkpoints: Iterable[int],
 ) -> pd.DataFrame:
     start_time = perf_counter()
-    best = BestEpoch("val_logloss")
     events = fts.pipe(
-        train_binary_events(task, model, lr=lr, max_epochs=max_epochs),
+        train_binary_scaling_events(task, model, lr=lr, checkpoints=checkpoints),
         fts.augment(binary_metrics_on("val", task.val_batches)),
         fts.augment(elapsed_since(start_time)),
-        fts.tap(best.update),
-        fts.early_stop("val_logloss", patience=patience),
     )
-    history = fts.collect_pd(events).drop(columns=["model"], errors="ignore")
-
-    selected = history.loc[history["epoch"] == best.epoch].copy()
-    selected["epochs_run"] = len(history)
-    return selected.reset_index(drop=True)
+    return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
 
 
-def fit_and_test_binary(
+def fit_and_test_binary_scaling(
     task: BinaryTask,
     model: nn.Module,
     *,
     lr: float,
-    epochs: int,
-) -> dict[str, float]:
-    events = fts.pipe(
-        train_binary_events(task, model, lr=lr, max_epochs=epochs),
-        fts.take(epochs),
+    checkpoints: Iterable[int],
+    test_checkpoints: Iterable[int],
+) -> pd.DataFrame:
+    checkpoints = tuple(map(int, checkpoints))
+    test_checkpoints = set(map(int, test_checkpoints))
+    if not test_checkpoints <= set(checkpoints):
+        raise ValueError("test_checkpoints must be drawn from checkpoints")
+    trained = train_binary_scaling_events(
+        task,
+        model,
+        lr=lr,
+        checkpoints=checkpoints,
     )
-    for _ in events:
-        pass
-    return evaluate_binary(model, task.test_batches())
+    events = fts.pipe(
+        (event for event in trained if event["train_size"] in test_checkpoints),
+        fts.augment(binary_metrics_on("test", task.test_batches)),
+    )
+    return fts.collect_pd(events).drop(columns=["model"], errors="ignore")

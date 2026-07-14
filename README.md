@@ -8,6 +8,10 @@ The experiment expects the headerless, tab-separated training file from the Crit
 Display Advertising Challenge. The first run builds a memory-mapped cache beside the
 raw file; later runs reuse it.
 
+Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
+training split. Each model then makes one pass over a fixed random permutation of that
+split, with validation measurements taken at every requested training-size checkpoint.
+
 ```bash
 uv run python -m paper.experiments.criteo_scaling \
   --data /path/to/train.txt \

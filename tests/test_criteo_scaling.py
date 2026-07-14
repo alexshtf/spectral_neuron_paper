@@ -34,13 +34,11 @@ def _write_tiny_criteo(path: Path, rows: int = 100) -> None:
 
 def _tiny_profile() -> Profile:
     return Profile(
-        train_sizes=(32,),
+        train_sizes=(16, 32),
         dims=(3,),
         lrs=(1e-3, 1e-2),
         init_seeds=range(1),
         batch_size=16,
-        max_epochs=2,
-        patience=1,
         min_count=2,
         buckets_per_field=32,
     )
@@ -82,10 +80,10 @@ def test_preprocessing_reports_progress(tmp_path):
         progress=True,
         progress_file=output,
     )
-    fit_preprocessor(
+    preprocessor_path = fit_preprocessor(
         corpus,
-        train_size=32,
-        data_seed=0,
+        sample_size=8,
+        sample_seed=7,
         min_count=2,
         buckets_per_field=32,
         progress=True,
@@ -94,13 +92,14 @@ def test_preprocessing_reports_progress(tmp_path):
 
     printed = output.getvalue()
     assert "Preparing Criteo corpus" in printed
-    assert "Fitting preprocessor n=32, seed=0" in printed
+    assert "Fitting preprocessor on 8 rows" in printed
+    assert "sample8_seed7" in preprocessor_path.name
 
 
 def test_run_grid_parameter_matches_fm_and_spectral():
     grid = RunGrid(
         Profile(
-            train_sizes=(32,),
+            train_sizes=(16, 32),
             dims=(5,),
             lrs=(1e-2,),
             init_seeds=range(1),
@@ -112,6 +111,7 @@ def test_run_grid_parameter_matches_fm_and_spectral():
         ModelSpec("fm", fm_rank=14, parameters_per_feature=15),
         ModelSpec("spectral", matrix_dim=5, parameters_per_feature=15),
     )
+    assert len(grid) == 3
 
 
 def test_tiny_profile_runs_end_to_end(tmp_path):
@@ -130,11 +130,21 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
 
     assert corpus.rows == 100
     assert set(raw["model"]) == {"linear", "fm", "spectral"}
+    assert set(raw["protocol"]) == {"one_pass"}
+    assert set(raw["preprocessor_sample_size"]) == {8}
     assert set(RAW_COLUMNS) == set(raw.columns)
     assert np.isfinite(raw["val_logloss"]).all()
-    assert raw["test_logloss"].notna().sum() == 3
-    assert raw["test_brier"].notna().sum() == 3
-    assert len(summary) == 3
+    assert (
+        raw.groupby(["data_seed", "model", "lr", "init_seed"])["train_size"]
+        .nunique()
+        .eq(2)
+        .all()
+    )
+    assert raw["test_logloss"].notna().sum() == 6
+    assert raw["test_brier"].notna().sum() == 6
+    assert {"q25_test_brier", "q75_test_brier"} <= set(summary)
+    assert len(summary) == 6
+    assert len(list(cache_dir.glob("preprocessor_*.npz"))) == 1
 
 
 def test_parallel_profile_matches_serial_results(tmp_path):
@@ -155,6 +165,9 @@ def test_parallel_profile_matches_serial_results(tmp_path):
 
 def test_lr_selection_uses_validation_not_test():
     common = {
+        "protocol": "one_pass",
+        "preprocessor_sample_size": 8,
+        "preprocessor_seed": 0,
         "train_size": 32,
         "model": "linear",
         "matrix_dim": 0,

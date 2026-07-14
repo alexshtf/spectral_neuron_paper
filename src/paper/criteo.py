@@ -245,16 +245,16 @@ class CriteoPreprocessor:
 def fit_preprocessor(
     corpus: CriteoCorpus,
     *,
-    train_size: int,
-    data_seed: int,
+    sample_size: int,
+    sample_seed: int,
     min_count: int,
     buckets_per_field: int,
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> Path:
-    if not 0 < train_size <= corpus.train_stop:
+    if not 0 < sample_size <= corpus.train_stop:
         raise ValueError(
-            f"train_size must be in [1, {corpus.train_stop}]; got {train_size}"
+            f"sample_size must be in [1, {corpus.train_stop}]; got {sample_size}"
         )
     if buckets_per_field < 3:
         raise ValueError(
@@ -262,24 +262,29 @@ def fit_preprocessor(
         )
 
     path = corpus.cache_dir / (
-        f"preprocessor_n{train_size}_seed{data_seed}_"
+        f"preprocessor_sample{sample_size}_seed{sample_seed}_"
         f"min{min_count}_b{buckets_per_field}.npz"
     )
     if path.exists():
         if progress:
             tqdm.write(
-                f"Preprocessor n={train_size:,}, seed={data_seed} (cached)",
+                f"Preprocessor sample={sample_size:,}, seed={sample_seed} (cached)",
                 file=sys.stderr if progress_file is None else progress_file,
             )
         return path
 
-    order = np.load(corpus.order_path(data_seed), mmap_mode="r")
-    rows = np.sort(np.asarray(order[:train_size]))
+    rows = np.random.default_rng(sample_seed).choice(
+        corpus.train_stop,
+        size=sample_size,
+        replace=False,
+        shuffle=False,
+    )
+    rows.sort()
     tokens = corpus.tokens()
     frequent = []
     fields = tqdm(
         range(NUM_NUMERIC_FIELDS, NUM_FIELDS),
-        desc=f"Fitting preprocessor n={train_size:,}, seed={data_seed}",
+        desc=f"Fitting preprocessor on {sample_size:,} rows",
         unit="field",
         disable=not progress,
         file=progress_file,
@@ -301,7 +306,6 @@ class CriteoTask:
     preprocessor: CriteoPreprocessor
     train_rows: np.ndarray
     batch_size: int
-    train_seed: int
     _tokens: np.memmap = field(init=False, repr=False)
     _labels: np.memmap = field(init=False, repr=False)
 
@@ -309,11 +313,16 @@ class CriteoTask:
         self._tokens = self.corpus.tokens()
         self._labels = self.corpus.labels()
 
-    def train_batches(self, epoch: int) -> Iterator[TensorBatch]:
-        rows = np.array(self.train_rows, copy=True)
-        np.random.default_rng([self.train_seed, epoch]).shuffle(rows)
-        for start in range(0, len(rows), self.batch_size):
-            yield self._batch(np.sort(rows[start : start + self.batch_size]))
+    def train_batches(self, start: int, stop: int) -> Iterator[TensorBatch]:
+        if not 0 <= start <= stop <= len(self.train_rows):
+            raise ValueError(
+                f"expected 0 <= start <= stop <= {len(self.train_rows)}; "
+                f"got start={start}, stop={stop}"
+            )
+        for batch_start in range(start, stop, self.batch_size):
+            batch_stop = min(batch_start + self.batch_size, stop)
+            rows = np.sort(self.train_rows[batch_start:batch_stop])
+            yield self._batch(rows)
 
     def val_batches(self) -> Iterator[TensorBatch]:
         yield from self._sequential_batches(

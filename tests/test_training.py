@@ -4,7 +4,11 @@ import torch
 from torch import nn
 
 from paper.tasks import Task
-from paper.training import run_one_stream
+from paper.training import (
+    fit_and_test_binary_scaling,
+    run_one_stream,
+    train_binary_scaling_events,
+)
 
 
 class CountingLinear(nn.Module):
@@ -54,3 +58,53 @@ def test_checkpoint_metrics_describe_post_update_model(monkeypatch):
 
     assert result["train_rmse"].iloc[-1] == pytest.approx(expected_rmse)
     assert result["elapsed_seconds"].tolist() == [4.0, 8.0]
+
+
+def test_binary_scaling_consumes_each_nested_prefix_once():
+    seen: list[int] = []
+
+    class RecordingTask:
+        @staticmethod
+        def train_batches(start: int, stop: int):
+            for batch_start in range(start, stop, 2):
+                rows = list(range(batch_start, min(batch_start + 2, stop)))
+                seen.extend(rows)
+                yield torch.ones(len(rows), 1), torch.zeros(len(rows))
+
+    model = CountingLinear([0])
+    events = list(
+        train_binary_scaling_events(
+            RecordingTask(),
+            model,
+            lr=0.1,
+            checkpoints=(3, 7),
+        )
+    )
+
+    assert seen == list(range(7))
+    assert [event["train_size"] for event in events] == [3, 7]
+
+
+def test_binary_scaling_tests_only_selected_checkpoints():
+    seen: list[int] = []
+
+    class RecordingTask:
+        @staticmethod
+        def train_batches(start: int, stop: int):
+            seen.extend(range(start, stop))
+            yield torch.ones(stop - start, 1), torch.zeros(stop - start)
+
+        @staticmethod
+        def test_batches():
+            yield torch.ones(1, 1), torch.zeros(1)
+
+    result = fit_and_test_binary_scaling(
+        RecordingTask(),
+        CountingLinear([0]),
+        lr=0.1,
+        checkpoints=(3, 5, 7),
+        test_checkpoints=(3, 7),
+    )
+
+    assert seen == list(range(7))
+    assert result["train_size"].tolist() == [3, 7]
