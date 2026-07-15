@@ -47,9 +47,12 @@ VARIANTS: tuple[Variant, ...] = (
 )
 
 PROTOCOL = "one_pass"
+OPTIMIZER = "adam"
 
 RAW_COLUMNS = [
     "protocol",
+    "optimizer",
+    "phase",
     "preprocessor_sample_size",
     "preprocessor_seed",
     "train_size",
@@ -71,11 +74,9 @@ RAW_COLUMNS = [
     "elapsed_seconds",
 ]
 
-TEST_COLUMNS = ["test_logloss", "test_brier"]
-TUNING_COLUMNS = [column for column in RAW_COLUMNS if column not in TEST_COLUMNS]
-
 EXPERIMENT_COLUMNS = [
     "protocol",
+    "optimizer",
     "preprocessor_sample_size",
     "preprocessor_seed",
 ]
@@ -91,19 +92,17 @@ MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "num_parameters",
 ]
 
-RUN_COLUMNS = EXPERIMENT_COLUMNS + [
-    "train_size",
-    "data_seed",
-    "model",
-    "preprocessing",
-    "matrix_dim",
-    "eig_idx",
-    "fm_rank",
-    "parameters_per_feature",
-    "num_parameters",
-    "lr",
-    "init_seed",
-]
+
+@dataclass(frozen=True)
+class SeedGrid:
+    data_seeds: range = range(1)
+    init_seeds: range = range(1)
+
+    def __len__(self) -> int:
+        return len(self.data_seeds) * len(self.init_seeds)
+
+    def __iter__(self) -> Iterator[tuple[int, int]]:
+        return product(self.data_seeds, self.init_seeds)
 
 
 @dataclass(frozen=True)
@@ -111,8 +110,8 @@ class Profile:
     train_sizes: tuple[int, ...]
     dims: tuple[int, ...]
     lrs: tuple[float, ...]
-    init_seeds: range
-    data_seeds: range = range(1)
+    tuning_seeds: SeedGrid
+    evaluation_seeds: SeedGrid
     batch_size: int = 4096
     preprocessor_fraction: float = 0.1
     preprocessor_seed: int = 0
@@ -125,7 +124,8 @@ PROFILES: dict[str, Profile] = {
         train_sizes=(2**10,),
         dims=(3,),
         lrs=(1e-2,),
-        init_seeds=range(1),
+        tuning_seeds=SeedGrid(),
+        evaluation_seeds=SeedGrid(),
         batch_size=256,
         min_count=2,
         buckets_per_field=2**8,
@@ -134,14 +134,23 @@ PROFILES: dict[str, Profile] = {
         train_sizes=(2**14, 2**18, 2**22),
         dims=(3, 5),
         lrs=(1e-3, 1e-2, 1e-1),
-        init_seeds=range(2),
+        tuning_seeds=SeedGrid(init_seeds=range(2)),
+        evaluation_seeds=SeedGrid(init_seeds=range(2)),
         batch_size=4096,
     ),
     "full": Profile(
-        train_sizes=(*tuple(2**power for power in range(14, 26, 2)), 2**25, 36_672_493),
+        train_sizes=(
+            *tuple(2**power for power in range(11, 23, 2)),
+            2**22,
+            36_672_493 // 8,
+        ),
         dims=(3, 5, 9, 15),
         lrs=tuple(np.geomspace(1e-3, 1e-1, 8).tolist()),
-        init_seeds=range(3),
+        tuning_seeds=SeedGrid(init_seeds=range(3)),
+        evaluation_seeds=SeedGrid(
+            data_seeds=range(1, 5),
+            init_seeds=range(3, 9),
+        ),
         batch_size=4096,
     ),
 }
@@ -210,18 +219,17 @@ class RunGrid:
 
     def __len__(self) -> int:
         return (
-            len(self.profile.data_seeds)
+            len(self.profile.tuning_seeds)
             * len(self.model_specs)
             * len(self.profile.lrs)
-            * len(self.profile.init_seeds)
         )
 
     def __iter__(self) -> Iterator[RunConfig]:
         for data_seed, model_spec, lr, init_seed in product(
-            self.profile.data_seeds,
+            self.profile.tuning_seeds.data_seeds,
             self.model_specs,
             self.profile.lrs,
-            self.profile.init_seeds,
+            self.profile.tuning_seeds.init_seeds,
         ):
             yield RunConfig(data_seed, model_spec, lr, init_seed)
 
@@ -294,6 +302,7 @@ def _metadata(
 ) -> dict[str, int | float | str]:
     return {
         "protocol": PROTOCOL,
+        "optimizer": OPTIMIZER,
         "preprocessor_sample_size": settings.preprocessor_sample_size,
         "preprocessor_seed": settings.preprocessor_seed,
         "data_seed": config.data_seed,
@@ -313,6 +322,20 @@ def _metadata(
     }
 
 
+def _format_result(
+    result: pd.DataFrame,
+    *,
+    phase: Literal["tuning", "evaluation"],
+    config: RunConfig,
+    model: nn.Module,
+    settings: RunSettings,
+) -> pd.DataFrame:
+    return result.assign(
+        phase=phase,
+        **_metadata(config, model, settings),
+    ).reindex(columns=RAW_COLUMNS)
+
+
 def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
     task, model = _make_task_model(config, settings)
     result = tune_binary_scaling_stream(
@@ -321,7 +344,13 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
         lr=config.lr,
         checkpoints=settings.train_sizes,
     )
-    return result.assign(**_metadata(config, model, settings)).loc[:, TUNING_COLUMNS]
+    return _format_result(
+        result,
+        phase="tuning",
+        config=config,
+        model=model,
+        settings=settings,
+    )
 
 
 def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
@@ -336,26 +365,38 @@ def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
         checkpoints=checkpoints,
         test_checkpoints=selected.train_sizes,
     )
-    return result.assign(**_metadata(selected.config, model, settings)).loc[
-        :, RUN_COLUMNS + TEST_COLUMNS
-    ]
+    return _format_result(
+        result,
+        phase="evaluation",
+        config=selected.config,
+        model=model,
+        settings=settings,
+    )
 
 
-def _selected_runs(tuning: pd.DataFrame) -> list[SelectedRun]:
+def _model_spec(row) -> ModelSpec:
+    return ModelSpec(
+        row.model,
+        matrix_dim=row.matrix_dim,
+        fm_rank=row.fm_rank,
+        parameters_per_feature=row.parameters_per_feature,
+    )
+
+
+def _selected_runs(
+    tuning: pd.DataFrame,
+    evaluation_seeds: SeedGrid,
+) -> list[SelectedRun]:
     train_sizes: dict[RunConfig, list[int]] = {}
-    for row in select_lr(tuning).itertuples(index=False):
-        config = RunConfig(
-            data_seed=row.data_seed,
-            model_spec=ModelSpec(
-                row.model,
-                matrix_dim=row.matrix_dim,
-                fm_rank=row.fm_rank,
-                parameters_per_feature=row.parameters_per_feature,
-            ),
-            lr=row.lr,
-            init_seed=row.init_seed,
-        )
-        train_sizes.setdefault(config, []).append(row.train_size)
+    for row in _best_lrs(tuning).itertuples(index=False):
+        for data_seed, init_seed in evaluation_seeds:
+            config = RunConfig(
+                data_seed=data_seed,
+                model_spec=_model_spec(row),
+                lr=row.selected_lr,
+                init_seed=init_seed,
+            )
+            train_sizes.setdefault(config, []).append(row.train_size)
 
     return [
         SelectedRun(config, tuple(sorted(set(sizes))))
@@ -382,6 +423,8 @@ def run_profile(
         sorted(set(profile.train_sizes))
     ):
         raise ValueError("train_sizes must be non-empty, unique, and increasing")
+    if not profile.tuning_seeds or not profile.evaluation_seeds:
+        raise ValueError("tuning and evaluation seed grids must be non-empty")
     if not 0 < profile.preprocessor_fraction <= 1:
         raise ValueError("preprocessor_fraction must be in (0, 1]")
 
@@ -414,7 +457,9 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    for data_seed in profile.data_seeds:
+    data_seeds = set(profile.tuning_seeds.data_seeds)
+    data_seeds.update(profile.evaluation_seeds.data_seeds)
+    for data_seed in sorted(data_seeds):
         corpus.order_path(data_seed)
 
     settings = RunSettings(
@@ -452,7 +497,7 @@ def run_profile(
     if not tuning_results:
         return pd.DataFrame(columns=RAW_COLUMNS)
     tuning = pd.concat(tuning_results, ignore_index=True)
-    selected_runs = _selected_runs(tuning)
+    selected_runs = _selected_runs(tuning, profile.evaluation_seeds)
 
     test = partial(run_selected, settings=settings)
     if workers == 1:
@@ -476,13 +521,13 @@ def run_profile(
             file=progress_file,
         )
 
-    tests = pd.concat(test_results, ignore_index=True)
-    return tuning.merge(tests, on=RUN_COLUMNS, how="left").loc[:, RAW_COLUMNS]
+    evaluation = pd.concat(test_results, ignore_index=True)
+    return pd.concat((tuning, evaluation), ignore_index=True).loc[:, RAW_COLUMNS]
 
 
-def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
+def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
     scores = (
-        raw.groupby(MODEL_COLUMNS + ["lr"], as_index=False)["val_logloss"]
+        tuning.groupby(MODEL_COLUMNS + ["lr"], as_index=False)["val_logloss"]
         .median()
         .rename(columns={"val_logloss": "median_val_logloss"})
     )
@@ -494,7 +539,15 @@ def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
         .head(1)
         .rename(columns={"lr": "selected_lr"})
     )
-    selected = raw.merge(
+    return best[MODEL_COLUMNS + ["selected_lr", "median_val_logloss"]]
+
+
+def _select_evaluations(
+    tuning: pd.DataFrame,
+    evaluation: pd.DataFrame,
+) -> pd.DataFrame:
+    best = _best_lrs(tuning)
+    selected = evaluation.merge(
         best[MODEL_COLUMNS + ["selected_lr", "median_val_logloss"]],
         on=MODEL_COLUMNS,
         how="inner",
@@ -502,6 +555,27 @@ def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
     return selected.loc[selected["lr"] == selected["selected_lr"]].reset_index(
         drop=True
     )
+
+
+def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
+    if "phase" not in raw:
+        return _select_evaluations(raw, raw)
+
+    selected = []
+    staged = raw.loc[raw["phase"].notna()]
+    if not staged.empty:
+        selected.append(
+            _select_evaluations(
+                staged.loc[staged["phase"] == "tuning"],
+                staged.loc[staged["phase"] == "evaluation"],
+            )
+        )
+
+    legacy = raw.loc[raw["phase"].isna()].drop(columns="phase")
+    if not legacy.empty:
+        selected.append(_select_evaluations(legacy, legacy))
+
+    return pd.concat(selected, ignore_index=True) if selected else raw.iloc[:0].copy()
 
 
 def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:

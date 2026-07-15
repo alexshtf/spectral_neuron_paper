@@ -424,11 +424,19 @@ def _spectral_dimensions(results: pd.DataFrame) -> list[int]:
     return dimensions
 
 
-def _finish_criteo_grid(grid: sns.FacetGrid, *, metric: str, title: str) -> Figure:
+def _finish_criteo_grid(
+    grid: sns.FacetGrid,
+    *,
+    metric: str,
+    title: str,
+    xlim: tuple[float, float] | None = None,
+) -> Figure:
     label = CRITEO_METRIC_LABELS[metric]
     grid.set_axis_labels("training impressions", f"{label} ↓")
     for ax in grid.axes.flat:
         ax.set_xscale("log", base=2)
+        if xlim is not None:
+            ax.set_xlim(xlim)
         ax.grid(True, alpha=0.25)
     grid.figure.suptitle(title, y=1.02)
     return grid.figure
@@ -441,11 +449,12 @@ def _criteo_relplot(
     title: str,
     hue: str,
     style: str,
-    hue_order: list | None = None,
-    palette=None,
-    markers=True,
-    dashes=True,
+    hue_order: list,
+    palette,
+    markers,
+    dashes,
     col: str | None = None,
+    xlim: tuple[float, float] | None = None,
 ) -> Figure:
     value = _check_criteo_results(results, metric)
     facet = {"col": col, "col_wrap": 2} if col is not None else {}
@@ -463,7 +472,8 @@ def _criteo_relplot(
         kind="line",
         estimator=np.median,
         errorbar=("pi", 50),
-        err_kws={"alpha": 0.12},
+        err_kws={"alpha": 0.15},
+        linewidth=2,
         height=3.5,
         aspect=1.25,
         facet_kws={"sharex": True, "sharey": True},
@@ -473,7 +483,7 @@ def _criteo_relplot(
         grid.set_titles("dim={col_name}")
     if grid.legend is not None:
         grid.legend.set_title("model" if hue == "model_label" else "dimension")
-    return _finish_criteo_grid(grid, metric=metric, title=title)
+    return _finish_criteo_grid(grid, metric=metric, title=title, xlim=xlim)
 
 
 def _label_criteo_models(results: pd.DataFrame) -> pd.DataFrame:
@@ -551,6 +561,7 @@ def plot_criteo_spectral_dimensions(
     variant: CriteoSpectralVariant,
     *,
     metric: str = "logloss",
+    xlim: tuple[float, float] | None = None,
 ) -> Figure:
     """Compare all dimensions of one spectral preprocessing variant."""
     if variant not in ("spectral-old", "spectral-new"):
@@ -572,6 +583,34 @@ def plot_criteo_spectral_dimensions(
         palette=palette,
         markers=markers,
         dashes=False,
+        xlim=xlim,
+    )
+
+
+def plot_criteo_fm_dimensions(
+    results: pd.DataFrame,
+    *,
+    metric: str = "logloss",
+    xlim: tuple[float, float] | None = None,
+) -> Figure:
+    """Compare FM embedding dimensions."""
+    fm = results.loc[results["model"] == "fm"]
+    ranks = sorted(map(int, fm["fm_rank"].unique()))
+    if not ranks:
+        raise ValueError("results contain no FM models")
+    palette = dict(zip(ranks, sns.color_palette("colorblind", len(ranks))))
+    markers = dict(zip(ranks, ("o", "s", "^", "D")))
+    return _criteo_relplot(
+        fm,
+        metric=metric,
+        title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: FM across embedding dimensions",
+        hue="fm_rank",
+        style="fm_rank",
+        hue_order=ranks,
+        palette=palette,
+        markers=markers,
+        dashes=False,
+        xlim=xlim,
     )
 
 

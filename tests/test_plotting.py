@@ -9,6 +9,7 @@ import pytest
 from paper.plotting import (
     plot_bivariate_target_gallery,
     plot_criteo_models_by_dimension,
+    plot_criteo_fm_dimensions,
     plot_criteo_spectral_comparison,
     plot_criteo_spectral_dimensions,
     plot_scaling,
@@ -198,8 +199,12 @@ def _criteo_results() -> pd.DataFrame:
             rows.append(
                 {
                     "train_size": train_size,
+                    "data_seed": 0,
+                    "init_seed": seed,
+                    "lr": 0.01,
                     "model": "linear",
                     "matrix_dim": 0,
+                    "fm_rank": 0,
                     "parameters_per_feature": 1,
                     "test_logloss": 0.5 + seed / 100,
                 }
@@ -207,8 +212,12 @@ def _criteo_results() -> pd.DataFrame:
             rows.append(
                 {
                     "train_size": train_size,
+                    "data_seed": 0,
+                    "init_seed": seed,
+                    "lr": 0.01,
                     "model": "linear-new",
                     "matrix_dim": 0,
+                    "fm_rank": 0,
                     "parameters_per_feature": 1,
                     "test_logloss": 0.49 + seed / 100,
                 }
@@ -218,8 +227,12 @@ def _criteo_results() -> pd.DataFrame:
                     rows.append(
                         {
                             "train_size": train_size,
+                            "data_seed": 0,
+                            "init_seed": seed,
+                            "lr": 0.01,
                             "model": model,
                             "matrix_dim": dim if model.startswith("spectral") else 0,
+                            "fm_rank": parameters - 1 if model == "fm" else 0,
                             "parameters_per_feature": parameters,
                             "test_logloss": 0.5 + dim / 100 + seed / 1000,
                         }
@@ -244,6 +257,7 @@ def test_plot_criteo_models_by_dimension_facets_matched_models():
         ]
         assert fig.legends[0].get_title().get_text() == "model"
         assert len(fig.axes[1].lines) == 5
+        assert len(fig.axes[1].collections) == 5
         assert all(ax.get_xscale() == "log" for ax in fig.axes)
     finally:
         plt.close(fig)
@@ -256,6 +270,7 @@ def test_plot_criteo_spectral_comparison_facets_dimensions():
         assert _legend_labels(fig) == ["Spectral-old", "Spectral-new"]
         assert fig.legends[0].get_title().get_text() == "model"
         assert len(fig.axes[1].lines) == 2
+        assert len(fig.axes[1].collections) == 2
     finally:
         plt.close(fig)
 
@@ -267,5 +282,19 @@ def test_plot_criteo_spectral_dimensions_uses_one_axis(variant):
         assert len(fig.axes) == 1
         assert _legend_labels(fig) == ["3", "5"]
         assert fig.legends[0].get_title().get_text() == "dimension"
+        assert len(fig.axes[0].collections) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_plot_criteo_fm_dimensions_supports_zoom():
+    xlim = (2**14, 2**18)
+    fig = plot_criteo_fm_dimensions(_criteo_results(), xlim=xlim)
+    try:
+        assert len(fig.axes) == 1
+        assert _legend_labels(fig) == ["5", "14"]
+        assert fig.legends[0].get_title().get_text() == "dimension"
+        assert len(fig.axes[0].collections) == 2
+        assert fig.axes[0].get_xlim() == pytest.approx(xlim)
     finally:
         plt.close(fig)

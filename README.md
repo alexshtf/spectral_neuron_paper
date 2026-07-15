@@ -10,7 +10,13 @@ raw file; later runs reuse it.
 
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
 training split. Each model then makes one pass over a fixed random permutation of that
-split, with validation measurements taken at every requested training-size checkpoint.
+split using Adam, with validation measurements taken at every requested training-size
+checkpoint. Sparse embedding tables use SparseAdam, the sparse-gradient form of the same
+optimizer.
+Learning rates are selected on a small tuning seed grid and then frozen. The full profile
+uses one eighth of the training partition (up to 4.58M impressions) and evaluates the
+selected configurations on a crossed grid of four held-out data-order seeds and six
+held-out initialization seeds.
 The default run compares five variants: linear, FM, and spectral models with bucketed
 numerics, plus linear and spectral models with hybrid numerical preprocessing. In the
 hybrid representation, missing, zero, and negative values are indicators while positive

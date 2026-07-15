@@ -16,10 +16,12 @@ from paper.criteo import (
     prepare_corpus,
 )
 from paper.experiments.criteo_scaling import (
+    PROFILES,
     RAW_COLUMNS,
     ModelSpec,
     Profile,
     RunGrid,
+    SeedGrid,
     build_arg_parser,
     default_raw_path,
     run_profile,
@@ -52,7 +54,8 @@ def _tiny_profile() -> Profile:
         train_sizes=(16, 32),
         dims=(3,),
         lrs=(1e-3, 1e-2),
-        init_seeds=range(1),
+        tuning_seeds=SeedGrid(),
+        evaluation_seeds=SeedGrid(),
         batch_size=16,
         min_count=2,
         buckets_per_field=32,
@@ -163,7 +166,8 @@ def test_run_grid_declares_five_variants_with_matched_dimensions():
             train_sizes=(16, 32),
             dims=(5,),
             lrs=(1e-2,),
-            init_seeds=range(1),
+            tuning_seeds=SeedGrid(),
+            evaluation_seeds=SeedGrid(),
         )
     )
 
@@ -201,11 +205,18 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     }
     assert set(raw["preprocessing"]) == {"bucket", "hybrid"}
     assert set(raw["protocol"]) == {"one_pass"}
+    assert set(raw["optimizer"]) == {"adam"}
+    assert set(raw["phase"]) == {"tuning", "evaluation"}
     assert set(raw["preprocessor_sample_size"]) == {8}
     assert set(RAW_COLUMNS) == set(raw.columns)
-    assert np.isfinite(raw["val_logloss"]).all()
+    tuning = raw.loc[raw["phase"] == "tuning"]
+    evaluation = raw.loc[raw["phase"] == "evaluation"]
+    assert np.isfinite(tuning["val_logloss"]).all()
+    assert evaluation["val_logloss"].isna().all()
     assert (
-        raw.groupby(["data_seed", "model", "lr", "init_seed"])["train_size"]
+        raw.groupby(["phase", "data_seed", "model", "lr", "init_seed"])[
+            "train_size"
+        ]
         .nunique()
         .eq(2)
         .all()
@@ -270,6 +281,7 @@ def test_parallel_profile_matches_serial_results(tmp_path):
 def test_lr_selection_uses_validation_not_test():
     common = {
         "protocol": "one_pass",
+        "optimizer": "adam",
         "preprocessor_sample_size": 8,
         "preprocessor_seed": 0,
         "train_size": 32,
@@ -291,3 +303,67 @@ def test_lr_selection_uses_validation_not_test():
     selected = select_lr(raw)
 
     assert selected["selected_lr"].tolist() == [0.01]
+
+
+def test_lr_selection_is_frozen_before_evaluation():
+    common = {
+        "protocol": "one_pass",
+        "optimizer": "adam",
+        "preprocessor_sample_size": 8,
+        "preprocessor_seed": 0,
+        "train_size": 32,
+        "model": "linear",
+        "preprocessing": "bucket",
+        "matrix_dim": 0,
+        "eig_idx": -1,
+        "fm_rank": 0,
+        "parameters_per_feature": 1,
+        "num_parameters": 100,
+    }
+    raw = pd.DataFrame(
+        [
+            common | {"phase": "tuning", "lr": 0.01, "val_logloss": 0.4},
+            common | {"phase": "tuning", "lr": 0.1, "val_logloss": 0.5},
+            common
+            | {
+                "phase": "evaluation",
+                "lr": 0.01,
+                "val_logloss": 9.0,
+                "test_logloss": 4.0,
+            },
+            common
+            | {
+                "phase": "evaluation",
+                "lr": 0.1,
+                "val_logloss": 0.1,
+                "test_logloss": 0.1,
+            },
+        ]
+    )
+
+    selected = select_lr(raw)
+
+    assert selected[["lr", "median_val_logloss", "test_logloss"]].to_dict(
+        "records"
+    ) == [{"lr": 0.01, "median_val_logloss": 0.4, "test_logloss": 4.0}]
+
+
+def test_full_profile_trades_scale_for_crossed_evaluation_seeds():
+    profile = PROFILES["full"]
+
+    assert profile.train_sizes == (
+        2**11,
+        2**13,
+        2**15,
+        2**17,
+        2**19,
+        2**21,
+        2**22,
+        36_672_493 // 8,
+    )
+    assert profile.tuning_seeds == SeedGrid(init_seeds=range(3))
+    assert profile.evaluation_seeds == SeedGrid(
+        data_seeds=range(1, 5),
+        init_seeds=range(3, 9),
+    )
+    assert len(profile.evaluation_seeds) == 24

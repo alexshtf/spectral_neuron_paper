@@ -108,6 +108,31 @@ def run_one_stream(
     return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
 
 
+def _adam_optimizers(
+    model: nn.Module,
+    *,
+    lr: float,
+) -> list[torch.optim.Optimizer]:
+    sparse_parameters = [
+        module.weight
+        for module in model.modules()
+        if isinstance(module, nn.Embedding) and module.sparse
+    ]
+    sparse_ids = {id(parameter) for parameter in sparse_parameters}
+    dense_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if id(parameter) not in sparse_ids
+    ]
+
+    optimizers: list[torch.optim.Optimizer] = []
+    if dense_parameters:
+        optimizers.append(torch.optim.Adam(dense_parameters, lr=lr))
+    if sparse_parameters:
+        optimizers.append(torch.optim.SparseAdam(sparse_parameters, lr=lr))
+    return optimizers
+
+
 def train_binary_scaling_events(
     task: BinaryTask,
     model: nn.Module,
@@ -121,7 +146,7 @@ def train_binary_scaling_events(
     if checkpoints[0] <= 0:
         raise ValueError("checkpoints must be positive")
 
-    optimizer = torch.optim.Adagrad(model.parameters(), lr=lr)
+    optimizers = _adam_optimizers(model, lr=lr)
     total_loss = 0.0
     total_samples = 0
     start = 0
@@ -134,10 +159,12 @@ def train_binary_scaling_events(
             logits = model(feature_ids, feature_values)
             loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
-            optimizer.zero_grad()
+            for optimizer in optimizers:
+                optimizer.zero_grad()
             loss.backward()
             with torch.sparse.check_sparse_tensor_invariants(enable=False):
-                optimizer.step()
+                for optimizer in optimizers:
+                    optimizer.step()
 
             total_loss += loss.detach().item() * len(labels)
             total_samples += len(labels)
