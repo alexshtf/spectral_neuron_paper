@@ -19,11 +19,9 @@ def _row(
         "noise_std": 0.0,
         "model": "unconstrained",
         "dim": 5,
-        "eig_idx": 2,
         "lr": lr,
         "init_seed": init_seed,
         "step": step,
-        "train_rmse": val_rmse,
         "val_rmse": val_rmse,
         "test_rmse": test_rmse,
     }

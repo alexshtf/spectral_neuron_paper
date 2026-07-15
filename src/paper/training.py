@@ -1,5 +1,4 @@
 from collections.abc import Callable, Iterable, Iterator
-from time import perf_counter
 from typing import Any, Protocol
 
 import fitstream as fts
@@ -23,13 +22,21 @@ class BinaryTask(Protocol):
     def test_batches(self) -> Iterable[TensorBatch]: ...
 
 
+def _checkpoints(values: Iterable[int]) -> tuple[int, ...]:
+    checkpoints = tuple(map(int, values))
+    if not checkpoints or checkpoints != tuple(sorted(set(checkpoints))):
+        raise ValueError("checkpoints must be non-empty, unique, and increasing")
+    if checkpoints[0] <= 0:
+        raise ValueError("checkpoints must be positive")
+    return checkpoints
+
+
 def train_events(
     task: Task,
     model: nn.Module,
     *,
     lr: float,
     train_seed: int,
-    steps: int,
     checkpoints: Iterable[int],
 ) -> Iterator[Event]:
     torch.manual_seed(train_seed)
@@ -38,8 +45,9 @@ def train_events(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     batches = task.train_batches(rng)
+    checkpoints = _checkpoints(checkpoints)
     checkpoint_set = set(checkpoints)
-    for step in range(1, steps + 1):
+    for step in range(1, checkpoints[-1] + 1):
         x, y = next(batches)
 
         optimizer.zero_grad()
@@ -48,11 +56,7 @@ def train_events(
         optimizer.step()
 
         if step in checkpoint_set:
-            yield {
-                "step": step,
-                "model": model,
-                "train_rmse": evaluate_rmse(model, x, y),
-            }
+            yield {"step": step, "model": model}
 
 
 def evaluate_rmse(model: nn.Module, x: torch.Tensor, y: torch.Tensor) -> float:
@@ -75,35 +79,24 @@ def rmse_on(
     return augment
 
 
-def elapsed_since(start_time: float) -> Callable[[Event], dict[str, float]]:
-    def augment(_: Event) -> dict[str, float]:
-        return {"elapsed_seconds": perf_counter() - start_time}
-
-    return augment
-
-
 def run_one_stream(
     task: Task,
     model: nn.Module,
     *,
     lr: float,
     train_seed: int,
-    steps: int,
     checkpoints: Iterable[int],
 ) -> pd.DataFrame:
-    start_time = perf_counter()
     events = fts.pipe(
         train_events(
             task,
             model,
             lr=lr,
             train_seed=train_seed,
-            steps=steps,
             checkpoints=checkpoints,
         ),
         fts.augment(rmse_on("val", task.x_val, task.y_val)),
         fts.augment(rmse_on("test", task.x_test, task.y_test)),
-        fts.augment(elapsed_since(start_time)),
     )
     return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
 
@@ -140,15 +133,9 @@ def train_binary_scaling_events(
     lr: float,
     checkpoints: Iterable[int],
 ) -> Iterator[Event]:
-    checkpoints = tuple(map(int, checkpoints))
-    if not checkpoints or checkpoints != tuple(sorted(set(checkpoints))):
-        raise ValueError("checkpoints must be non-empty, unique, and increasing")
-    if checkpoints[0] <= 0:
-        raise ValueError("checkpoints must be positive")
+    checkpoints = _checkpoints(checkpoints)
 
     optimizers = _adam_optimizers(model, lr=lr)
-    total_loss = 0.0
-    total_samples = 0
     start = 0
 
     for train_size in checkpoints:
@@ -166,19 +153,15 @@ def train_binary_scaling_events(
                 for optimizer in optimizers:
                     optimizer.step()
 
-            total_loss += loss.detach().item() * len(labels)
-            total_samples += len(labels)
-
         start = train_size
-        yield {
-            "train_size": train_size,
-            "model": model,
-            "train_logloss": total_loss / total_samples,
-        }
+        yield {"train_size": train_size, "model": model}
 
 
 def evaluate_binary(
-    model: nn.Module, batches: Iterable[TensorBatch]
+    model: nn.Module,
+    batches: Iterable[TensorBatch],
+    *,
+    include_brier: bool = True,
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
@@ -192,22 +175,32 @@ def evaluate_binary(
                 total_logloss += nn.functional.binary_cross_entropy_with_logits(
                     logits, labels, reduction="sum"
                 ).item()
-                total_brier += (torch.sigmoid(logits) - labels).square().sum().item()
+                if include_brier:
+                    total_brier += (
+                        (torch.sigmoid(logits) - labels).square().sum().item()
+                    )
                 total_samples += len(labels)
     finally:
         model.train(was_training)
 
     if total_samples == 0:
         raise ValueError("evaluation data must not be empty")
-    return {
-        "logloss": total_logloss / total_samples,
-        "brier": total_brier / total_samples,
-    }
+    metrics = {"logloss": total_logloss / total_samples}
+    if include_brier:
+        metrics["brier"] = total_brier / total_samples
+    return metrics
 
 
-def binary_metrics_on(name: str, batches: BatchFactory) -> Callable[[Event], Event]:
+def binary_metrics_on(
+    name: str,
+    batches: BatchFactory,
+    *,
+    include_brier: bool = True,
+) -> Callable[[Event], Event]:
     def augment(event: Event) -> Event:
-        metrics = evaluate_binary(event["model"], batches())
+        metrics = evaluate_binary(
+            event["model"], batches(), include_brier=include_brier
+        )
         return {f"{name}_{key}": value for key, value in metrics.items()}
 
     return augment
@@ -220,11 +213,11 @@ def tune_binary_scaling_stream(
     lr: float,
     checkpoints: Iterable[int],
 ) -> pd.DataFrame:
-    start_time = perf_counter()
     events = fts.pipe(
         train_binary_scaling_events(task, model, lr=lr, checkpoints=checkpoints),
-        fts.augment(binary_metrics_on("val", task.val_batches)),
-        fts.augment(elapsed_since(start_time)),
+        fts.augment(
+            binary_metrics_on("val", task.val_batches, include_brier=False)
+        ),
     )
     return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
 

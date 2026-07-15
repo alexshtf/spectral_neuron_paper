@@ -90,15 +90,22 @@ def test_sparse_models_preserve_leading_shape():
     )
 
 
-def test_fm_and_spectral_match_parameters_per_feature():
+@pytest.mark.parametrize("dim", [3, 5, 9, 15])
+def test_fm_and_spectral_match_parameters_per_feature(dim):
     num_features = 17
-    fm = FactorizationMachine(num_features, num_fields=3, rank=14)
-    spectral = SparseKthEigval(num_features, num_fields=3, dim=5)
+    parameters_per_feature = dim * (dim + 1) // 2
+    fm = FactorizationMachine(
+        num_features,
+        num_fields=3,
+        rank=parameters_per_feature - 1,
+    )
+    spectral = SparseKthEigval(num_features, num_fields=3, dim=dim)
 
     fm_lookup_parameters = fm.weight.weight.numel() + fm.embedding.weight.numel()
     spectral_lookup_parameters = spectral.feature_tril.weight.numel()
 
-    assert fm_lookup_parameters == spectral_lookup_parameters == 15 * num_features
+    assert fm_lookup_parameters == spectral_lookup_parameters
+    assert spectral_lookup_parameters == parameters_per_feature * num_features
 
 
 def test_factorization_machine_matches_pairwise_definition():

@@ -342,22 +342,6 @@ def plot_scaling(
     return _plot_scaling_grid(summary)
 
 
-def plot_pairwise_scaling(
-    summary: pd.DataFrame,
-    *,
-    model_pair: tuple[str, str] = ("unconstrained", "monotone"),
-):
-    _check_scaling_columns(summary)
-    _check_single_target_kind(summary)
-    if len(_noise_stds(summary)) > 1:
-        return _plot_noise_subfigures(
-            summary,
-            pair_by_dim=True,
-            model_pair=model_pair,
-        )
-    return _plot_pairwise_scaling(summary, model_pair=model_pair)
-
-
 CRITEO_MODEL_LABELS = {
     "linear": "Linear",
     "linear-new": "Linear-new",
@@ -403,8 +387,7 @@ def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
     required = {
         "train_size",
         "model",
-        "matrix_dim",
-        "parameters_per_feature",
+        "dim",
         value,
     }
     missing = required.difference(results.columns)
@@ -416,7 +399,7 @@ def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
 def _spectral_dimensions(results: pd.DataFrame) -> list[int]:
     values = results.loc[
         results["model"].isin(("spectral-old", "spectral-new")),
-        "matrix_dim",
+        "dim",
     ].unique()
     dimensions = sorted(map(int, values))
     if not dimensions:
@@ -447,8 +430,7 @@ def _criteo_relplot(
     *,
     metric: str,
     title: str,
-    hue: str,
-    style: str,
+    by: str,
     hue_order: list,
     palette,
     markers,
@@ -462,8 +444,8 @@ def _criteo_relplot(
         data=results,
         x="train_size",
         y=value,
-        hue=hue,
-        style=style,
+        hue=by,
+        style=by,
         hue_order=hue_order,
         style_order=hue_order,
         palette=palette,
@@ -482,7 +464,7 @@ def _criteo_relplot(
     if col is not None:
         grid.set_titles("dim={col_name}")
     if grid.legend is not None:
-        grid.legend.set_title("model" if hue == "model_label" else "dimension")
+        grid.legend.set_title("model" if by == "model_label" else "dimension")
     return _finish_criteo_grid(grid, metric=metric, title=title, xlim=xlim)
 
 
@@ -500,16 +482,13 @@ def plot_criteo_models_by_dimension(
     """Compare parameter-matched models in one facet per spectral dimension."""
     _check_criteo_results(results, metric)
     dimensions = _spectral_dimensions(results)
-    dimension_by_capacity = {dim * (dim + 1) // 2: dim for dim in dimensions}
 
     nonlinear = results.loc[
         results["model"].isin(("fm", "spectral-old", "spectral-new"))
     ].copy()
-    nonlinear["dimension"] = nonlinear["parameters_per_feature"].map(
-        dimension_by_capacity
-    )
-    if nonlinear["dimension"].isna().any():
+    if not set(nonlinear["dim"]) <= set(dimensions):
         raise ValueError("some nonlinear models have no matched spectral dimension")
+    nonlinear["dimension"] = nonlinear["dim"]
 
     linears = results.loc[
         results["model"].isin(("linear", "linear-new"))
@@ -522,8 +501,7 @@ def plot_criteo_models_by_dimension(
         faceted,
         metric=metric,
         title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: matched models",
-        hue="model_label",
-        style="model_label",
+        by="model_label",
         hue_order=model_order,
         palette=CRITEO_MODEL_COLORS,
         markers=CRITEO_MODEL_MARKERS,
@@ -546,13 +524,12 @@ def plot_criteo_spectral_comparison(
         spectral,
         metric=metric,
         title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: spectral preprocessing",
-        hue="model_label",
-        style="model_label",
+        by="model_label",
         hue_order=model_order,
         palette=CRITEO_MODEL_COLORS,
         markers=CRITEO_MODEL_MARKERS,
         dashes=CRITEO_MODEL_DASHES,
-        col="matrix_dim",
+        col="dim",
     )
 
 
@@ -577,8 +554,7 @@ def plot_criteo_spectral_dimensions(
             f"Criteo {CRITEO_METRIC_LABELS[metric]}: "
             f"{CRITEO_MODEL_LABELS[variant]} across dimensions"
         ),
-        hue="matrix_dim",
-        style="matrix_dim",
+        by="dim",
         hue_order=dimensions,
         palette=palette,
         markers=markers,
@@ -594,8 +570,9 @@ def plot_criteo_fm_dimensions(
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
     """Compare FM embedding dimensions."""
-    fm = results.loc[results["model"] == "fm"]
-    ranks = sorted(map(int, fm["fm_rank"].unique()))
+    fm = results.loc[results["model"] == "fm"].copy()
+    fm["rank"] = fm["dim"].map(lambda dim: dim * (dim + 1) // 2 - 1)
+    ranks = sorted(map(int, fm["rank"].unique()))
     if not ranks:
         raise ValueError("results contain no FM models")
     palette = dict(zip(ranks, sns.color_palette("colorblind", len(ranks))))
@@ -604,8 +581,7 @@ def plot_criteo_fm_dimensions(
         fm,
         metric=metric,
         title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: FM across embedding dimensions",
-        hue="fm_rank",
-        style="fm_rank",
+        by="rank",
         hue_order=ranks,
         palette=palette,
         markers=markers,

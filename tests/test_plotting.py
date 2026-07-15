@@ -1,3 +1,5 @@
+from itertools import product
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -17,6 +19,12 @@ from paper.plotting import (
 from paper.targets import TargetSpec
 
 
+@pytest.fixture(autouse=True)
+def close_figures():
+    yield
+    plt.close("all")
+
+
 def _row(
     *,
     complexity: int,
@@ -32,14 +40,10 @@ def _row(
         "noise_std": noise_std,
         "model": model,
         "dim": dim,
-        "eig_idx": dim // 2,
         "budget": budget,
-        "selected_lr": 0.01,
         "median_test_rmse": 1.0 / budget,
         "q25_test_rmse": 0.8 / budget,
         "q75_test_rmse": 1.2 / budget,
-        "mean_test_rmse": 1.0 / budget,
-        "n": 3,
     }
 
 
@@ -55,19 +59,16 @@ def test_plot_scaling_pairs_monotone_models_by_dimension():
     )
 
     fig = plot_scaling(summary)
-    try:
-        axes = [ax for ax in fig.axes if ax.get_visible()]
+    axes = [ax for ax in fig.axes if ax.get_visible()]
 
-        assert len(axes) == 4
-        assert {ax.get_title() for ax in axes} == {
-            "complexity=5, dim=3",
-            "complexity=5, dim=5",
-            "complexity=10, dim=3",
-            "complexity=10, dim=5",
-        }
-        assert all(len(ax.lines) == 2 for ax in axes)
-    finally:
-        plt.close(fig)
+    assert len(axes) == 4
+    assert {ax.get_title() for ax in axes} == {
+        "complexity=5, dim=3",
+        "complexity=5, dim=5",
+        "complexity=10, dim=3",
+        "complexity=10, dim=5",
+    }
+    assert all(len(ax.lines) == 2 for ax in axes)
 
 
 def test_plot_scaling_styles_models_and_dimensions():
@@ -87,26 +88,22 @@ def test_plot_scaling_styles_models_and_dimensions():
     )
 
     fig = plot_scaling(summary)
-    try:
-        ax = fig.axes[0]
-        lines = {line.get_label(): line for line in ax.lines}
+    lines = {line.get_label(): line for line in fig.axes[0].lines}
 
-        assert (
-            lines["dim=5, unconstrained"].get_color()
-            == lines["dim=5, monotone"].get_color()
-        )
-        assert (
-            lines["dim=9, unconstrained"].get_color()
-            == lines["dim=9, monotone"].get_color()
-        )
-        assert (
-            lines["dim=5, unconstrained"].get_color()
-            != lines["dim=9, unconstrained"].get_color()
-        )
-        assert lines["dim=5, unconstrained"].get_linestyle() == "-"
-        assert lines["dim=5, monotone"].get_linestyle() == "--"
-    finally:
-        plt.close(fig)
+    assert (
+        lines["dim=5, unconstrained"].get_color()
+        == lines["dim=5, monotone"].get_color()
+    )
+    assert (
+        lines["dim=9, unconstrained"].get_color()
+        == lines["dim=9, monotone"].get_color()
+    )
+    assert (
+        lines["dim=5, unconstrained"].get_color()
+        != lines["dim=9, unconstrained"].get_color()
+    )
+    assert lines["dim=5, unconstrained"].get_linestyle() == "-"
+    assert lines["dim=5, monotone"].get_linestyle() == "--"
 
 
 def test_plot_scaling_rejects_mixed_target_kinds():
@@ -157,18 +154,15 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
     )
 
     fig = plot_scaling(summary)
-    try:
-        assert [subfigure._suptitle.get_text() for subfigure in fig.subfigs] == [
-            "Noiseless training (σ = 0)",
-            "Noisy training (σ = 0.1)",
-        ]
-        for subfigure in fig.subfigs:
-            axes = [ax for ax in subfigure.axes if ax.get_visible()]
-            assert len(axes) == expected_axes
-            assert all(len(ax.lines) == lines_per_axis for ax in axes)
-            assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
-    finally:
-        plt.close(fig)
+    assert [subfigure._suptitle.get_text() for subfigure in fig.subfigs] == [
+        "Noiseless training (σ = 0)",
+        "Noisy training (σ = 0.1)",
+    ]
+    for subfigure in fig.subfigs:
+        axes = [ax for ax in subfigure.axes if ax.get_visible()]
+        assert len(axes) == expected_axes
+        assert all(len(ax.lines) == lines_per_axis for ax in axes)
+        assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
 
 
 def test_plot_bivariate_target_gallery_draws_contours():
@@ -178,66 +172,38 @@ def test_plot_bivariate_target_gallery_draws_contours():
     ]
 
     fig = plot_bivariate_target_gallery(specs, resolution=20)
-    try:
-        axes = [ax for ax in fig.axes if ax.get_title()]
+    axes = [ax for ax in fig.axes if ax.get_title()]
 
-        assert [ax.get_title() for ax in axes] == [
-            "general, complexity=5, seed=0",
-            "monotone, complexity=5, seed=0",
-        ]
-        assert all(ax.collections for ax in axes)
-        assert all(ax.get_xlabel() == "$x_1$" for ax in axes)
-        assert all(ax.get_ylabel() == "$x_2$" for ax in axes)
-    finally:
-        plt.close(fig)
+    assert [ax.get_title() for ax in axes] == [
+        "general, complexity=5, seed=0",
+        "monotone, complexity=5, seed=0",
+    ]
+    assert all(ax.collections for ax in axes)
+    assert all(ax.get_xlabel() == "$x_1$" for ax in axes)
+    assert all(ax.get_ylabel() == "$x_2$" for ax in axes)
 
 
 def _criteo_results() -> pd.DataFrame:
-    rows = []
-    for train_size in (2**14, 2**18):
-        for seed in range(3):
-            rows.append(
-                {
-                    "train_size": train_size,
-                    "data_seed": 0,
-                    "init_seed": seed,
-                    "lr": 0.01,
-                    "model": "linear",
-                    "matrix_dim": 0,
-                    "fm_rank": 0,
-                    "parameters_per_feature": 1,
-                    "test_logloss": 0.5 + seed / 100,
-                }
-            )
-            rows.append(
-                {
-                    "train_size": train_size,
-                    "data_seed": 0,
-                    "init_seed": seed,
-                    "lr": 0.01,
-                    "model": "linear-new",
-                    "matrix_dim": 0,
-                    "fm_rank": 0,
-                    "parameters_per_feature": 1,
-                    "test_logloss": 0.49 + seed / 100,
-                }
-            )
-            for dim, parameters in ((3, 6), (5, 15)):
-                for model in ("fm", "spectral-old", "spectral-new"):
-                    rows.append(
-                        {
-                            "train_size": train_size,
-                            "data_seed": 0,
-                            "init_seed": seed,
-                            "lr": 0.01,
-                            "model": model,
-                            "matrix_dim": dim if model.startswith("spectral") else 0,
-                            "fm_rank": parameters - 1 if model == "fm" else 0,
-                            "parameters_per_feature": parameters,
-                            "test_logloss": 0.5 + dim / 100 + seed / 1000,
-                        }
-                    )
-    return pd.DataFrame(rows)
+    models = (
+        ("linear", 0),
+        ("linear-new", 0),
+        *(
+            (model, dim)
+            for dim in (3, 5)
+            for model in ("fm", "spectral-old", "spectral-new")
+        ),
+    )
+    return pd.DataFrame(
+        {
+            "train_size": train_size,
+            "model": model,
+            "dim": dim,
+            "test_logloss": 0.5 + dim / 100 + seed / 1000,
+        }
+        for train_size, seed, (model, dim) in product(
+            (2**14, 2**18), range(3), models
+        )
+    )
 
 
 def _legend_labels(fig) -> list[str]:
@@ -246,55 +212,43 @@ def _legend_labels(fig) -> list[str]:
 
 def test_plot_criteo_models_by_dimension_facets_matched_models():
     fig = plot_criteo_models_by_dimension(_criteo_results())
-    try:
-        assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
-        assert _legend_labels(fig) == [
-            "Linear",
-            "Linear-new",
-            "FM",
-            "Spectral-old",
-            "Spectral-new",
-        ]
-        assert fig.legends[0].get_title().get_text() == "model"
-        assert len(fig.axes[1].lines) == 5
-        assert len(fig.axes[1].collections) == 5
-        assert all(ax.get_xscale() == "log" for ax in fig.axes)
-    finally:
-        plt.close(fig)
+    assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
+    assert _legend_labels(fig) == [
+        "Linear",
+        "Linear-new",
+        "FM",
+        "Spectral-old",
+        "Spectral-new",
+    ]
+    assert fig.legends[0].get_title().get_text() == "model"
+    assert len(fig.axes[1].lines) == 5
+    assert len(fig.axes[1].collections) == 5
+    assert all(ax.get_xscale() == "log" for ax in fig.axes)
 
 
 def test_plot_criteo_spectral_comparison_facets_dimensions():
     fig = plot_criteo_spectral_comparison(_criteo_results())
-    try:
-        assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
-        assert _legend_labels(fig) == ["Spectral-old", "Spectral-new"]
-        assert fig.legends[0].get_title().get_text() == "model"
-        assert len(fig.axes[1].lines) == 2
-        assert len(fig.axes[1].collections) == 2
-    finally:
-        plt.close(fig)
+    assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
+    assert _legend_labels(fig) == ["Spectral-old", "Spectral-new"]
+    assert fig.legends[0].get_title().get_text() == "model"
+    assert len(fig.axes[1].lines) == 2
+    assert len(fig.axes[1].collections) == 2
 
 
 @pytest.mark.parametrize("variant", ["spectral-old", "spectral-new"])
 def test_plot_criteo_spectral_dimensions_uses_one_axis(variant):
     fig = plot_criteo_spectral_dimensions(_criteo_results(), variant)
-    try:
-        assert len(fig.axes) == 1
-        assert _legend_labels(fig) == ["3", "5"]
-        assert fig.legends[0].get_title().get_text() == "dimension"
-        assert len(fig.axes[0].collections) == 2
-    finally:
-        plt.close(fig)
+    assert len(fig.axes) == 1
+    assert _legend_labels(fig) == ["3", "5"]
+    assert fig.legends[0].get_title().get_text() == "dimension"
+    assert len(fig.axes[0].collections) == 2
 
 
 def test_plot_criteo_fm_dimensions_supports_zoom():
     xlim = (2**14, 2**18)
     fig = plot_criteo_fm_dimensions(_criteo_results(), xlim=xlim)
-    try:
-        assert len(fig.axes) == 1
-        assert _legend_labels(fig) == ["5", "14"]
-        assert fig.legends[0].get_title().get_text() == "dimension"
-        assert len(fig.axes[0].collections) == 2
-        assert fig.axes[0].get_xlim() == pytest.approx(xlim)
-    finally:
-        plt.close(fig)
+    assert len(fig.axes) == 1
+    assert _legend_labels(fig) == ["5", "14"]
+    assert fig.legends[0].get_title().get_text() == "dimension"
+    assert len(fig.axes[0].collections) == 2
+    assert fig.axes[0].get_xlim() == pytest.approx(xlim)

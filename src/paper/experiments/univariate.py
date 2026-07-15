@@ -1,5 +1,3 @@
-import argparse
-from pathlib import Path
 from typing import TextIO
 
 import numpy as np
@@ -9,10 +7,6 @@ from paper.experiments import synthetic
 from paper.experiments.synthetic import Profile
 from paper.targets import make_target
 from paper.tasks import make_univariate_task
-
-
-DEFAULT_RUNS_DIR = synthetic.DEFAULT_RUNS_DIR
-
 
 PROFILES: dict[str, Profile] = {
     "sanity": Profile(
@@ -67,19 +61,11 @@ def run_profile(
     )
 
 
-def _default_raw_path(profile_name: str) -> Path:
-    return synthetic.default_raw_path("univariate", profile_name)
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    return synthetic.build_arg_parser(PROFILES)
-
-
 def main(argv: list[str] | None = None) -> None:
     synthetic.run_cli(
+        "univariate",
         PROFILES,
         run_profile,
-        default_raw_path=_default_raw_path,
         argv=argv,
     )
 

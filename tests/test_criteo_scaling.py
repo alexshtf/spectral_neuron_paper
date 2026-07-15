@@ -16,14 +16,10 @@ from paper.criteo import (
     prepare_corpus,
 )
 from paper.experiments.criteo_scaling import (
-    PROFILES,
     RAW_COLUMNS,
-    ModelSpec,
     Profile,
-    RunGrid,
     SeedGrid,
     build_arg_parser,
-    default_raw_path,
     run_profile,
     select_lr,
     summarize_raw,
@@ -66,6 +62,14 @@ def _frequent_categories() -> tuple[np.ndarray, ...]:
     return tuple(
         np.array([7], dtype=np.uint32) for _ in range(NUM_CATEGORICAL_FIELDS)
     )
+
+
+def test_cli_accepts_append_mode():
+    args = build_arg_parser().parse_args(
+        ["--data", "train.txt", "--write-mode", "append"]
+    )
+
+    assert args.write_mode == "append"
 
 
 def test_winner_style_numeric_buckets():
@@ -160,25 +164,16 @@ def test_preprocessing_reports_progress(tmp_path):
     )
 
 
-def test_run_grid_declares_five_variants_with_matched_dimensions():
-    grid = RunGrid(
-        Profile(
-            train_sizes=(16, 32),
-            dims=(5,),
-            lrs=(1e-2,),
-            tuning_seeds=SeedGrid(),
-            evaluation_seeds=SeedGrid(),
-        )
-    )
+def test_training_order_is_a_reproducible_permutation_of_the_full_prefix(tmp_path):
+    raw_path = tmp_path / "train.txt"
+    _write_tiny_criteo(raw_path)
+    corpus = prepare_corpus(raw_path, tmp_path / "cache")
 
-    assert grid.model_specs == (
-        ModelSpec("linear"),
-        ModelSpec("linear-new"),
-        ModelSpec("fm", fm_rank=14, parameters_per_feature=15),
-        ModelSpec("spectral-old", matrix_dim=5, parameters_per_feature=15),
-        ModelSpec("spectral-new", matrix_dim=5, parameters_per_feature=15),
-    )
-    assert len(grid) == 5
+    order = np.load(corpus.order_path(7))
+
+    np.testing.assert_array_equal(np.sort(order), np.arange(corpus.train_stop))
+    assert np.any(order[:8] >= 8)
+    np.testing.assert_array_equal(order, np.load(corpus.order_path(7)))
 
 
 def test_tiny_profile_runs_end_to_end(tmp_path):
@@ -186,7 +181,6 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
 
-    corpus = prepare_corpus(raw_path, cache_dir, chunk_size=23)
     raw = run_profile(
         _tiny_profile(),
         raw_path=raw_path,
@@ -195,7 +189,6 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     )
     summary = summarize_raw(raw)
 
-    assert corpus.rows == 100
     assert set(raw["model"]) == {
         "linear",
         "linear-new",
@@ -203,9 +196,8 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
         "spectral-old",
         "spectral-new",
     }
-    assert set(raw["preprocessing"]) == {"bucket", "hybrid"}
     assert set(raw["protocol"]) == {"one_pass"}
-    assert set(raw["optimizer"]) == {"adam"}
+    assert set(raw["optimizer"]) == {"adam+sparseadam"}
     assert set(raw["phase"]) == {"tuning", "evaluation"}
     assert set(raw["preprocessor_sample_size"]) == {8}
     assert set(RAW_COLUMNS) == set(raw.columns)
@@ -241,25 +233,7 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     )
 
     assert set(raw["model"]) == {"linear-new"}
-    assert set(raw["preprocessing"]) == {"hybrid"}
-    assert [path.name for path in cache_dir.glob("preprocessor_*.npz")] == [
-        "preprocessor_hybrid_sample8_seed0_min2_b32.npz"
-    ]
-    assert default_raw_path("full", "linear-new").name == (
-        "criteo_scaling_full_linear-new.csv"
-    )
-
-
-def test_variant_cli_defaults_to_all():
-    parser = build_arg_parser()
-
-    assert parser.parse_args(["--data", "train.txt"]).variant is None
-    assert (
-        parser.parse_args(
-            ["--data", "train.txt", "--variant", "spectral-new"]
-        ).variant
-        == "spectral-new"
-    )
+    assert len(list(cache_dir.glob("preprocessor_*.npz"))) == 1
 
 
 def test_parallel_profile_matches_serial_results(tmp_path):
@@ -274,96 +248,45 @@ def test_parallel_profile_matches_serial_results(tmp_path):
         _tiny_profile(), raw_path=raw_path, cache_dir=cache_dir, workers=2
     )
 
-    columns = [column for column in RAW_COLUMNS if column != "elapsed_seconds"]
-    pd.testing.assert_frame_equal(serial[columns], parallel[columns])
+    pd.testing.assert_frame_equal(serial, parallel)
 
 
-def test_lr_selection_uses_validation_not_test():
+def test_lr_selection_uses_median_tuning_validation_only():
     common = {
         "protocol": "one_pass",
-        "optimizer": "adam",
+        "optimizer": "adam+sparseadam",
         "preprocessor_sample_size": 8,
         "preprocessor_seed": 0,
         "train_size": 32,
         "model": "linear",
-        "preprocessing": "bucket",
-        "matrix_dim": 0,
-        "eig_idx": -1,
-        "fm_rank": 0,
-        "parameters_per_feature": 1,
-        "num_parameters": 100,
+        "dim": 0,
+        "data_seed": 0,
     }
-    raw = pd.DataFrame(
-        [
-            common | {"lr": 0.01, "val_logloss": 0.4, "test_logloss": 4.0},
-            common | {"lr": 0.1, "val_logloss": 0.5, "test_logloss": 0.1},
-        ]
-    )
+    tuning = [
+        common
+        | {
+            "phase": "tuning",
+            "lr": lr,
+            "init_seed": seed,
+            "val_logloss": score,
+        }
+        for lr, scores in ((0.01, (0.1, 10.0, 10.0)), (0.1, (1.0, 1.0, 100.0)))
+        for seed, score in enumerate(scores)
+    ]
+    evaluation = [
+        common
+        | {
+            "phase": "evaluation",
+            "lr": lr,
+            "init_seed": 3,
+            "val_logloss": val,
+            "test_logloss": test,
+        }
+        for lr, val, test in ((0.01, 0.1, 0.01), (0.1, 9.0, 4.0))
+    ]
 
-    selected = select_lr(raw)
-
-    assert selected["selected_lr"].tolist() == [0.01]
-
-
-def test_lr_selection_is_frozen_before_evaluation():
-    common = {
-        "protocol": "one_pass",
-        "optimizer": "adam",
-        "preprocessor_sample_size": 8,
-        "preprocessor_seed": 0,
-        "train_size": 32,
-        "model": "linear",
-        "preprocessing": "bucket",
-        "matrix_dim": 0,
-        "eig_idx": -1,
-        "fm_rank": 0,
-        "parameters_per_feature": 1,
-        "num_parameters": 100,
-    }
-    raw = pd.DataFrame(
-        [
-            common | {"phase": "tuning", "lr": 0.01, "val_logloss": 0.4},
-            common | {"phase": "tuning", "lr": 0.1, "val_logloss": 0.5},
-            common
-            | {
-                "phase": "evaluation",
-                "lr": 0.01,
-                "val_logloss": 9.0,
-                "test_logloss": 4.0,
-            },
-            common
-            | {
-                "phase": "evaluation",
-                "lr": 0.1,
-                "val_logloss": 0.1,
-                "test_logloss": 0.1,
-            },
-        ]
-    )
-
-    selected = select_lr(raw)
+    selected = select_lr(pd.DataFrame(tuning + evaluation))
 
     assert selected[["lr", "median_val_logloss", "test_logloss"]].to_dict(
         "records"
-    ) == [{"lr": 0.01, "median_val_logloss": 0.4, "test_logloss": 4.0}]
-
-
-def test_full_profile_trades_scale_for_crossed_evaluation_seeds():
-    profile = PROFILES["full"]
-
-    assert profile.train_sizes == (
-        2**11,
-        2**13,
-        2**15,
-        2**17,
-        2**19,
-        2**21,
-        2**22,
-        36_672_493 // 8,
-    )
-    assert profile.tuning_seeds == SeedGrid(init_seeds=range(3))
-    assert profile.evaluation_seeds == SeedGrid(
-        data_seeds=range(1, 5),
-        init_seeds=range(3, 9),
-    )
-    assert len(profile.evaluation_seeds) == 24
+    ) == [{"lr": 0.1, "median_val_logloss": 1.0, "test_logloss": 4.0}]

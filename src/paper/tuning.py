@@ -8,7 +8,6 @@ RUN_COLUMNS = [
     "noise_std",
     "model",
     "dim",
-    "eig_idx",
     "lr",
     "init_seed",
 ]
@@ -19,7 +18,6 @@ SELECTION_COLUMNS = [
     "noise_std",
     "model",
     "dim",
-    "eig_idx",
     "budget",
 ]
 
@@ -81,7 +79,6 @@ def summarize_selected(selected: pd.DataFrame) -> pd.DataFrame:
         median_test_rmse="median",
         q25_test_rmse=lambda s: s.quantile(0.25),
         q75_test_rmse=lambda s: s.quantile(0.75),
-        mean_test_rmse="mean",
         n="size",
     )
     return summary.reset_index()

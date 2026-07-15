@@ -7,6 +7,13 @@ from torch import nn
 type ModelKind = Literal["unconstrained", "monotone"]
 
 
+def _resolve_eig_idx(dim: int, eig_idx: int | None) -> int:
+    eig_idx = dim // 2 if eig_idx is None else eig_idx
+    if not 0 <= eig_idx < dim:
+        raise ValueError(f"eig_idx must be in [0, {dim}); got {eig_idx}")
+    return eig_idx
+
+
 class TrilEmbed(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -29,9 +36,7 @@ class KthEigval(nn.Module):
     def __init__(self, num_features: int, dim: int, eig_idx: int | None = None):
         super().__init__()
         self.dim = dim
-        self.eig_idx = dim // 2 if eig_idx is None else eig_idx
-        if not 0 <= self.eig_idx < dim:
-            raise ValueError(f"eig_idx must be in [0, {dim}); got {self.eig_idx}")
+        self.eig_idx = _resolve_eig_idx(dim, eig_idx)
 
         self.lin = nn.Linear(num_features, dim * (dim + 1) // 2)
         self.tril_emb = TrilEmbed(dim)
@@ -94,11 +99,7 @@ class FactorizationMachine(SparseLinear):
         feature_ids: torch.Tensor,
         feature_values: torch.Tensor,
     ) -> torch.Tensor:
-        _check_sparse_input(feature_ids, feature_values, self.num_fields)
-        linear = (
-            (self.weight(feature_ids).squeeze(-1) * feature_values).sum(dim=-1)
-            + self.bias
-        )
+        linear = super().forward(feature_ids, feature_values)
         vectors = self.embedding(feature_ids) * feature_values.unsqueeze(-1)
         interaction = 0.5 * (
             vectors.sum(dim=-2).square().sum(dim=-1)
@@ -120,9 +121,7 @@ class SparseKthEigval(nn.Module):
         super().__init__()
         self.num_fields = num_fields
         self.dim = dim
-        self.eig_idx = dim // 2 if eig_idx is None else eig_idx
-        if not 0 <= self.eig_idx < dim:
-            raise ValueError(f"eig_idx must be in [0, {dim}); got {self.eig_idx}")
+        self.eig_idx = _resolve_eig_idx(dim, eig_idx)
 
         num_tril = dim * (dim + 1) // 2
         self.feature_tril = nn.Embedding(num_features, num_tril, sparse=True)
@@ -166,9 +165,7 @@ class KthEigvalLastMonotone(nn.Module):
 
         self.num_features = num_features
         self.dim = dim
-        self.eig_idx = dim // 2 if eig_idx is None else eig_idx
-        if not 0 <= self.eig_idx < dim:
-            raise ValueError(f"eig_idx must be in [0, {dim}); got {self.eig_idx}")
+        self.eig_idx = _resolve_eig_idx(dim, eig_idx)
 
         num_tril = dim * (dim + 1) // 2
         self.dense_tril = nn.Parameter(torch.empty(num_features, num_tril))
@@ -188,27 +185,17 @@ class KthEigvalLastMonotone(nn.Module):
                 f"expected input shape (..., {self.num_features}); got {tuple(x.shape)}"
             )
 
-        # compute batchd A_0 + x_11 A_1 + ... + x_{n-1} A_{n-1}
         all_but_last_tril = self.dense_tril[0] + x[..., :-1].matmul(self.dense_tril[1:])
         all_but_last_mat = self.tril_emb(all_but_last_tril)
-
-        # compute x_n diag(a_n)
         last_mat = torch.diag_embed(x[..., -1:] * square_plus(self.last_diag))
-
-        # compute eigenvalues
         return torch.linalg.eigvalsh(all_but_last_mat + last_mat)[..., self.eig_idx]
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    name: str
     kind: ModelKind
     dim: int
     eig_idx: int | None = None
-
-    @classmethod
-    def from_kind_dim(cls, kind: ModelKind, dim: int):
-        return cls(name=kind, kind=kind, dim=dim)
 
 
 def make_model(spec: ModelSpec, input_dim: int) -> nn.Module:

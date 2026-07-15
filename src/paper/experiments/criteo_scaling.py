@@ -10,8 +10,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from tqdm.auto import tqdm
-from tqdm.contrib.concurrent import process_map
 
 from paper.criteo import (
     NUM_FIELDS,
@@ -22,7 +20,8 @@ from paper.criteo import (
     load_preprocessor,
     prepare_corpus,
 )
-from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, _write_csv
+from paper.experiments import run_many
+from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
 from paper.training import (
     fit_and_test_binary_scaling,
@@ -47,31 +46,23 @@ VARIANTS: tuple[Variant, ...] = (
 )
 
 PROTOCOL = "one_pass"
-OPTIMIZER = "adam"
+OPTIMIZER = "adam+sparseadam"
 
 RAW_COLUMNS = [
     "protocol",
     "optimizer",
-    "phase",
     "preprocessor_sample_size",
     "preprocessor_seed",
+    "phase",
     "train_size",
     "data_seed",
     "model",
-    "preprocessing",
-    "matrix_dim",
-    "eig_idx",
-    "fm_rank",
-    "parameters_per_feature",
-    "num_parameters",
+    "dim",
     "lr",
     "init_seed",
-    "train_logloss",
     "val_logloss",
-    "val_brier",
     "test_logloss",
     "test_brier",
-    "elapsed_seconds",
 ]
 
 EXPERIMENT_COLUMNS = [
@@ -84,12 +75,7 @@ EXPERIMENT_COLUMNS = [
 MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "train_size",
     "model",
-    "preprocessing",
-    "matrix_dim",
-    "eig_idx",
-    "fm_rank",
-    "parameters_per_feature",
-    "num_parameters",
+    "dim",
 ]
 
 
@@ -159,36 +145,11 @@ PROFILES: dict[str, Profile] = {
 @dataclass(frozen=True)
 class ModelSpec:
     variant: Variant
-    matrix_dim: int = 0
-    fm_rank: int = 0
-    parameters_per_feature: int = 1
+    dim: int = 0
 
     @property
     def preprocessing(self) -> PreprocessingKind:
         return "hybrid" if self.variant.endswith("-new") else "bucket"
-
-    @classmethod
-    def fm_for_dim(cls, dim: int) -> "ModelSpec":
-        parameters = dim * (dim + 1) // 2
-        return cls(
-            variant="fm",
-            fm_rank=parameters - 1,
-            parameters_per_feature=parameters,
-        )
-
-    @classmethod
-    def spectral(
-        cls,
-        variant: Literal["spectral-old", "spectral-new"],
-        dim: int,
-    ) -> "ModelSpec":
-        parameters = dim * (dim + 1) // 2
-        return cls(
-            variant=variant,
-            matrix_dim=dim,
-            parameters_per_feature=parameters,
-        )
-
 
 @dataclass(frozen=True)
 class RunConfig:
@@ -198,40 +159,30 @@ class RunConfig:
     init_seed: int
 
 
-@dataclass(frozen=True)
-class RunGrid:
-    profile: Profile
-    variants: tuple[Variant, ...] = VARIANTS
+def _model_specs(
+    profile: Profile, variants: tuple[Variant, ...]
+) -> tuple[ModelSpec, ...]:
+    specs = [ModelSpec("linear"), ModelSpec("linear-new")]
+    specs.extend(
+        ModelSpec(variant, dim)
+        for dim in profile.dims
+        for variant in ("fm", "spectral-old", "spectral-new")
+    )
+    return tuple(spec for spec in specs if spec.variant in variants)
 
-    @property
-    def model_specs(self) -> tuple[ModelSpec, ...]:
-        specs = [ModelSpec("linear"), ModelSpec("linear-new")]
-        specs.extend(
-            spec
-            for dim in self.profile.dims
-            for spec in (
-                ModelSpec.fm_for_dim(dim),
-                ModelSpec.spectral("spectral-old", dim),
-                ModelSpec.spectral("spectral-new", dim),
-            )
-        )
-        return tuple(spec for spec in specs if spec.variant in self.variants)
 
-    def __len__(self) -> int:
-        return (
-            len(self.profile.tuning_seeds)
-            * len(self.model_specs)
-            * len(self.profile.lrs)
-        )
-
-    def __iter__(self) -> Iterator[RunConfig]:
+def _tuning_configs(
+    profile: Profile, variants: tuple[Variant, ...]
+) -> tuple[RunConfig, ...]:
+    return tuple(
+        RunConfig(data_seed, model_spec, lr, init_seed)
         for data_seed, model_spec, lr, init_seed in product(
-            self.profile.tuning_seeds.data_seeds,
-            self.model_specs,
-            self.profile.lrs,
-            self.profile.tuning_seeds.init_seeds,
-        ):
-            yield RunConfig(data_seed, model_spec, lr, init_seed)
+            profile.tuning_seeds.data_seeds,
+            _model_specs(profile, variants),
+            profile.lrs,
+            profile.tuning_seeds.init_seeds,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -256,9 +207,10 @@ def make_model(spec: ModelSpec, num_features: int) -> nn.Module:
         case "linear" | "linear-new":
             return SparseLinear(num_features, NUM_FIELDS)
         case "fm":
-            return FactorizationMachine(num_features, NUM_FIELDS, spec.fm_rank)
+            rank = spec.dim * (spec.dim + 1) // 2 - 1
+            return FactorizationMachine(num_features, NUM_FIELDS, rank)
         case "spectral-old" | "spectral-new":
-            return SparseKthEigval(num_features, NUM_FIELDS, spec.matrix_dim)
+            return SparseKthEigval(num_features, NUM_FIELDS, spec.dim)
         case _:
             raise ValueError(spec.variant)
 
@@ -297,7 +249,6 @@ def _make_task_model(
 
 def _metadata(
     config: RunConfig,
-    model: nn.Module,
     settings: RunSettings,
 ) -> dict[str, int | float | str]:
     return {
@@ -307,16 +258,7 @@ def _metadata(
         "preprocessor_seed": settings.preprocessor_seed,
         "data_seed": config.data_seed,
         "model": config.model_spec.variant,
-        "preprocessing": config.model_spec.preprocessing,
-        "matrix_dim": config.model_spec.matrix_dim,
-        "eig_idx": (
-            config.model_spec.matrix_dim // 2
-            if config.model_spec.variant.startswith("spectral-")
-            else -1
-        ),
-        "fm_rank": config.model_spec.fm_rank,
-        "parameters_per_feature": config.model_spec.parameters_per_feature,
-        "num_parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "dim": config.model_spec.dim,
         "lr": config.lr,
         "init_seed": config.init_seed,
     }
@@ -327,12 +269,11 @@ def _format_result(
     *,
     phase: Literal["tuning", "evaluation"],
     config: RunConfig,
-    model: nn.Module,
     settings: RunSettings,
 ) -> pd.DataFrame:
     return result.assign(
         phase=phase,
-        **_metadata(config, model, settings),
+        **_metadata(config, settings),
     ).reindex(columns=RAW_COLUMNS)
 
 
@@ -348,7 +289,6 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
         result,
         phase="tuning",
         config=config,
-        model=model,
         settings=settings,
     )
 
@@ -369,17 +309,7 @@ def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
         result,
         phase="evaluation",
         config=selected.config,
-        model=model,
         settings=settings,
-    )
-
-
-def _model_spec(row) -> ModelSpec:
-    return ModelSpec(
-        row.model,
-        matrix_dim=row.matrix_dim,
-        fm_rank=row.fm_rank,
-        parameters_per_feature=row.parameters_per_feature,
     )
 
 
@@ -392,7 +322,7 @@ def _selected_runs(
         for data_seed, init_seed in evaluation_seeds:
             config = RunConfig(
                 data_seed=data_seed,
-                model_spec=_model_spec(row),
+                model_spec=ModelSpec(row.model, row.dim),
                 lr=row.selected_lr,
                 init_seed=init_seed,
             )
@@ -443,9 +373,10 @@ def run_profile(
 
     sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
     variants = (variant,) if variant is not None else VARIANTS
-    configs = RunGrid(profile, variants)
+    model_specs = _model_specs(profile, variants)
+    configs = _tuning_configs(profile, variants)
     preprocessing_kinds = tuple(
-        dict.fromkeys(spec.preprocessing for spec in configs.model_specs)
+        dict.fromkeys(spec.preprocessing for spec in model_specs)
     )
     preprocessor_paths = fit_preprocessors(
         corpus,
@@ -472,27 +403,15 @@ def run_profile(
         threads_per_worker=1 if workers > 1 else None,
     )
     tune = partial(run_config, settings=settings)
-    if workers == 1:
-        items = tqdm(
-            configs,
-            total=len(configs),
-            desc="Tuning",
-            unit="trajectory",
-            disable=not progress,
-            file=progress_file,
-        )
-        tuning_results = [tune(config) for config in items]
-    else:
-        tuning_results = process_map(
-            tune,
-            configs,
-            max_workers=workers,
-            chunksize=1,
-            desc="Tuning",
-            unit="trajectory",
-            disable=not progress,
-            file=progress_file,
-        )
+    tuning_results = run_many(
+        tune,
+        configs,
+        workers=workers,
+        desc="Tuning",
+        unit="trajectory",
+        progress=progress,
+        progress_file=progress_file,
+    )
 
     if not tuning_results:
         return pd.DataFrame(columns=RAW_COLUMNS)
@@ -500,26 +419,15 @@ def run_profile(
     selected_runs = _selected_runs(tuning, profile.evaluation_seeds)
 
     test = partial(run_selected, settings=settings)
-    if workers == 1:
-        items = tqdm(
-            selected_runs,
-            desc="Testing",
-            unit="trajectory",
-            disable=not progress,
-            file=progress_file,
-        )
-        test_results = [test(selected) for selected in items]
-    else:
-        test_results = process_map(
-            test,
-            selected_runs,
-            max_workers=workers,
-            chunksize=1,
-            desc="Testing",
-            unit="trajectory",
-            disable=not progress,
-            file=progress_file,
-        )
+    test_results = run_many(
+        test,
+        selected_runs,
+        workers=workers,
+        desc="Testing",
+        unit="trajectory",
+        progress=progress,
+        progress_file=progress_file,
+    )
 
     evaluation = pd.concat(test_results, ignore_index=True)
     return pd.concat((tuning, evaluation), ignore_index=True).loc[:, RAW_COLUMNS]
@@ -542,10 +450,9 @@ def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
     return best[MODEL_COLUMNS + ["selected_lr", "median_val_logloss"]]
 
 
-def _select_evaluations(
-    tuning: pd.DataFrame,
-    evaluation: pd.DataFrame,
-) -> pd.DataFrame:
+def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
+    tuning = raw.loc[raw["phase"] == "tuning"]
+    evaluation = raw.loc[raw["phase"] == "evaluation"]
     best = _best_lrs(tuning)
     selected = evaluation.merge(
         best[MODEL_COLUMNS + ["selected_lr", "median_val_logloss"]],
@@ -555,27 +462,6 @@ def _select_evaluations(
     return selected.loc[selected["lr"] == selected["selected_lr"]].reset_index(
         drop=True
     )
-
-
-def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
-    if "phase" not in raw:
-        return _select_evaluations(raw, raw)
-
-    selected = []
-    staged = raw.loc[raw["phase"].notna()]
-    if not staged.empty:
-        selected.append(
-            _select_evaluations(
-                staged.loc[staged["phase"] == "tuning"],
-                staged.loc[staged["phase"] == "evaluation"],
-            )
-        )
-
-    legacy = raw.loc[raw["phase"].isna()].drop(columns="phase")
-    if not legacy.empty:
-        selected.append(_select_evaluations(legacy, legacy))
-
-    return pd.concat(selected, ignore_index=True) if selected else raw.iloc[:0].copy()
 
 
 def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
@@ -612,7 +498,6 @@ def build_arg_parser(
     parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
     parser.add_argument("--variant", choices=VARIANTS, default=None)
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--summary-out", type=Path, default=None)
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--quiet", action="store_true")
@@ -633,13 +518,11 @@ def main(argv: list[str] | None = None) -> None:
         variant=args.variant,
         progress=not args.quiet,
     )
-    _write_csv(
+    write_csv(
         raw,
         args.out or default_raw_path(args.profile, args.variant),
         write_mode=args.write_mode,
     )
-    if args.summary_out is not None:
-        _write_csv(summarize_raw(raw), args.summary_out, write_mode=args.write_mode)
 
 
 if __name__ == "__main__":

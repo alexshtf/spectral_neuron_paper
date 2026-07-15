@@ -6,30 +6,28 @@ from torch import nn
 from paper.models import SparseLinear
 from paper.tasks import Task
 from paper.training import (
+    _adam_optimizers,
+    evaluate_binary,
+    evaluate_rmse,
     fit_and_test_binary_scaling,
     run_one_stream,
     train_binary_scaling_events,
 )
 
 
-class CountingLinear(nn.Module):
-    def __init__(self, clock: list[int]):
+class ModeRecorder(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.clock = clock
-        self.linear = nn.Linear(1, 1, bias=False)
-        nn.init.zeros_(self.linear.weight)
+        self.modes: list[bool] = []
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        self.clock[0] += 1
-        return self.linear(x).squeeze(-1)
+    def forward(self, x: torch.Tensor, *_: torch.Tensor) -> torch.Tensor:
+        self.modes.append(self.training)
+        return torch.zeros(x.shape[:-1])
 
 
-def test_checkpoint_metrics_describe_post_update_model(monkeypatch):
-    clock = [0]
-    monkeypatch.setattr("paper.training.perf_counter", lambda: float(clock[0]))
-
+def test_checkpoint_metrics_describe_post_update_model():
     x = torch.ones(1, 1)
-    y = torch.ones(1)
+    y = torch.ones(1, 1)
 
     def train_batches(_: np.random.Generator):
         while True:
@@ -43,22 +41,44 @@ def test_checkpoint_metrics_describe_post_update_model(monkeypatch):
         y_test=y,
         train_batches=train_batches,
     )
-    model = CountingLinear(clock)
+    model = nn.Linear(1, 1, bias=False)
+    nn.init.zeros_(model.weight)
 
     result = run_one_stream(
         task,
         model,
         lr=0.1,
         train_seed=0,
-        steps=2,
         checkpoints=(1, 2),
     )
 
     with torch.inference_mode():
         expected_rmse = torch.mean((model(x) - y) ** 2).sqrt().item()
 
-    assert result["train_rmse"].iloc[-1] == pytest.approx(expected_rmse)
-    assert result["elapsed_seconds"].tolist() == [4.0, 8.0]
+    assert result["val_rmse"].iloc[-1] == pytest.approx(expected_rmse)
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_evaluation_restores_model_mode(training):
+    model = ModeRecorder()
+    x = torch.zeros(2, 1)
+    y = torch.zeros(2)
+
+    model.train(training)
+    evaluate_rmse(model, x, y)
+    assert model.modes.pop() is False
+    assert model.training is training
+
+    model.train(training)
+    evaluate_binary(model, [(x.long(), x, y)])
+    assert model.modes.pop() is False
+    assert model.training is training
+
+
+def test_binary_models_use_adam_and_sparse_adam():
+    optimizers = _adam_optimizers(SparseLinear(3, 1), lr=0.1)
+
+    assert tuple(map(type, optimizers)) == (torch.optim.Adam, torch.optim.SparseAdam)
 
 
 def test_binary_scaling_consumes_each_nested_prefix_once():
