@@ -202,7 +202,7 @@ PROFILES: dict[str, Profile] = {
     ),
     "small": Profile(
         train_sizes=(2**14, 2**18, 2**22),
-        dims=(3, 5),
+        dims=(3, 7),
         lrs=(1e-3, 1e-2, 1e-1),
         tuning_seeds=SeedGrid(init_seeds=range(2)),
         evaluation_seeds=SeedGrid(
@@ -221,9 +221,9 @@ PROFILES: dict[str, Profile] = {
             2**23,
             10_000_000,
         ),
-        dims=(3, 5, 9, 15),
-        lrs=tuple(np.geomspace(1e-4, 1e-1, 6).tolist()),
-        tuning_seeds=SeedGrid(init_seeds=range(2)),
+        dims=(3, 7, 11),
+        lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
+        tuning_seeds=SeedGrid(init_seeds=range(8)),
         evaluation_seeds=SeedGrid(
             data_seeds=range(1, 3), init_seeds=range(2, 5)
         ),
