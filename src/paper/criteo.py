@@ -525,7 +525,7 @@ def fit_preprocessors(
     return paths
 
 
-type TensorBatch = tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
+type BinaryBatch = tuple[tuple[torch.Tensor, ...], torch.Tensor]
 type EncodedArrays = tuple[np.ndarray, np.ndarray | None, np.ndarray]
 
 
@@ -715,13 +715,13 @@ class CriteoTask:
         if not 0 < self.data.validation_rows < len(self._holdout_arrays[0]):
             raise ValueError("validation and test data must not be empty")
 
-    def train_batches(self, start: int, stop: int) -> Iterator[TensorBatch]:
+    def train_batches(self, start: int, stop: int) -> Iterator[BinaryBatch]:
         yield from self._batches(self._train_arrays, start, stop)
 
-    def val_batches(self) -> Iterator[TensorBatch]:
+    def val_batches(self) -> Iterator[BinaryBatch]:
         yield from self._batches(self._holdout_arrays, 0, self.data.validation_rows)
 
-    def test_batches(self) -> Iterator[TensorBatch]:
+    def test_batches(self) -> Iterator[BinaryBatch]:
         yield from self._batches(
             self._holdout_arrays,
             self.data.validation_rows,
@@ -733,7 +733,7 @@ class CriteoTask:
         arrays: EncodedArrays,
         start: int,
         stop: int,
-    ) -> Iterator[TensorBatch]:
+    ) -> Iterator[BinaryBatch]:
         feature_ids, feature_values, labels = arrays
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
@@ -741,8 +741,12 @@ class CriteoTask:
             batch_values = (
                 None if feature_values is None else np.asarray(feature_values[rows])
             )
-            yield (
-                torch.from_numpy(np.asarray(feature_ids[rows])),
-                None if batch_values is None else torch.from_numpy(batch_values),
-                torch.from_numpy(np.asarray(labels[rows], dtype=np.float32)),
+            batch_ids = torch.from_numpy(np.asarray(feature_ids[rows]))
+            model_inputs = (
+                (batch_ids,)
+                if batch_values is None
+                else (batch_ids, torch.from_numpy(batch_values))
+            )
+            yield model_inputs, torch.from_numpy(
+                np.asarray(labels[rows], dtype=np.float32)
             )

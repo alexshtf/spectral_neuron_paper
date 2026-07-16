@@ -2,6 +2,59 @@
 
 Research code for the spectral neuron paper.
 
+## HIGGS scaling experiment
+
+The HIGGS experiment consumes the headerless 11-million-row CSV. It uses the first
+10 million rows for training, the next 500,000 for validation, and the official final
+500,000-row test partition. This is the dataset's published row-order split, not a
+chronological split.
+
+The first run converts the CSV into float32 feature and uint8 label memory maps and
+stores training-only means and standard deviations. The fixed standardizer is then
+applied to every model and checkpoint. All 28 inputs remain numeric, including the
+four ternary b-tag fields; there is no binning, one-hot encoding, or imputation. By
+default this roughly 1.25 GB base cache, plus one 40 MB training-order file per data
+seed, lives in
+`.HIGGS.csv.cache-v1` beside the input. Use `--cache-dir` to place it elsewhere.
+
+Each trajectory makes one pass over nested prefixes of a fixed shuffled training
+order. The x-axis is therefore examples seen by the optimizer, not the number of rows
+available to a separately fitted preprocessing-and-training pipeline. Learning rates
+are selected by validation log loss at the largest checkpoint. The selected model is
+then retrained once and tested at every checkpoint, so each plotted curve comes from
+one coherent trajectory.
+
+The comparison contains linear and spectral models plus one-, two-, and three-hidden-
+layer ReLU MLP families. Hidden layers within an MLP have constant width. Widths are
+computed from the requested spectral parameter budget and recorded with the actual
+trainable parameter count in every result row.
+
+```bash
+uv run python -m paper.experiments.higgs_scaling \
+  --data ~/datasets/HIGGS.csv \
+  --profile sanity \
+  --workers 2
+```
+
+The full profile is intentionally substantial. Run it in model-family shards and
+append them to one explicitly named result file, for example:
+
+```bash
+uv run python -m paper.experiments.higgs_scaling \
+  --data ~/datasets/HIGGS.csv \
+  --profile full \
+  --variant mlp-2 \
+  --out notebooks/runs/higgs_scaling_full.csv \
+  --write-mode append
+```
+
+Repeat the command for `linear`, `mlp-1`, `mlp-3`, and `spectral`. The
+`notebooks/higgs_scaling.ipynb` companion validates the merged raw schema and run
+completeness, derives its capacity table from recorded widths and parameter counts,
+performs validation selection, and plots median test log loss or Brier score with
+interquartile bands. This first version deliberately excludes leaderboard-oriented AUC
+reporting and multi-epoch convergence studies.
+
 ## Criteo scaling experiment
 
 The experiment expects the headerless, tab-separated training file from the Criteo

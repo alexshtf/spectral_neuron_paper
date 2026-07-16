@@ -233,10 +233,10 @@ def test_encoded_cache_preserves_preprocessing_and_minibatches(tmp_path):
         if kind == "bucket":
             task = CriteoTask(data, 7, batch_size)
             val_labels = np.concatenate(
-                [labels.numpy() for _, _, labels in task.val_batches()]
+                [labels.numpy() for _, labels in task.val_batches()]
             )
             test_labels = np.concatenate(
-                [labels.numpy() for _, _, labels in task.test_batches()]
+                [labels.numpy() for _, labels in task.test_batches()]
             )
             labels = corpus.labels()
             np.testing.assert_array_equal(

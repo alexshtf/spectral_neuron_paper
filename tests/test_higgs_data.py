@@ -1,0 +1,303 @@
+import json
+import pickle
+from io import StringIO
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+
+import paper.higgs as higgs
+from paper.higgs import (
+    FEATURES_FILE,
+    LABELS_FILE,
+    METADATA_FILE,
+    NUM_FEATURES,
+    HiggsCorpus,
+    HiggsLayout,
+    HiggsTask,
+    prepare_corpus,
+)
+
+
+TINY_LAYOUT = HiggsLayout(rows=12, train_stop=8, val_stop=10)
+
+
+def _tiny_data(rows: int = TINY_LAYOUT.rows) -> np.ndarray:
+    row = np.arange(rows, dtype=np.float32)[:, None]
+    field = np.arange(NUM_FEATURES, dtype=np.float32)[None, :]
+    features = row * 2.0 + field / 10.0
+    labels = (np.arange(rows) % 3 == 0).astype(np.float32)
+    return np.column_stack((labels, features))
+
+
+def _write_csv(path: Path, values: np.ndarray) -> None:
+    np.savetxt(path, values, delimiter=",", fmt="%.9g")
+
+
+def _prepare(tmp_path: Path, values: np.ndarray | None = None):
+    raw_path = tmp_path / "HIGGS.csv"
+    cache_dir = tmp_path / "cache"
+    values = _tiny_data() if values is None else values
+    _write_csv(raw_path, values)
+    corpus = prepare_corpus(
+        raw_path,
+        cache_dir,
+        layout=TINY_LAYOUT,
+        chunk_size=3,
+    )
+    return raw_path, cache_dir, corpus, values
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (0, 1, 2),
+        (3, 3, 4),
+        (3, 4, 4),
+        (5, 4, 6),
+    ],
+)
+def test_layout_requires_strict_nonempty_boundaries(values):
+    with pytest.raises(ValueError, match="train_stop"):
+        HiggsLayout(*values)
+
+
+def test_layout_requires_integer_boundaries():
+    with pytest.raises(TypeError, match="integers"):
+        HiggsLayout(12.0, 8, 10)
+
+
+def test_prepare_corpus_preserves_data_and_training_statistics(tmp_path):
+    raw_path, cache_dir, corpus, values = _prepare(tmp_path)
+
+    expected_features = values[:, 1:].astype(np.float32)
+    np.testing.assert_array_equal(corpus.features(), expected_features)
+    np.testing.assert_array_equal(corpus.labels(), values[:, 0].astype(np.uint8))
+    expected_training = expected_features[: TINY_LAYOUT.train_stop].astype(np.float64)
+    np.testing.assert_allclose(corpus.feature_mean, expected_training.mean(axis=0))
+    np.testing.assert_allclose(corpus.feature_scale, expected_training.std(axis=0))
+    assert corpus.layout == TINY_LAYOUT
+    assert corpus.source_size == raw_path.stat().st_size
+    assert (cache_dir / FEATURES_FILE).stat().st_size == values.shape[0] * 28 * 4
+    assert (cache_dir / LABELS_FILE).stat().st_size == values.shape[0]
+
+    reopened = HiggsCorpus.open(
+        cache_dir,
+        layout=TINY_LAYOUT,
+        source_size=raw_path.stat().st_size,
+    )
+    assert reopened == corpus
+
+
+def test_prepare_corpus_reuses_a_valid_cache_and_reports_progress(tmp_path):
+    raw_path, cache_dir, corpus, _ = _prepare(tmp_path)
+    output = StringIO()
+
+    cached = prepare_corpus(
+        raw_path,
+        cache_dir,
+        layout=TINY_LAYOUT,
+        progress=True,
+        progress_file=output,
+    )
+
+    assert cached == corpus
+    assert "HIGGS corpus: 12 rows (cached)" in output.getvalue()
+
+
+def test_statistics_ignore_validation_and_test_rows(tmp_path):
+    first = _tiny_data()
+    second = first.copy()
+    second[TINY_LAYOUT.train_stop :, 1:] += 10_000
+    first_path = tmp_path / "first"
+    second_path = tmp_path / "second"
+    first_path.mkdir()
+    second_path.mkdir()
+
+    *_, first_corpus, _ = _prepare(first_path, first)
+    *_, second_corpus, _ = _prepare(second_path, second)
+
+    np.testing.assert_array_equal(first_corpus.feature_mean, second_corpus.feature_mean)
+    np.testing.assert_array_equal(
+        first_corpus.feature_scale, second_corpus.feature_scale
+    )
+
+
+def test_zero_training_variance_uses_unit_scale(tmp_path):
+    values = _tiny_data()
+    values[: TINY_LAYOUT.train_stop, 1] = 7.0
+    *_, corpus, _ = _prepare(tmp_path, values)
+
+    assert corpus.feature_mean[0] == 7.0
+    assert corpus.feature_scale[0] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        (_tiny_data()[:, :-1], "29 columns"),
+        (_tiny_data()[:-1], "expected 12 rows"),
+        (_tiny_data(13), "input has more"),
+    ],
+)
+def test_prepare_rejects_wrong_shapes_without_publishing_cache(
+    tmp_path, values, message
+):
+    raw_path = tmp_path / "HIGGS.csv"
+    cache_dir = tmp_path / "cache"
+    _write_csv(raw_path, values)
+
+    with pytest.raises(ValueError, match=message):
+        prepare_corpus(raw_path, cache_dir, layout=TINY_LAYOUT, chunk_size=3)
+
+    assert not (cache_dir / METADATA_FILE).exists()
+    assert not list(cache_dir.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [(0, 2.0, "binary"), (1, np.nan, "finite")],
+)
+def test_prepare_rejects_invalid_values_without_publishing_cache(
+    tmp_path, column, value, message
+):
+    values = _tiny_data()
+    values[4, column] = value
+    raw_path = tmp_path / "HIGGS.csv"
+    cache_dir = tmp_path / "cache"
+    _write_csv(raw_path, values)
+
+    with pytest.raises(ValueError, match=message):
+        prepare_corpus(raw_path, cache_dir, layout=TINY_LAYOUT, chunk_size=3)
+
+    assert not (cache_dir / METADATA_FILE).exists()
+    assert not list(cache_dir.glob(".*.tmp"))
+
+
+def test_open_validates_backing_file_sizes(tmp_path):
+    _, cache_dir, _, _ = _prepare(tmp_path)
+    with (cache_dir / LABELS_FILE).open("ab") as file:
+        file.write(b"\0")
+
+    with pytest.raises(ValueError, match="labels.dat"):
+        HiggsCorpus.open(cache_dir)
+
+
+def test_open_validates_layout_source_size_and_dtype_metadata(tmp_path):
+    raw_path, cache_dir, _, _ = _prepare(tmp_path)
+
+    with pytest.raises(ValueError, match="layout"):
+        HiggsCorpus.open(cache_dir, layout=HiggsLayout(12, 7, 10))
+    with pytest.raises(ValueError, match="source size"):
+        HiggsCorpus.open(cache_dir, source_size=raw_path.stat().st_size + 1)
+
+    metadata_path = cache_dir / METADATA_FILE
+    metadata = json.loads(metadata_path.read_text())
+    metadata["feature_dtype"] = "float64"
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="float32"):
+        HiggsCorpus.open(cache_dir)
+
+
+def test_interrupted_conversion_closes_and_removes_temporary_files(
+    tmp_path, monkeypatch
+):
+    raw_path = tmp_path / "HIGGS.csv"
+    cache_dir = tmp_path / "cache"
+    _write_csv(raw_path, _tiny_data())
+
+    def interrupt(*args, **kwargs):
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(higgs, "_combine_moments", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        prepare_corpus(raw_path, cache_dir, layout=TINY_LAYOUT, chunk_size=3)
+
+    assert not (cache_dir / METADATA_FILE).exists()
+    assert not (cache_dir / FEATURES_FILE).exists()
+    assert not (cache_dir / LABELS_FILE).exists()
+    assert not list(cache_dir.glob(".*.tmp"))
+
+
+def test_order_is_deterministic_complete_and_regenerates_invalid_cache(tmp_path):
+    _, _, corpus, _ = _prepare(tmp_path)
+    order_path = corpus.order_path(7)
+    order = np.load(order_path, mmap_mode="r")
+    original = np.array(order)
+
+    assert order.dtype == np.uint32
+    np.testing.assert_array_equal(np.sort(order), np.arange(corpus.train_stop))
+    np.testing.assert_array_equal(np.load(corpus.order_path(7)), original)
+
+    with order_path.open("wb") as file:
+        np.save(file, np.arange(2, dtype=np.uint32))
+    regenerated = np.load(corpus.order_path(7))
+    np.testing.assert_array_equal(regenerated, original)
+
+
+def test_task_emits_sorted_training_batches_without_mutating_order(tmp_path):
+    _, _, corpus, values = _prepare(tmp_path)
+    task = HiggsTask(corpus, data_seed=7, batch_size=3)
+    order = np.load(corpus.order_path(7), mmap_mode="r")
+    original_order = np.array(order)
+    mean = np.asarray(corpus.feature_mean, dtype=np.float32)
+    scale = np.asarray(corpus.feature_scale, dtype=np.float32)
+
+    batches = list(task.train_batches(0, 5))
+
+    assert all(len(model_inputs) == 1 for model_inputs, _ in batches)
+    actual_features = np.concatenate(
+        [model_inputs[0].numpy() for model_inputs, _ in batches]
+    )
+    actual_labels = np.concatenate([labels.numpy() for _, labels in batches])
+    expected_rows = np.concatenate(
+        [np.sort(original_order[:3]), np.sort(original_order[3:5])]
+    )
+    expected_features = values[expected_rows, 1:].astype(np.float32)
+    expected_features -= mean
+    expected_features /= scale
+    np.testing.assert_allclose(actual_features, expected_features)
+    np.testing.assert_array_equal(actual_labels, values[expected_rows, 0])
+    np.testing.assert_array_equal(order, original_order)
+    assert all(
+        tensor.dtype == torch.float32
+        for tensor in (batches[0][0][0], batches[0][1])
+    )
+
+
+def test_task_uses_exact_sequential_holdout_boundaries(tmp_path):
+    _, _, corpus, values = _prepare(tmp_path)
+    task = HiggsTask(corpus, data_seed=3, batch_size=3)
+
+    val_labels = np.concatenate([labels.numpy() for _, labels in task.val_batches()])
+    test_labels = np.concatenate(
+        [labels.numpy() for _, labels in task.test_batches()]
+    )
+
+    np.testing.assert_array_equal(
+        val_labels, values[TINY_LAYOUT.train_stop : TINY_LAYOUT.val_stop, 0]
+    )
+    np.testing.assert_array_equal(test_labels, values[TINY_LAYOUT.val_stop :, 0])
+
+
+@pytest.mark.parametrize(("start", "stop"), [(-1, 2), (3, 2), (0, 9)])
+def test_task_rejects_invalid_training_ranges(tmp_path, start, stop):
+    _, _, corpus, _ = _prepare(tmp_path)
+    task = HiggsTask(corpus, data_seed=0, batch_size=3)
+
+    with pytest.raises(ValueError, match="start"):
+        list(task.train_batches(start, stop))
+
+
+def test_task_drops_open_memmaps_when_pickled(tmp_path):
+    _, _, corpus, _ = _prepare(tmp_path)
+    task = HiggsTask(corpus, data_seed=0, batch_size=3)
+    next(task.val_batches())
+
+    restored = pickle.loads(pickle.dumps(task))
+
+    assert restored._features is None
+    assert restored._labels is None
+    assert restored._order is None
+    assert next(restored.val_batches())[0][0].shape == (2, NUM_FEATURES)

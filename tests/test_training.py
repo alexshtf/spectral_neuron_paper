@@ -13,6 +13,7 @@ from paper.training import (
     fit_and_test_binary_scaling,
     run_one_stream,
     train_binary_scaling_events,
+    tune_binary_scaling_stream,
 )
 
 
@@ -71,7 +72,7 @@ def test_evaluation_restores_model_mode(training):
     assert model.training is training
 
     model.train(training)
-    evaluate_binary(model, [(x.long(), x, y)])
+    evaluate_binary(model, [((x.long(), x), y)])
     assert model.modes.pop() is False
     assert model.training is training
 
@@ -92,8 +93,10 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
                 rows = list(range(batch_start, min(batch_start + 2, stop)))
                 seen.extend(rows)
                 yield (
-                    torch.zeros(len(rows), 1, dtype=torch.long),
-                    torch.ones(len(rows), 1),
+                    (
+                        torch.zeros(len(rows), 1, dtype=torch.long),
+                        torch.ones(len(rows), 1),
+                    ),
                     torch.zeros(len(rows)),
                 )
 
@@ -111,6 +114,49 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
     assert [event["train_size"] for event in events] == [3, 7]
 
 
+def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
+    rows = torch.arange(16, dtype=torch.float32)
+    features = torch.stack((rows, rows.remainder(3)), dim=-1)
+    labels = (torch.arange(16) % 2).float()
+
+    class DenseTask:
+        @staticmethod
+        def train_batches(start: int, stop: int):
+            for batch_start in range(start, stop, 4):
+                batch_stop = min(batch_start + 4, stop)
+                yield (
+                    (features[batch_start:batch_stop],),
+                    labels[batch_start:batch_stop],
+                )
+
+    def trained_parameters(
+        checkpoints: tuple[int, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        with torch.random.fork_rng():
+            torch.manual_seed(11)
+            model = nn.Sequential(
+                nn.Linear(2, 1),
+                nn.Flatten(start_dim=-2, end_dim=-1),
+            )
+        list(
+            train_binary_scaling_events(
+                DenseTask(),
+                model,
+                lr=1e-2,
+                checkpoints=checkpoints,
+            )
+        )
+        return tuple(parameter.detach().clone() for parameter in model.parameters())
+
+    without_intermediate = trained_parameters((16,))
+    with_intermediate = trained_parameters((8, 16))
+
+    for expected, actual in zip(
+        without_intermediate, with_intermediate, strict=True
+    ):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch):
     ticks = iter((0.0, 2.0, 10.0, 13.0))
     monkeypatch.setattr("paper.training.perf_counter", lambda: next(ticks))
@@ -119,8 +165,7 @@ def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch)
         @staticmethod
         def train_batches(start: int, stop: int):
             yield (
-                torch.zeros(stop - start, 1, dtype=torch.long),
-                None,
+                (torch.zeros(stop - start, 1, dtype=torch.long),),
                 torch.zeros(stop - start),
             )
 
@@ -160,16 +205,17 @@ def test_binary_scaling_tests_only_selected_checkpoints():
         def train_batches(start: int, stop: int):
             seen.extend(range(start, stop))
             yield (
-                torch.zeros(stop - start, 1, dtype=torch.long),
-                torch.ones(stop - start, 1),
+                (
+                    torch.zeros(stop - start, 1, dtype=torch.long),
+                    torch.ones(stop - start, 1),
+                ),
                 torch.zeros(stop - start),
             )
 
         @staticmethod
         def test_batches():
             yield (
-                torch.zeros(1, 1, dtype=torch.long),
-                torch.ones(1, 1),
+                (torch.zeros(1, 1, dtype=torch.long), torch.ones(1, 1)),
                 torch.zeros(1),
             )
 
@@ -183,3 +229,32 @@ def test_binary_scaling_tests_only_selected_checkpoints():
 
     assert seen == list(range(7))
     assert result["train_size"].tolist() == [3, 7]
+
+
+def test_binary_tuning_evaluates_only_selected_checkpoints():
+    validation_calls = 0
+
+    class Task:
+        @staticmethod
+        def train_batches(start: int, stop: int):
+            yield (
+                (torch.zeros(stop - start, 1, dtype=torch.long),),
+                torch.zeros(stop - start),
+            )
+
+        @staticmethod
+        def val_batches():
+            nonlocal validation_calls
+            validation_calls += 1
+            yield (torch.zeros(1, 1, dtype=torch.long),), torch.zeros(1)
+
+    result = tune_binary_scaling_stream(
+        Task(),
+        SparseLinear(num_features=1, num_fields=1),
+        lr=0.1,
+        checkpoints=(3, 5, 7),
+        validation_checkpoints=(7,),
+    )
+
+    assert result["train_size"].tolist() == [7]
+    assert validation_calls == 1

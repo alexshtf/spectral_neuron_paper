@@ -14,6 +14,7 @@ from paper.plotting import (
     plot_criteo_fm_dimensions,
     plot_criteo_spectral_comparison,
     plot_criteo_spectral_dimensions,
+    plot_higgs_models_by_dimension,
     plot_scaling,
 )
 from paper.targets import TargetSpec
@@ -252,3 +253,105 @@ def test_plot_criteo_fm_dimensions_supports_zoom():
     assert fig.legends[0].get_title().get_text() == "dimension"
     assert len(fig.axes[0].collections) == 2
     assert fig.axes[0].get_xlim() == pytest.approx(xlim)
+
+
+def _higgs_results() -> pd.DataFrame:
+    capacities = {
+        3: {
+            "spectral": (0, 174),
+            "mlp-1": (6, 181),
+            "mlp-2": (5, 181),
+            "mlp-3": (4, 161),
+        },
+        5: {
+            "spectral": (0, 435),
+            "mlp-1": (14, 421),
+            "mlp-2": (10, 411),
+            "mlp-3": (9, 451),
+        },
+    }
+    rows = []
+    for train_size, seed, dim in product((2**14, 2**18), range(3), capacities):
+        rows.append(
+            {
+                "train_size": train_size,
+                "model": "linear",
+                "dim": 0,
+                "width": 0,
+                "num_parameters": 29,
+                "test_logloss": 0.6 - train_size / 10**7 + seed / 1000,
+                "test_brier": 0.2 - train_size / 10**8 + seed / 1000,
+            }
+        )
+        for model, (width, num_parameters) in capacities[dim].items():
+            rows.append(
+                {
+                    "train_size": train_size,
+                    "model": model,
+                    "dim": dim,
+                    "width": width,
+                    "num_parameters": num_parameters,
+                    "test_logloss": 0.5 + dim / 100 + seed / 1000,
+                    "test_brier": 0.15 + dim / 1000 + seed / 1000,
+                }
+            )
+    return pd.DataFrame(rows).drop_duplicates()
+
+
+def test_plot_higgs_models_by_dimension_facets_and_annotates_capacity():
+    fig = plot_higgs_models_by_dimension(_higgs_results())
+
+    assert [ax.get_title() for ax in fig.axes] == [
+        "dim=3 · Spectral 174p\nMLP 1×6 (181p) · 2×5 (181p)\nMLP 3×4 (161p)",
+        "dim=5 · Spectral 435p\nMLP 1×14 (421p) · 2×10 (411p)\nMLP 3×9 (451p)",
+    ]
+    assert _legend_labels(fig) == [
+        "Linear",
+        "Spectral",
+        "MLP-1",
+        "MLP-2",
+        "MLP-3",
+    ]
+    assert fig.legends[0].get_title().get_text() == "model"
+    assert all(
+        sum(line.get_label().startswith("_child") for line in ax.lines) == 5
+        for ax in fig.axes
+    )
+    assert all(len(ax.collections) == 5 for ax in fig.axes)
+    assert all(ax.get_xscale() == "log" for ax in fig.axes)
+    assert all(ax.get_xlabel() == "examples seen by optimizer" for ax in fig.axes)
+    assert fig.axes[0].get_ylabel() == "test log loss ↓"
+
+
+def test_plot_higgs_capacity_annotation_uses_recorded_values():
+    results = _higgs_results()
+    results.loc[
+        (results["model"] == "mlp-1") & (results["dim"] == 3),
+        ["width", "num_parameters"],
+    ] = (7, 211)
+
+    fig = plot_higgs_models_by_dimension(results)
+
+    title = fig.axes[0].get_title()
+    assert "1×7 (211p)" in title
+
+
+def test_plot_higgs_models_supports_brier_score():
+    fig = plot_higgs_models_by_dimension(_higgs_results(), metric="brier")
+
+    assert fig.axes[0].get_ylabel() == "test Brier score ↓"
+    assert fig._suptitle.get_text() == (
+        "HIGGS test Brier score: matched model families"
+    )
+
+
+def test_plot_higgs_models_rejects_inconsistent_capacity():
+    results = _higgs_results()
+    row = results.loc[(results["model"] == "mlp-1") & (results["dim"] == 3)].iloc[0]
+    results = pd.concat(
+        (results, pd.DataFrame([row.to_dict() | {"num_parameters": 999}])),
+        ignore_index=True,
+    )
+
+    with pytest.raises(ValueError, match="one recorded capacity"):
+        plot_higgs_models_by_dimension(results)

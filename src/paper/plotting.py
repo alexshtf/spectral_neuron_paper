@@ -25,9 +25,41 @@ MODEL_LINESTYLES = {
     "monotone": "--",
 }
 
-CRITEO_METRIC_LABELS = {
+BINARY_METRIC_LABELS = {
     "logloss": "test log loss",
     "brier": "test Brier score",
+}
+
+HIGGS_MODEL_LABELS = {
+    "linear": "Linear",
+    "spectral": "Spectral",
+    "mlp-1": "MLP-1",
+    "mlp-2": "MLP-2",
+    "mlp-3": "MLP-3",
+}
+
+HIGGS_MODEL_COLORS = {
+    "Linear": "#555555",
+    "Spectral": "#029E73",
+    "MLP-1": "#0173B2",
+    "MLP-2": "#DE8F05",
+    "MLP-3": "#CC78BC",
+}
+
+HIGGS_MODEL_MARKERS = {
+    "Linear": "o",
+    "Spectral": "^",
+    "MLP-1": "s",
+    "MLP-2": "D",
+    "MLP-3": "P",
+}
+
+HIGGS_MODEL_DASHES = {
+    "Linear": "",
+    "Spectral": "",
+    "MLP-1": (4, 2),
+    "MLP-2": (2, 2),
+    "MLP-3": (4, 2, 1, 2),
 }
 
 type FigureContainer = Figure | SubFigure
@@ -378,9 +410,9 @@ type CriteoSpectralVariant = Literal["spectral-old", "spectral-new"]
 
 
 def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
-    if metric not in CRITEO_METRIC_LABELS:
+    if metric not in BINARY_METRIC_LABELS:
         raise ValueError(
-            f"metric must be one of {sorted(CRITEO_METRIC_LABELS)}; got {metric!r}"
+            f"metric must be one of {sorted(BINARY_METRIC_LABELS)}; got {metric!r}"
         )
 
     value = f"test_{metric}"
@@ -414,7 +446,7 @@ def _finish_criteo_grid(
     title: str,
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
-    label = CRITEO_METRIC_LABELS[metric]
+    label = BINARY_METRIC_LABELS[metric]
     grid.set_axis_labels("training impressions", f"{label} ↓")
     for ax in grid.axes.flat:
         ax.set_xscale("log", base=2)
@@ -500,7 +532,7 @@ def plot_criteo_models_by_dimension(
     return _criteo_relplot(
         faceted,
         metric=metric,
-        title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: matched models",
+        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: matched models",
         by="model_label",
         hue_order=model_order,
         palette=CRITEO_MODEL_COLORS,
@@ -523,7 +555,7 @@ def plot_criteo_spectral_comparison(
     return _criteo_relplot(
         spectral,
         metric=metric,
-        title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: spectral preprocessing",
+        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: spectral preprocessing",
         by="model_label",
         hue_order=model_order,
         palette=CRITEO_MODEL_COLORS,
@@ -551,7 +583,7 @@ def plot_criteo_spectral_dimensions(
         spectral,
         metric=metric,
         title=(
-            f"Criteo {CRITEO_METRIC_LABELS[metric]}: "
+            f"Criteo {BINARY_METRIC_LABELS[metric]}: "
             f"{CRITEO_MODEL_LABELS[variant]} across dimensions"
         ),
         by="dim",
@@ -580,7 +612,7 @@ def plot_criteo_fm_dimensions(
     return _criteo_relplot(
         fm,
         metric=metric,
-        title=f"Criteo {CRITEO_METRIC_LABELS[metric]}: FM across embedding dimensions",
+        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: FM across embedding dimensions",
         by="rank",
         hue_order=ranks,
         palette=palette,
@@ -588,6 +620,159 @@ def plot_criteo_fm_dimensions(
         dashes=False,
         xlim=xlim,
     )
+
+
+def _check_higgs_results(results: pd.DataFrame, metric: str) -> tuple[str, list[int]]:
+    if metric not in BINARY_METRIC_LABELS:
+        raise ValueError(
+            f"metric must be one of {sorted(BINARY_METRIC_LABELS)}; got {metric!r}"
+        )
+
+    value = f"test_{metric}"
+    required = {
+        "train_size",
+        "model",
+        "dim",
+        "width",
+        "num_parameters",
+        value,
+    }
+    missing = required.difference(results.columns)
+    if missing:
+        raise ValueError(f"results are missing columns: {sorted(missing)}")
+    if results.empty:
+        raise ValueError("results are empty")
+    if results[list(required)].isna().any().any():
+        raise ValueError("HIGGS plotting columns must not contain missing values")
+
+    models = set(results["model"])
+    unknown = models.difference(HIGGS_MODEL_LABELS)
+    if unknown:
+        raise ValueError(f"unknown HIGGS models: {sorted(unknown)}")
+    if "linear" not in models:
+        raise ValueError("results contain no linear model")
+
+    dimensions = sorted(
+        map(int, results.loc[results["model"] == "spectral", "dim"].unique())
+    )
+    if not dimensions:
+        raise ValueError("results contain no spectral models")
+
+    nonlinear_models = set(HIGGS_MODEL_LABELS).difference({"linear"})
+    expected = {(model, dim) for model in nonlinear_models for dim in dimensions}
+    actual = set(
+        results.loc[results["model"] != "linear", ["model", "dim"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    missing_models = expected.difference(actual)
+    extra_models = actual.difference(expected)
+    if missing_models or extra_models:
+        raise ValueError(
+            "nonlinear model/dimension grid is incomplete: "
+            f"missing={sorted(missing_models)}, extra={sorted(extra_models)}"
+        )
+
+    linear = results.loc[results["model"] == "linear"]
+    spectral = results.loc[results["model"] == "spectral"]
+    mlps = results.loc[results["model"].str.startswith("mlp-")]
+    if set(linear["dim"]) != {0} or set(linear["width"]) != {0}:
+        raise ValueError("linear rows must use dim=0 and width=0")
+    if set(spectral["width"]) != {0}:
+        raise ValueError("spectral rows must use width=0")
+    if (mlps["width"] <= 0).any():
+        raise ValueError("MLP widths must be positive")
+    if (results["num_parameters"] <= 0).any():
+        raise ValueError("num_parameters must be positive")
+
+    capacity_counts = results.groupby(["model", "dim"])[
+        ["width", "num_parameters"]
+    ].nunique()
+    if (capacity_counts > 1).any().any():
+        raise ValueError("each model/dimension must have one recorded capacity")
+    return value, dimensions
+
+
+def _higgs_capacity_title(results: pd.DataFrame, dim: int) -> str:
+    capacity = (
+        results.loc[
+            (results["dim"] == dim) & (results["model"] != "linear"),
+            ["model", "width", "num_parameters"],
+        ]
+        .drop_duplicates()
+        .set_index("model")
+    )
+    spectral_parameters = int(capacity.at["spectral", "num_parameters"])
+    mlp_models = ("mlp-1", "mlp-2", "mlp-3")
+    entries = tuple(
+        f"{model.removeprefix('mlp-')}×{int(capacity.at[model, 'width'])} "
+        f"({int(capacity.at[model, 'num_parameters']):,}p)"
+        for model in mlp_models
+    )
+    return (
+        f"dim={dim} · Spectral {spectral_parameters:,}p\n"
+        f"MLP {entries[0]} · {entries[1]}\n"
+        f"MLP {entries[2]}"
+    )
+
+
+def plot_higgs_models_by_dimension(
+    results: pd.DataFrame,
+    *,
+    metric: str = "logloss",
+) -> Figure:
+    """Compare HIGGS model families in one facet per matched dimension."""
+    value, dimensions = _check_higgs_results(results, metric)
+
+    nonlinear = results.loc[results["model"] != "linear"].copy()
+    nonlinear["dimension"] = nonlinear["dim"].astype(int)
+    linears = results.loc[results["model"] == "linear"].merge(
+        pd.DataFrame({"dimension": dimensions}), how="cross"
+    )
+    faceted = pd.concat((linears, nonlinear), ignore_index=True)
+    faceted["model_label"] = faceted["model"].map(HIGGS_MODEL_LABELS)
+    model_order = list(HIGGS_MODEL_LABELS.values())
+
+    grid = sns.relplot(
+        data=faceted,
+        x="train_size",
+        y=value,
+        hue="model_label",
+        style="model_label",
+        hue_order=model_order,
+        style_order=model_order,
+        palette=HIGGS_MODEL_COLORS,
+        markers=HIGGS_MODEL_MARKERS,
+        dashes=HIGGS_MODEL_DASHES,
+        col="dimension",
+        col_order=dimensions,
+        col_wrap=2,
+        kind="line",
+        estimator=np.median,
+        errorbar=("pi", 50),
+        err_kws={"alpha": 0.15},
+        linewidth=2,
+        height=3.8,
+        aspect=1.25,
+        facet_kws={"sharex": True, "sharey": True},
+    )
+    grid.set_axis_labels(
+        "examples seen by optimizer",
+        f"{BINARY_METRIC_LABELS[metric]} ↓",
+    )
+    for dim, ax in zip(dimensions, grid.axes.flat):
+        ax.set_title(_higgs_capacity_title(results, dim), fontsize="small")
+        ax.set_xscale("log", base=2)
+        ax.grid(True, alpha=0.25)
+    if grid.legend is not None:
+        grid.legend.set_title("model")
+    grid.figure.suptitle(
+        f"HIGGS {BINARY_METRIC_LABELS[metric]}: matched model families",
+        y=0.99,
+    )
+    top = 0.72 if len(dimensions) <= 2 else 0.88
+    grid.figure.subplots_adjust(top=top, hspace=0.55)
+    return grid.figure
 
 
 def plot_target_gallery(specs: list[TargetSpec]):
