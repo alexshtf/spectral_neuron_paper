@@ -99,7 +99,7 @@ def run_one_stream(
         fts.augment(rmse_on("val", task.x_val, task.y_val)),
         fts.augment(rmse_on("test", task.x_test, task.y_test)),
     )
-    return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
+    return fts.collect_pd(events)
 
 
 def _adam_optimizers(
@@ -114,9 +114,7 @@ def _adam_optimizers(
     ]
     sparse_ids = {id(parameter) for parameter in sparse_parameters}
     dense_parameters = [
-        parameter
-        for parameter in model.parameters()
-        if id(parameter) not in sparse_ids
+        parameter for parameter in model.parameters() if id(parameter) not in sparse_ids
     ]
 
     optimizers: list[torch.optim.Optimizer] = []
@@ -149,8 +147,7 @@ def train_binary_scaling_events(
             logits = model(feature_ids, feature_values)
             loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
 
-            for optimizer in optimizers:
-                optimizer.zero_grad()
+            model.zero_grad(set_to_none=True)
             loss.backward()
             for optimizer in optimizers:
                 optimizer.step()
@@ -230,11 +227,9 @@ def tune_binary_scaling_stream(
 ) -> pd.DataFrame:
     events = fts.pipe(
         train_binary_scaling_events(task, model, lr=lr, checkpoints=checkpoints),
-        fts.augment(
-            binary_metrics_on("val", task.val_batches, include_brier=False)
-        ),
+        fts.augment(binary_metrics_on("val", task.val_batches, include_brier=False)),
     )
-    return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
+    return fts.collect_pd(events)
 
 
 def fit_and_test_binary_scaling(
@@ -259,4 +254,4 @@ def fit_and_test_binary_scaling(
         (event for event in trained if event["train_size"] in test_checkpoints),
         fts.augment(binary_metrics_on("test", task.test_batches)),
     )
-    return fts.collect_pd(events).drop(columns=["model"], errors="ignore")
+    return fts.collect_pd(events)

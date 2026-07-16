@@ -16,13 +16,13 @@ from tqdm.auto import tqdm
 
 from paper.criteo import (
     NUM_FIELDS,
-    CriteoCorpus,
     CriteoTask,
     EncodedData,
     PreprocessingKind,
     fit_preprocessors,
     prepare_corpus,
     prepare_encoded_data,
+    training_rows,
 )
 from paper.experiments import run_many
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
@@ -110,6 +110,18 @@ class Profile:
     min_count: int = 10
     buckets_per_field: int = 2**15
 
+    def __post_init__(self) -> None:
+        if not self.train_sizes or self.train_sizes != tuple(
+            sorted(set(self.train_sizes))
+        ):
+            raise ValueError("train_sizes must be non-empty, unique, and increasing")
+        if not self.tuning_seeds or not self.evaluation_seeds:
+            raise ValueError("tuning and evaluation seed grids must be non-empty")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if not 0 < self.preprocessor_fraction <= 1:
+            raise ValueError("preprocessor_fraction must be in (0, 1]")
+
 
 PROFILES: dict[str, Profile] = {
     "sanity": Profile(
@@ -149,7 +161,7 @@ PROFILES: dict[str, Profile] = {
 
 
 @dataclass(frozen=True)
-class ModelSpec:
+class CriteoModelSpec:
     variant: Variant
     dim: int = 0
 
@@ -161,17 +173,17 @@ class ModelSpec:
 @dataclass(frozen=True)
 class RunConfig:
     data_seed: int
-    model_spec: ModelSpec
+    model_spec: CriteoModelSpec
     lr: float
     init_seed: int
 
 
 def _model_specs(
     profile: Profile, variants: tuple[Variant, ...]
-) -> tuple[ModelSpec, ...]:
-    specs = [ModelSpec("linear"), ModelSpec("linear-new")]
+) -> tuple[CriteoModelSpec, ...]:
+    specs = [CriteoModelSpec("linear"), CriteoModelSpec("linear-new")]
     specs.extend(
-        ModelSpec(variant, dim)
+        CriteoModelSpec(variant, dim)
         for dim in profile.dims
         for variant in ("fm", "spectral-old", "spectral-new")
     )
@@ -179,13 +191,13 @@ def _model_specs(
 
 
 def _tuning_configs(
-    profile: Profile, variants: tuple[Variant, ...]
+    profile: Profile, model_specs: tuple[CriteoModelSpec, ...]
 ) -> tuple[RunConfig, ...]:
     return tuple(
         RunConfig(data_seed, model_spec, lr, init_seed)
         for data_seed, model_spec, lr, init_seed in product(
             profile.tuning_seeds.data_seeds,
-            _model_specs(profile, variants),
+            model_specs,
             profile.lrs,
             profile.tuning_seeds.init_seeds,
         )
@@ -194,7 +206,6 @@ def _tuning_configs(
 
 @dataclass(frozen=True)
 class RunSettings:
-    cache_dir: Path
     train_sizes: tuple[int, ...]
     batch_size: int
     encoded_data: dict[PreprocessingKind, EncodedData]
@@ -209,7 +220,7 @@ class SelectedRun:
     train_sizes: tuple[int, ...]
 
 
-def make_model(spec: ModelSpec, num_features: int) -> nn.Module:
+def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
     match spec.variant:
         case "linear" | "linear-new":
             return SparseLinear(num_features, NUM_FIELDS)
@@ -223,7 +234,7 @@ def make_model(spec: ModelSpec, num_features: int) -> nn.Module:
 
 
 def _make_seeded_model(
-    spec: ModelSpec, *, num_features: int, init_seed: int
+    spec: CriteoModelSpec, *, num_features: int, init_seed: int
 ) -> nn.Module:
     with torch.random.fork_rng():
         torch.manual_seed(init_seed)
@@ -236,17 +247,9 @@ def _make_task_model(
     if settings.threads_per_worker is not None:
         torch.set_num_threads(settings.threads_per_worker)
 
-    corpus = CriteoCorpus.open(settings.cache_dir)
     preprocessing = config.model_spec.preprocessing
     data = settings.encoded_data[preprocessing]
-    order = np.load(corpus.order_path(config.data_seed), mmap_mode="r")
-    task = CriteoTask(
-        corpus=corpus,
-        train=data.train[config.data_seed],
-        holdout=data.holdout,
-        train_rows=order[: max(settings.train_sizes)],
-        batch_size=settings.batch_size,
-    )
+    task = CriteoTask(data, config.data_seed, settings.batch_size)
     model = _make_seeded_model(
         config.model_spec,
         num_features=data.num_features,
@@ -349,7 +352,7 @@ def _selected_runs(
         for data_seed, init_seed in evaluation_seeds:
             config = RunConfig(
                 data_seed=data_seed,
-                model_spec=ModelSpec(row.model, row.dim),
+                model_spec=CriteoModelSpec(row.model, row.dim),
                 lr=row.selected_lr,
                 init_seed=init_seed,
             )
@@ -376,14 +379,6 @@ def run_profile(
         raise ValueError(f"workers must be positive; got {workers}")
     if variant is not None and variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    if not profile.train_sizes or profile.train_sizes != tuple(
-        sorted(set(profile.train_sizes))
-    ):
-        raise ValueError("train_sizes must be non-empty, unique, and increasing")
-    if not profile.tuning_seeds or not profile.evaluation_seeds:
-        raise ValueError("tuning and evaluation seed grids must be non-empty")
-    if not 0 < profile.preprocessor_fraction <= 1:
-        raise ValueError("preprocessor_fraction must be in (0, 1]")
 
     corpus = prepare_corpus(
         raw_path,
@@ -401,7 +396,7 @@ def run_profile(
     sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
     variants = (variant,) if variant is not None else VARIANTS
     model_specs = _model_specs(profile, variants)
-    configs = _tuning_configs(profile, variants)
+    configs = _tuning_configs(profile, model_specs)
     preprocessing_kinds = tuple(
         dict.fromkeys(spec.preprocessing for spec in model_specs)
     )
@@ -421,20 +416,27 @@ def run_profile(
             | set(profile.evaluation_seeds.data_seeds)
         )
     )
+    rows_by_seed = {
+        seed: training_rows(
+            np.load(corpus.order_path(seed), mmap_mode="r"),
+            profile.train_sizes,
+            profile.batch_size,
+        )
+        for seed in data_seeds
+    }
     encoded_data = {
         kind: prepare_encoded_data(
             corpus,
             preprocessor_paths[kind],
-            max(profile.train_sizes),
-            data_seeds,
+            rows_by_seed,
             progress=progress,
             progress_file=progress_file,
         )
         for kind in preprocessing_kinds
     }
+    del rows_by_seed
 
     settings = RunSettings(
-        cache_dir=cache_dir,
         train_sizes=profile.train_sizes,
         batch_size=profile.batch_size,
         encoded_data=encoded_data,
