@@ -90,6 +90,20 @@ def test_sparse_models_preserve_leading_shape():
     )
 
 
+def test_sparse_models_treat_implicit_values_as_unit_weights():
+    feature_ids = torch.tensor([[0, 1, 2]])
+    unit_weights = torch.ones_like(feature_ids, dtype=torch.float32)
+
+    for model in (
+        SparseLinear(3, 3),
+        FactorizationMachine(3, 3, rank=2),
+        SparseKthEigval(3, 3, dim=3),
+    ):
+        assert torch.allclose(
+            model(feature_ids), model(feature_ids, unit_weights)
+        )
+
+
 @pytest.mark.parametrize("dim", [3, 5, 9, 15])
 def test_fm_and_spectral_match_parameters_per_feature(dim):
     num_features = 17

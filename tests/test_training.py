@@ -7,6 +7,7 @@ from paper.models import SparseLinear
 from paper.tasks import Task
 from paper.training import (
     _adam_optimizers,
+    binary_metrics_on,
     evaluate_binary,
     evaluate_rmse,
     fit_and_test_binary_scaling,
@@ -108,6 +109,47 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
 
     assert seen == list(range(7))
     assert [event["train_size"] for event in events] == [3, 7]
+
+
+def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch):
+    ticks = iter((0.0, 2.0, 10.0, 13.0))
+    monkeypatch.setattr("paper.training.perf_counter", lambda: next(ticks))
+
+    class Task:
+        @staticmethod
+        def train_batches(start: int, stop: int):
+            yield (
+                torch.zeros(stop - start, 1, dtype=torch.long),
+                None,
+                torch.zeros(stop - start),
+            )
+
+    events = list(
+        train_binary_scaling_events(
+            Task(),
+            SparseLinear(num_features=1, num_fields=1),
+            lr=0.1,
+            checkpoints=(1, 2),
+        )
+    )
+
+    assert [event["train_seconds"] for event in events] == [2.0, 5.0]
+
+
+def test_binary_evaluation_time_is_cumulative(monkeypatch):
+    ticks = iter((0.0, 2.0, 10.0, 13.0))
+    monkeypatch.setattr("paper.training.perf_counter", lambda: next(ticks))
+    monkeypatch.setattr(
+        "paper.training.evaluate_binary",
+        lambda *_args, **_kwargs: {"logloss": 0.5},
+    )
+    augment = binary_metrics_on("val", lambda: ())
+
+    first = augment({"model": object()})
+    second = augment({"model": object()})
+
+    assert first == {"val_logloss": 0.5, "val_seconds": 2.0}
+    assert second == {"val_logloss": 0.5, "val_seconds": 5.0}
 
 
 def test_binary_scaling_tests_only_selected_checkpoints():

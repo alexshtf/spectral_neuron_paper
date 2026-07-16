@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterable, Iterator
+from time import perf_counter
 from typing import Any, Protocol
 
 import fitstream as fts
@@ -10,7 +11,7 @@ from torch import nn
 from paper.tasks import Task
 
 type Event = dict[str, Any]
-type TensorBatch = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+type TensorBatch = tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
 type BatchFactory = Callable[[], Iterable[TensorBatch]]
 
 
@@ -137,9 +138,11 @@ def train_binary_scaling_events(
 
     optimizers = _adam_optimizers(model, lr=lr)
     start = 0
+    train_seconds = 0.0
 
     for train_size in checkpoints:
         model.train()
+        segment_started = perf_counter()
         for feature_ids, feature_values, labels in task.train_batches(
             start, train_size
         ):
@@ -149,12 +152,16 @@ def train_binary_scaling_events(
             for optimizer in optimizers:
                 optimizer.zero_grad()
             loss.backward()
-            with torch.sparse.check_sparse_tensor_invariants(enable=False):
-                for optimizer in optimizers:
-                    optimizer.step()
+            for optimizer in optimizers:
+                optimizer.step()
 
+        train_seconds += perf_counter() - segment_started
         start = train_size
-        yield {"train_size": train_size, "model": model}
+        yield {
+            "train_size": train_size,
+            "train_seconds": train_seconds,
+            "model": model,
+        }
 
 
 def evaluate_binary(
@@ -197,11 +204,19 @@ def binary_metrics_on(
     *,
     include_brier: bool = True,
 ) -> Callable[[Event], Event]:
+    elapsed_seconds = 0.0
+
     def augment(event: Event) -> Event:
+        nonlocal elapsed_seconds
+        started = perf_counter()
         metrics = evaluate_binary(
             event["model"], batches(), include_brier=include_brier
         )
-        return {f"{name}_{key}": value for key, value in metrics.items()}
+        elapsed_seconds += perf_counter() - started
+        return {
+            **{f"{name}_{key}": value for key, value in metrics.items()},
+            f"{name}_seconds": elapsed_seconds,
+        }
 
     return augment
 

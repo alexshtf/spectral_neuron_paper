@@ -3,17 +3,20 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from paper.criteo import (
     MISSING_NUMERIC,
     NUM_CATEGORICAL_FIELDS,
     NUM_NUMERIC_FIELDS,
     BucketPreprocessor,
+    CriteoTask,
     HybridPreprocessor,
     _bucket_numeric,
     fit_preprocessors,
     load_preprocessor,
     prepare_corpus,
+    prepare_encoded_data,
 )
 from paper.experiments.criteo_scaling import (
     RAW_COLUMNS,
@@ -94,7 +97,7 @@ def test_bucket_preprocessor_uses_field_disjoint_hash_ranges():
     assert np.all(feature_ids < offsets + 16)
     assert feature_ids[0, NUM_NUMERIC_FIELDS] == NUM_NUMERIC_FIELDS * 16 + 1
     assert feature_ids[1, NUM_NUMERIC_FIELDS + 1] == (NUM_NUMERIC_FIELDS + 1) * 16
-    assert np.all(feature_values == 1)
+    assert feature_values is None
 
 
 def test_hybrid_preprocessor_separates_special_and_positive_values():
@@ -176,16 +179,95 @@ def test_training_order_is_a_reproducible_permutation_of_the_full_prefix(tmp_pat
     np.testing.assert_array_equal(order, np.load(corpus.order_path(7)))
 
 
+def test_encoded_cache_preserves_preprocessing_and_minibatches(tmp_path):
+    raw_path = tmp_path / "train.txt"
+    cache_dir = tmp_path / "cache"
+    _write_tiny_criteo(raw_path)
+    corpus = prepare_corpus(raw_path, cache_dir)
+    paths = fit_preprocessors(
+        corpus,
+        ("bucket", "hybrid"),
+        sample_size=8,
+        sample_seed=0,
+        min_count=2,
+        buckets_per_field=32,
+    )
+    order = np.load(corpus.order_path(7), mmap_mode="r")
+
+    for kind, path in paths.items():
+        preprocessor = load_preprocessor(path)
+        data = prepare_encoded_data(corpus, path, 10, (7,), chunk_size=3)
+        sources = (
+            (data.train[7], order[:10]),
+            (data.holdout, slice(corpus.train_stop, corpus.rows)),
+        )
+        for split, rows in sources:
+            feature_ids, feature_values = split.arrays()
+            expected_ids, expected_values = preprocessor.encode(
+                np.asarray(corpus.numerics()[rows]),
+                np.asarray(corpus.categoricals()[rows]),
+            )
+            np.testing.assert_array_equal(feature_ids, expected_ids)
+            assert feature_ids.dtype == np.int32
+            if expected_values is None:
+                assert feature_values is None
+            else:
+                np.testing.assert_array_equal(feature_values, expected_values)
+
+        task = CriteoTask(
+            corpus,
+            data.train[7],
+            data.holdout,
+            order[:10],
+            batch_size=4,
+        )
+        batches = list(task.train_batches(3, 8))
+        for (feature_ids, feature_values, labels), (start, stop) in zip(
+            batches, ((3, 7), (7, 8)), strict=True
+        ):
+            rows = np.sort(order[start:stop])
+            expected_ids, expected_values = preprocessor.encode(
+                np.asarray(corpus.numerics()[rows]),
+                np.asarray(corpus.categoricals()[rows]),
+            )
+            np.testing.assert_array_equal(feature_ids, expected_ids)
+            np.testing.assert_array_equal(
+                labels, np.asarray(corpus.labels()[rows], dtype=np.float32)
+            )
+            if expected_values is None:
+                assert feature_values is None
+            else:
+                np.testing.assert_array_equal(feature_values, expected_values)
+
+        output = StringIO()
+        prepare_encoded_data(
+            corpus,
+            path,
+            10,
+            (7,),
+            chunk_size=3,
+            progress=True,
+            progress_file=output,
+        )
+        assert output.getvalue().count("(cached)") == 2
+
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        prepare_encoded_data(corpus, paths["bucket"], 10, (7,), chunk_size=0)
+
+
 def test_tiny_profile_runs_end_to_end(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
 
+    output = StringIO()
     raw = run_profile(
         _tiny_profile(),
         raw_path=raw_path,
         cache_dir=cache_dir,
         chunk_size=23,
+        progress=True,
+        progress_file=output,
     )
     summary = summarize_raw(raw)
 
@@ -218,6 +300,12 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     assert {"q25_test_brier", "q75_test_brier"} <= set(summary)
     assert len(summary) == 10
     assert len(list(cache_dir.glob("preprocessor_*.npz"))) == 2
+    assert len(list((cache_dir / "encoded-v1").iterdir())) == 2
+    printed = output.getvalue()
+    assert "Tuning aggregate trajectory time: training=" in printed
+    assert "validation=" in printed
+    assert "Evaluation aggregate trajectory time: training=" in printed
+    assert "test=" in printed
 
 
 def test_variant_run_uses_only_its_preprocessor(tmp_path):
@@ -234,6 +322,7 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
 
     assert set(raw["model"]) == {"linear-new"}
     assert len(list(cache_dir.glob("preprocessor_*.npz"))) == 1
+    assert len(list((cache_dir / "encoded-v1").iterdir())) == 1
 
 
 def test_parallel_profile_matches_serial_results(tmp_path):

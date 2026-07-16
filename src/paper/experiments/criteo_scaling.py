@@ -1,6 +1,8 @@
 import argparse
+import sys
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import partial
 from itertools import product
 from pathlib import Path
@@ -10,15 +12,17 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+from tqdm.auto import tqdm
 
 from paper.criteo import (
     NUM_FIELDS,
     CriteoCorpus,
     CriteoTask,
+    EncodedData,
     PreprocessingKind,
     fit_preprocessors,
-    load_preprocessor,
     prepare_corpus,
+    prepare_encoded_data,
 )
 from paper.experiments import run_many
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
@@ -64,6 +68,8 @@ RAW_COLUMNS = [
     "test_logloss",
     "test_brier",
 ]
+
+_TIMING_COLUMNS = ["train_seconds", "val_seconds", "test_seconds"]
 
 EXPERIMENT_COLUMNS = [
     "protocol",
@@ -151,6 +157,7 @@ class ModelSpec:
     def preprocessing(self) -> PreprocessingKind:
         return "hybrid" if self.variant.endswith("-new") else "bucket"
 
+
 @dataclass(frozen=True)
 class RunConfig:
     data_seed: int
@@ -190,7 +197,7 @@ class RunSettings:
     cache_dir: Path
     train_sizes: tuple[int, ...]
     batch_size: int
-    preprocessor_paths: dict[PreprocessingKind, Path]
+    encoded_data: dict[PreprocessingKind, EncodedData]
     preprocessor_sample_size: int
     preprocessor_seed: int
     threads_per_worker: int | None
@@ -231,17 +238,18 @@ def _make_task_model(
 
     corpus = CriteoCorpus.open(settings.cache_dir)
     preprocessing = config.model_spec.preprocessing
-    preprocessor = load_preprocessor(settings.preprocessor_paths[preprocessing])
+    data = settings.encoded_data[preprocessing]
     order = np.load(corpus.order_path(config.data_seed), mmap_mode="r")
     task = CriteoTask(
         corpus=corpus,
-        preprocessor=preprocessor,
+        train=data.train[config.data_seed],
+        holdout=data.holdout,
         train_rows=order[: max(settings.train_sizes)],
         batch_size=settings.batch_size,
     )
     model = _make_seeded_model(
         config.model_spec,
-        num_features=preprocessor.num_features,
+        num_features=data.num_features,
         init_seed=config.init_seed,
     )
     return task, model
@@ -274,7 +282,26 @@ def _format_result(
     return result.assign(
         phase=phase,
         **_metadata(config, settings),
-    ).reindex(columns=RAW_COLUMNS)
+    ).reindex(columns=RAW_COLUMNS + _TIMING_COLUMNS)
+
+
+def _report_timings(
+    phase: str,
+    evaluation_prefix: str,
+    results: list[pd.DataFrame],
+    progress_file: TextIO | None,
+) -> None:
+    train_seconds = sum(result["train_seconds"].iloc[-1] for result in results)
+    evaluation_seconds = sum(
+        result[f"{evaluation_prefix}_seconds"].iloc[-1] for result in results
+    )
+    evaluation = "validation" if evaluation_prefix == "val" else "test"
+    tqdm.write(
+        f"{phase} aggregate trajectory time: "
+        f"training={timedelta(seconds=round(train_seconds))}, "
+        f"{evaluation}={timedelta(seconds=round(evaluation_seconds))}",
+        file=sys.stderr if progress_file is None else progress_file,
+    )
 
 
 def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
@@ -388,16 +415,29 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    data_seeds = set(profile.tuning_seeds.data_seeds)
-    data_seeds.update(profile.evaluation_seeds.data_seeds)
-    for data_seed in sorted(data_seeds):
-        corpus.order_path(data_seed)
+    data_seeds = tuple(
+        sorted(
+            set(profile.tuning_seeds.data_seeds)
+            | set(profile.evaluation_seeds.data_seeds)
+        )
+    )
+    encoded_data = {
+        kind: prepare_encoded_data(
+            corpus,
+            preprocessor_paths[kind],
+            max(profile.train_sizes),
+            data_seeds,
+            progress=progress,
+            progress_file=progress_file,
+        )
+        for kind in preprocessing_kinds
+    }
 
     settings = RunSettings(
         cache_dir=cache_dir,
         train_sizes=profile.train_sizes,
         batch_size=profile.batch_size,
-        preprocessor_paths=preprocessor_paths,
+        encoded_data=encoded_data,
         preprocessor_sample_size=sample_size,
         preprocessor_seed=profile.preprocessor_seed,
         threads_per_worker=1 if workers > 1 else None,
@@ -407,7 +447,7 @@ def run_profile(
         tune,
         configs,
         workers=workers,
-        desc="Tuning",
+        desc="Tuning (train + validation)",
         unit="trajectory",
         progress=progress,
         progress_file=progress_file,
@@ -415,6 +455,8 @@ def run_profile(
 
     if not tuning_results:
         return pd.DataFrame(columns=RAW_COLUMNS)
+    if progress:
+        _report_timings("Tuning", "val", tuning_results, progress_file)
     tuning = pd.concat(tuning_results, ignore_index=True)
     selected_runs = _selected_runs(tuning, profile.evaluation_seeds)
 
@@ -423,11 +465,13 @@ def run_profile(
         test,
         selected_runs,
         workers=workers,
-        desc="Testing",
+        desc="Evaluation (retrain + test)",
         unit="trajectory",
         progress=progress,
         progress_file=progress_file,
     )
+    if progress:
+        _report_timings("Evaluation", "test", test_results, progress_file)
 
     evaluation = pd.concat(test_results, ignore_index=True)
     return pd.concat((tuning, evaluation), ignore_index=True).loc[:, RAW_COLUMNS]

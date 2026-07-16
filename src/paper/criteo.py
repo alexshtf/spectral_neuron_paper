@@ -3,8 +3,9 @@ import os
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from hashlib import file_digest, sha256
 from pathlib import Path
-from typing import Literal, Protocol, TextIO
+from typing import Literal, TextIO
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,9 @@ CATEGORICAL_COLUMNS = tuple(
 COLUMNS = (LABEL, *NUMERIC_COLUMNS, *CATEGORICAL_COLUMNS)
 
 CACHE_VERSION = 2
+# Bump when fitted preprocessing or the encoded representation changes.
+ENCODED_CACHE_VERSION = 1
+ENCODED_CHUNK_SIZE = 2**18
 NUMERICS_FILE = "numerics.dat"
 CATEGORICALS_FILE = "categoricals.dat"
 LABELS_FILE = "labels.dat"
@@ -31,6 +35,7 @@ METADATA_FILE = "metadata.json"
 MISSING_NUMERIC = np.iinfo(np.int32).min
 
 type PreprocessingKind = Literal["bucket", "hybrid"]
+type FeatureArrays = tuple[np.ndarray, np.ndarray | None]
 
 
 def _bucket_numeric(values: np.ndarray) -> np.ndarray:
@@ -222,7 +227,7 @@ def _mix32(values: np.ndarray) -> np.ndarray:
 
 
 def _hashed_ids(values: np.ndarray, offset: int, buckets: int) -> np.ndarray:
-    return (_mix32(values) % (buckets - 2) + offset + 2).astype(np.int64)
+    return (_mix32(values) % (buckets - 2) + offset + 2).astype(np.int32)
 
 
 def _categorical_ids(
@@ -256,19 +261,6 @@ def _check_inputs(numerics: np.ndarray, categoricals: np.ndarray) -> None:
         )
 
 
-class CriteoPreprocessor(Protocol):
-    kind: PreprocessingKind
-
-    @property
-    def num_features(self) -> int: ...
-
-    def encode(
-        self,
-        numerics: np.ndarray,
-        categoricals: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]: ...
-
-
 @dataclass(frozen=True)
 class BucketPreprocessor:
     buckets_per_field: int
@@ -283,10 +275,10 @@ class BucketPreprocessor:
         self,
         numerics: np.ndarray,
         categoricals: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> FeatureArrays:
         _check_inputs(numerics, categoricals)
         tokens = np.concatenate((_bucket_numeric(numerics), categoricals), axis=-1)
-        feature_ids = np.empty(tokens.shape, dtype=np.int64)
+        feature_ids = np.empty(tokens.shape, dtype=np.int32)
 
         for field in range(NUM_NUMERIC_FIELDS):
             values = tokens[..., field]
@@ -305,7 +297,7 @@ class BucketPreprocessor:
                 buckets=self.buckets_per_field,
             )
 
-        return feature_ids, np.ones(feature_ids.shape, dtype=np.float32)
+        return feature_ids, None
 
 
 @dataclass(frozen=True)
@@ -341,10 +333,10 @@ class HybridPreprocessor:
         self,
         numerics: np.ndarray,
         categoricals: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> FeatureArrays:
         _check_inputs(numerics, categoricals)
         shape = numerics.shape[:-1] + (NUM_FIELDS,)
-        feature_ids = np.empty(shape, dtype=np.int64)
+        feature_ids = np.empty(shape, dtype=np.int32)
         feature_values = np.ones(shape, dtype=np.float32)
 
         for field, (offset, negatives) in enumerate(
@@ -572,56 +564,254 @@ def fit_preprocessors(
     return paths
 
 
-TensorBatch = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+type TensorBatch = tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class EncodedSplit:
+    path: Path
+    rows: int
+    has_values: bool
+
+    def arrays(self) -> FeatureArrays:
+        feature_ids = np.load(
+            self.path / "feature_ids.npy", mmap_mode="c", allow_pickle=False
+        )
+        feature_values = (
+            np.load(
+                self.path / "feature_values.npy",
+                mmap_mode="c",
+                allow_pickle=False,
+            )
+            if self.has_values
+            else None
+        )
+        return feature_ids, feature_values
+
+
+@dataclass(frozen=True)
+class EncodedData:
+    num_features: int
+    train: dict[int, EncodedSplit]
+    holdout: EncodedSplit
+
+
+def _source_rows(
+    rows: range | np.ndarray,
+    start: int,
+    stop: int,
+) -> tuple[slice | np.ndarray, np.ndarray | None]:
+    chunk = rows[start:stop]
+    if isinstance(chunk, range):
+        return slice(chunk.start, chunk.stop), None
+
+    chunk = np.asarray(chunk)
+    sorter = np.argsort(chunk)
+    return chunk[sorter], np.argsort(sorter)
+
+
+def _prepare_encoded_split(
+    corpus: CriteoCorpus,
+    preprocessor: FittedPreprocessor,
+    rows: range | np.ndarray,
+    path: Path,
+    *,
+    description: str,
+    chunk_size: int,
+    progress: bool,
+    progress_file: TextIO | None,
+) -> EncodedSplit:
+    split = EncodedSplit(path, len(rows), preprocessor.kind == "hybrid")
+    if (path / "complete").exists():
+        if progress:
+            tqdm.write(
+                f"{description}: {split.rows:,} rows (cached)",
+                file=sys.stderr if progress_file is None else progress_file,
+            )
+        return split
+
+    path.mkdir(parents=True, exist_ok=True)
+    shapes = {
+        "feature_ids": (np.int32, (split.rows, NUM_FIELDS)),
+    }
+    if split.has_values:
+        shapes["feature_values"] = (np.float32, (split.rows, NUM_FIELDS))
+
+    token = os.getpid()
+    temporary = {
+        name: path / f".{name}.{token}.tmp" for name in shapes
+    }
+    outputs = {
+        name: np.lib.format.open_memmap(
+            temporary[name], mode="w+", dtype=dtype, shape=shape
+        )
+        for name, (dtype, shape) in shapes.items()
+    }
+    numerics = corpus.numerics()
+    categoricals = corpus.categoricals()
+    progress_bar = tqdm(
+        total=split.rows,
+        desc=description,
+        unit="rows",
+        unit_scale=True,
+        disable=not progress,
+        file=progress_file,
+    )
+    with progress_bar:
+        for start in range(0, split.rows, chunk_size):
+            stop = min(start + chunk_size, split.rows)
+            source, inverse = _source_rows(rows, start, stop)
+            feature_ids, feature_values = preprocessor.encode(
+                np.asarray(numerics[source]),
+                np.asarray(categoricals[source]),
+            )
+            if inverse is not None:
+                feature_ids = feature_ids[inverse]
+                feature_values = (
+                    None if feature_values is None else feature_values[inverse]
+                )
+
+            outputs["feature_ids"][start:stop] = feature_ids
+            if feature_values is not None:
+                outputs["feature_values"][start:stop] = feature_values
+            progress_bar.update(stop - start)
+
+    for output in outputs.values():
+        output.flush()
+    del outputs
+    for name in shapes:
+        os.replace(temporary[name], path / f"{name}.npy")
+    (path / "complete").touch()
+    return split
+
+
+def prepare_encoded_data(
+    corpus: CriteoCorpus,
+    preprocessor_path: Path,
+    train_size: int,
+    data_seeds: Iterable[int],
+    *,
+    chunk_size: int = ENCODED_CHUNK_SIZE,
+    progress: bool = False,
+    progress_file: TextIO | None = None,
+) -> EncodedData:
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive; got {chunk_size}")
+    if not 0 < train_size <= corpus.train_stop:
+        raise ValueError(
+            f"train_size must be in [1, {corpus.train_stop}]; got {train_size}"
+        )
+
+    preprocessor = load_preprocessor(preprocessor_path)
+    if preprocessor.num_features > np.iinfo(np.int32).max:
+        raise ValueError("encoded feature ids do not fit in int32")
+
+    with preprocessor_path.open("rb") as file:
+        digest = file_digest(file, "sha256").hexdigest()[:16]
+    root = (
+        corpus.cache_dir
+        / f"encoded-v{ENCODED_CACHE_VERSION}"
+        / f"{preprocessor_path.stem}-{digest}"
+    )
+
+    def prepare(name: str, rows: range | np.ndarray) -> EncodedSplit:
+        return _prepare_encoded_split(
+            corpus,
+            preprocessor,
+            rows,
+            root / f"{name}_n{len(rows)}",
+            description=f"Encoding {preprocessor.kind} {name}",
+            chunk_size=chunk_size,
+            progress=progress,
+            progress_file=progress_file,
+        )
+
+    holdout = prepare("holdout", range(corpus.train_stop, corpus.rows))
+    train = {}
+    for seed in sorted(set(data_seeds)):
+        order = np.load(corpus.order_path(seed), mmap_mode="r")
+        train_rows = order[:train_size]
+        order_digest = sha256(train_rows).hexdigest()[:16]
+        train[seed] = prepare(
+            f"train_seed{seed}_{order_digest}", train_rows
+        )
+
+    return EncodedData(preprocessor.num_features, train, holdout)
 
 
 @dataclass
 class CriteoTask:
     corpus: CriteoCorpus
-    preprocessor: CriteoPreprocessor
+    train: EncodedSplit
+    holdout: EncodedSplit
     train_rows: np.ndarray
     batch_size: int
-    _numerics: np.memmap = field(init=False, repr=False)
-    _categoricals: np.memmap = field(init=False, repr=False)
+    _train_arrays: FeatureArrays = field(init=False, repr=False)
+    _holdout_arrays: FeatureArrays = field(init=False, repr=False)
     _labels: np.memmap = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._numerics = self.corpus.numerics()
-        self._categoricals = self.corpus.categoricals()
+        if len(self.train_rows) != self.train.rows:
+            raise ValueError("training order and encoded cache differ in length")
+        self._train_arrays = self.train.arrays()
+        self._holdout_arrays = self.holdout.arrays()
         self._labels = self.corpus.labels()
 
     def train_batches(self, start: int, stop: int) -> Iterator[TensorBatch]:
-        if not 0 <= start <= stop <= len(self.train_rows):
+        if not 0 <= start <= stop <= self.train.rows:
             raise ValueError(
-                f"expected 0 <= start <= stop <= {len(self.train_rows)}; "
+                f"expected 0 <= start <= stop <= {self.train.rows}; "
                 f"got start={start}, stop={stop}"
             )
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
-            rows = np.sort(self.train_rows[batch_start:batch_stop])
-            yield self._batch(rows)
+            rows = slice(batch_start, batch_stop)
+            source_rows = np.asarray(self.train_rows[rows])
+            order = np.argsort(source_rows)
+            yield self._batch(
+                self._train_arrays,
+                rows,
+                source_rows[order],
+                order,
+            )
 
     def val_batches(self) -> Iterator[TensorBatch]:
-        yield from self._sequential_batches(
-            self.corpus.train_stop, self.corpus.val_stop
-        )
+        validation_rows = self.corpus.val_stop - self.corpus.train_stop
+        yield from self._sequential_batches(0, validation_rows)
 
     def test_batches(self) -> Iterator[TensorBatch]:
-        yield from self._sequential_batches(self.corpus.val_stop, self.corpus.rows)
+        validation_rows = self.corpus.val_stop - self.corpus.train_stop
+        yield from self._sequential_batches(validation_rows, self.holdout.rows)
 
     def _sequential_batches(self, start: int, stop: int) -> Iterator[TensorBatch]:
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
-            yield self._batch(slice(batch_start, batch_stop))
+            rows = slice(batch_start, batch_stop)
+            labels = slice(
+                self.corpus.train_stop + batch_start,
+                self.corpus.train_stop + batch_stop,
+            )
+            yield self._batch(self._holdout_arrays, rows, labels)
 
-    def _batch(self, rows: np.ndarray | slice) -> TensorBatch:
-        feature_ids, feature_values = self.preprocessor.encode(
-            np.asarray(self._numerics[rows]),
-            np.asarray(self._categoricals[rows]),
+    def _batch(
+        self,
+        arrays: FeatureArrays,
+        rows: slice,
+        label_rows: slice | np.ndarray,
+        order: np.ndarray | None = None,
+    ) -> TensorBatch:
+        feature_ids, feature_values = arrays
+        batch_ids = np.asarray(feature_ids[rows])
+        batch_values = (
+            None if feature_values is None else np.asarray(feature_values[rows])
         )
-        labels = np.asarray(self._labels[rows], dtype=np.float32)
+        if order is not None:
+            batch_ids = batch_ids[order]
+            batch_values = None if batch_values is None else batch_values[order]
+        batch_labels = np.asarray(self._labels[label_rows], dtype=np.float32)
+
         return (
-            torch.from_numpy(feature_ids),
-            torch.from_numpy(feature_values),
-            torch.from_numpy(labels),
+            torch.from_numpy(batch_ids),
+            None if batch_values is None else torch.from_numpy(batch_values),
+            torch.from_numpy(batch_labels),
         )

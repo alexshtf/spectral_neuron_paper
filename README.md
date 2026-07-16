@@ -5,8 +5,9 @@ Research code for the spectral neuron paper.
 ## Criteo scaling experiment
 
 The experiment expects the headerless, tab-separated training file from the Criteo
-Display Advertising Challenge. The first run builds a memory-mapped cache beside the
-raw file; later runs reuse it.
+Display Advertising Challenge. The first run builds memory-mapped raw and encoded
+caches beside the data; later trajectories reuse the encoded features directly. A full
+five-seed, two-preprocessor cache occupies roughly 15 GB in addition to the raw cache.
 
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
 training split. Each model then makes one pass over a fixed random permutation of that
@@ -19,7 +20,12 @@ held-out initialization seeds.
 The default run compares five variants: linear, FM, and spectral models with bucketed
 numerics, plus linear and spectral models with hybrid numerical preprocessing. In the
 hybrid representation, missing, zero, and negative values are indicators while positive
-values use standardized `log1p` magnitudes.
+values use standardized `log1p` magnitudes. Bucket features have implicit unit weights,
+so their cached representation stores IDs only.
+
+With progress enabled, the runner separately reports aggregate trajectory time spent in
+training, validation, and test evaluation. These diagnostics are not written to the
+result table, whose schema remains stable for appending and plotting.
 
 Result rows use one `dim` column for the matched nonlinear capacity: it is the spectral
 matrix dimension, and the corresponding FM rank is `dim * (dim + 1) // 2 - 1` (`0` for

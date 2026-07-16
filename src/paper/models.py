@@ -49,18 +49,31 @@ class KthEigval(nn.Module):
 
 def _check_sparse_input(
     feature_ids: torch.Tensor,
-    feature_values: torch.Tensor,
+    feature_values: torch.Tensor | None,
     num_fields: int,
 ) -> None:
     if feature_ids.shape[-1:] != (num_fields,):
         raise ValueError(
             f"expected input shape (..., {num_fields}); got {tuple(feature_ids.shape)}"
         )
-    if feature_values.shape != feature_ids.shape:
+    if feature_values is not None and feature_values.shape != feature_ids.shape:
         raise ValueError(
             f"feature values must have shape {tuple(feature_ids.shape)}; "
             f"got {tuple(feature_values.shape)}"
         )
+
+
+def _weighted_lookup(
+    table: nn.Embedding,
+    feature_ids: torch.Tensor,
+    feature_values: torch.Tensor | None,
+) -> torch.Tensor:
+    lookup = table(feature_ids)
+    return (
+        lookup
+        if feature_values is None
+        else lookup * feature_values.unsqueeze(-1)
+    )
 
 
 class SparseLinear(nn.Module):
@@ -76,10 +89,12 @@ class SparseLinear(nn.Module):
     def forward(
         self,
         feature_ids: torch.Tensor,
-        feature_values: torch.Tensor,
+        feature_values: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _check_sparse_input(feature_ids, feature_values, self.num_fields)
-        weighted = self.weight(feature_ids).squeeze(-1) * feature_values
+        weighted = _weighted_lookup(
+            self.weight, feature_ids, feature_values
+        ).squeeze(-1)
         return weighted.sum(dim=-1) + self.bias
 
 
@@ -97,10 +112,10 @@ class FactorizationMachine(SparseLinear):
     def forward(
         self,
         feature_ids: torch.Tensor,
-        feature_values: torch.Tensor,
+        feature_values: torch.Tensor | None = None,
     ) -> torch.Tensor:
         linear = super().forward(feature_ids, feature_values)
-        vectors = self.embedding(feature_ids) * feature_values.unsqueeze(-1)
+        vectors = _weighted_lookup(self.embedding, feature_ids, feature_values)
         interaction = 0.5 * (
             vectors.sum(dim=-2).square().sum(dim=-1)
             - vectors.square().sum(dim=(-2, -1))
@@ -137,10 +152,12 @@ class SparseKthEigval(nn.Module):
     def forward(
         self,
         feature_ids: torch.Tensor,
-        feature_values: torch.Tensor,
+        feature_values: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _check_sparse_input(feature_ids, feature_values, self.num_fields)
-        weighted = self.feature_tril(feature_ids) * feature_values.unsqueeze(-1)
+        weighted = _weighted_lookup(
+            self.feature_tril, feature_ids, feature_values
+        )
         tril = self.base_tril + weighted.sum(dim=-2)
         return torch.linalg.eigvalsh(self.tril_emb(tril))[..., self.eig_idx]
 
