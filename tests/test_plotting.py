@@ -15,6 +15,7 @@ from paper.plotting import (
     plot_criteo_spectral_comparison,
     plot_criteo_spectral_dimensions,
     plot_higgs_models_by_dimension,
+    plot_higgs_spectral_dimensions,
     plot_scaling,
 )
 from paper.targets import TargetSpec
@@ -343,6 +344,46 @@ def test_plot_higgs_models_supports_brier_score():
     assert fig._suptitle.get_text() == (
         "HIGGS test Brier score: matched model families"
     )
+
+
+def test_plot_higgs_spectral_dimensions_uses_one_axis():
+    fig = plot_higgs_spectral_dimensions(_higgs_results())
+
+    assert len(fig.axes) == 1
+    assert _legend_labels(fig) == ["3", "5"]
+    assert fig.legends[0].get_title().get_text() == "dimension"
+    assert len(fig.axes[0].collections) == 2
+    assert fig.axes[0].get_xscale() == "log"
+    assert fig.axes[0].get_xlabel() == "examples seen by optimizer"
+    assert fig.axes[0].get_ylabel() == "test log loss ↓"
+    assert fig._suptitle.get_text() == (
+        "HIGGS test log loss: spectral neurons across dimensions"
+    )
+
+
+def test_plot_higgs_spectral_dimensions_supports_brier_and_zoom():
+    xlim = (2**14, 2**18)
+    fig = plot_higgs_spectral_dimensions(
+        _higgs_results(), metric="brier", xlim=xlim
+    )
+
+    assert fig.axes[0].get_ylabel() == "test Brier score ↓"
+    assert fig.axes[0].get_xlim() == pytest.approx(xlim)
+
+
+def test_plot_higgs_spectral_dimensions_supports_more_than_four_dimensions():
+    dimensions = [3, 5, 7, 9, 11]
+    base = _higgs_results().loc[
+        lambda df: (df["model"] == "spectral") & (df["dim"] == 3)
+    ]
+    results = pd.concat(
+        (base.assign(dim=dim) for dim in dimensions),
+        ignore_index=True,
+    )
+
+    fig = plot_higgs_spectral_dimensions(results)
+
+    assert _legend_labels(fig) == list(map(str, dimensions))
 
 
 def test_plot_higgs_models_rejects_inconsistent_capacity():

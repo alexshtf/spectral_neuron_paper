@@ -408,6 +408,8 @@ CRITEO_MODEL_DASHES = {
 
 type CriteoSpectralVariant = Literal["spectral-old", "spectral-new"]
 
+_DIMENSION_MARKERS = ("o", "s", "^", "D", "P", "X", "v", "<", ">", "*")
+
 
 def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
     if metric not in BINARY_METRIC_LABELS:
@@ -439,15 +441,33 @@ def _spectral_dimensions(results: pd.DataFrame) -> list[int]:
     return dimensions
 
 
-def _finish_criteo_grid(
+def _dimension_styles(
+    dimensions: list[int],
+) -> tuple[dict[int, tuple[float, float, float]], dict[int, str]]:
+    palette = dict(
+        zip(
+            dimensions,
+            sns.color_palette("colorblind", len(dimensions)),
+            strict=True,
+        )
+    )
+    markers = {
+        dim: _DIMENSION_MARKERS[i % len(_DIMENSION_MARKERS)]
+        for i, dim in enumerate(dimensions)
+    }
+    return palette, markers
+
+
+def _finish_binary_grid(
     grid: sns.FacetGrid,
     *,
     metric: str,
     title: str,
+    x_label: str,
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
     label = BINARY_METRIC_LABELS[metric]
-    grid.set_axis_labels("training impressions", f"{label} ↓")
+    grid.set_axis_labels(x_label, f"{label} ↓")
     for ax in grid.axes.flat:
         ax.set_xscale("log", base=2)
         if xlim is not None:
@@ -457,20 +477,22 @@ def _finish_criteo_grid(
     return grid.figure
 
 
-def _criteo_relplot(
+def _binary_relplot(
     results: pd.DataFrame,
     *,
+    value: str,
     metric: str,
     title: str,
+    x_label: str,
     by: str,
     hue_order: list,
     palette,
     markers,
     dashes,
+    legend_title: str,
     col: str | None = None,
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
-    value = _check_criteo_results(results, metric)
     facet = {"col": col, "col_wrap": 2} if col is not None else {}
     grid = sns.relplot(
         data=results,
@@ -496,8 +518,44 @@ def _criteo_relplot(
     if col is not None:
         grid.set_titles("dim={col_name}")
     if grid.legend is not None:
-        grid.legend.set_title("model" if by == "model_label" else "dimension")
-    return _finish_criteo_grid(grid, metric=metric, title=title, xlim=xlim)
+        grid.legend.set_title(legend_title)
+    return _finish_binary_grid(
+        grid,
+        metric=metric,
+        title=title,
+        x_label=x_label,
+        xlim=xlim,
+    )
+
+
+def _criteo_relplot(
+    results: pd.DataFrame,
+    *,
+    metric: str,
+    title: str,
+    by: str,
+    hue_order: list,
+    palette,
+    markers,
+    dashes,
+    col: str | None = None,
+    xlim: tuple[float, float] | None = None,
+) -> Figure:
+    return _binary_relplot(
+        results,
+        value=_check_criteo_results(results, metric),
+        metric=metric,
+        title=title,
+        x_label="training impressions",
+        by=by,
+        hue_order=hue_order,
+        palette=palette,
+        markers=markers,
+        dashes=dashes,
+        legend_title="model" if by == "model_label" else "dimension",
+        col=col,
+        xlim=xlim,
+    )
 
 
 def _label_criteo_models(results: pd.DataFrame) -> pd.DataFrame:
@@ -577,8 +635,7 @@ def plot_criteo_spectral_dimensions(
         raise ValueError(f"unknown spectral variant {variant!r}")
     spectral = results.loc[results["model"] == variant]
     dimensions = _spectral_dimensions(spectral)
-    palette = dict(zip(dimensions, sns.color_palette("colorblind", len(dimensions))))
-    markers = dict(zip(dimensions, ("o", "s", "^", "D")))
+    palette, markers = _dimension_styles(dimensions)
     return _criteo_relplot(
         spectral,
         metric=metric,
@@ -607,8 +664,7 @@ def plot_criteo_fm_dimensions(
     ranks = sorted(map(int, fm["rank"].unique()))
     if not ranks:
         raise ValueError("results contain no FM models")
-    palette = dict(zip(ranks, sns.color_palette("colorblind", len(ranks))))
-    markers = dict(zip(ranks, ("o", "s", "^", "D")))
+    palette, markers = _dimension_styles(ranks)
     return _criteo_relplot(
         fm,
         metric=metric,
@@ -622,27 +678,31 @@ def plot_criteo_fm_dimensions(
     )
 
 
-def _check_higgs_results(results: pd.DataFrame, metric: str) -> tuple[str, list[int]]:
+def _check_higgs_metric(results: pd.DataFrame, metric: str) -> str:
     if metric not in BINARY_METRIC_LABELS:
         raise ValueError(
             f"metric must be one of {sorted(BINARY_METRIC_LABELS)}; got {metric!r}"
         )
 
     value = f"test_{metric}"
-    required = {
-        "train_size",
-        "model",
-        "dim",
-        "width",
-        "num_parameters",
-        value,
-    }
+    required = {"train_size", "model", "dim", value}
     missing = required.difference(results.columns)
     if missing:
         raise ValueError(f"results are missing columns: {sorted(missing)}")
     if results.empty:
         raise ValueError("results are empty")
     if results[list(required)].isna().any().any():
+        raise ValueError("HIGGS plotting columns must not contain missing values")
+    return value
+
+
+def _check_higgs_results(results: pd.DataFrame, metric: str) -> tuple[str, list[int]]:
+    value = _check_higgs_metric(results, metric)
+    capacity_columns = {"width", "num_parameters"}
+    missing = capacity_columns.difference(results.columns)
+    if missing:
+        raise ValueError(f"results are missing columns: {sorted(missing)}")
+    if results[list(capacity_columns)].isna().any().any():
         raise ValueError("HIGGS plotting columns must not contain missing values")
 
     models = set(results["model"])
@@ -773,6 +833,39 @@ def plot_higgs_models_by_dimension(
     top = 0.72 if len(dimensions) <= 2 else 0.88
     grid.figure.subplots_adjust(top=top, hspace=0.55)
     return grid.figure
+
+
+def plot_higgs_spectral_dimensions(
+    results: pd.DataFrame,
+    *,
+    metric: str = "logloss",
+    xlim: tuple[float, float] | None = None,
+) -> Figure:
+    """Compare all HIGGS spectral dimensions on one scaling axis."""
+    value = _check_higgs_metric(results, metric)
+    spectral = results.loc[results["model"] == "spectral"]
+    dimensions = sorted(map(int, spectral["dim"].unique()))
+    if not dimensions:
+        raise ValueError("results contain no spectral models")
+
+    palette, markers = _dimension_styles(dimensions)
+    return _binary_relplot(
+        spectral,
+        value=value,
+        metric=metric,
+        title=(
+            f"HIGGS {BINARY_METRIC_LABELS[metric]}: "
+            "spectral neurons across dimensions"
+        ),
+        x_label="examples seen by optimizer",
+        by="dim",
+        hue_order=dimensions,
+        palette=palette,
+        markers=markers,
+        dashes=False,
+        legend_title="dimension",
+        xlim=xlim,
+    )
 
 
 def plot_target_gallery(specs: list[TargetSpec]):

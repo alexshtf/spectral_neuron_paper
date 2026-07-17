@@ -266,7 +266,7 @@ def test_lr_selection_rejects_a_family_without_finite_validation():
     [
         ("sanity", 5, 5, 5),
         ("small", 9, 54, 18),
-        ("full", 17, 204, 102),
+        ("full", 13, 832, 78),
     ],
 )
 def test_profiles_have_the_documented_trajectory_counts(
