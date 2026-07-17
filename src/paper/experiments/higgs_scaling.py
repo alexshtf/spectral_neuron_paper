@@ -745,6 +745,7 @@ def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     profile = PROFILES[args.profile]
     cache_dir = args.cache_dir or args.data.with_name(f".{args.data.name}.cache-v1")
+    print(cache_dir)
     raw = run_profile(
         profile,
         raw_path=args.data,
