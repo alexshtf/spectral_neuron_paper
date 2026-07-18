@@ -35,7 +35,7 @@ def _row(
     complexity: int,
     dim: int,
     model: str,
-    budget: int,
+    train_size: int,
     target_kind: str = "monotone",
     noise_std: float = 0.0,
 ) -> dict:
@@ -45,21 +45,23 @@ def _row(
         "noise_std": noise_std,
         "model": model,
         "dim": dim,
-        "budget": budget,
-        "median_test_rmse": 1.0 / budget,
-        "q25_test_rmse": 0.8 / budget,
-        "q75_test_rmse": 1.2 / budget,
+        "train_size": train_size,
+        "median_test_rmse": 1.0 / train_size,
+        "q25_test_rmse": 0.8 / train_size,
+        "q75_test_rmse": 1.2 / train_size,
     }
 
 
 def test_plot_scaling_pairs_monotone_models_by_dimension():
     summary = pd.DataFrame(
         [
-            _row(complexity=complexity, dim=dim, model=model, budget=budget)
+            _row(
+                complexity=complexity, dim=dim, model=model, train_size=train_size
+            )
             for complexity in (5, 10)
             for dim in (3, 5)
             for model in ("unconstrained", "monotone")
-            for budget in (1, 2)
+            for train_size in (32, 64)
         ]
     )
 
@@ -74,6 +76,9 @@ def test_plot_scaling_pairs_monotone_models_by_dimension():
         "complexity=10, dim=5",
     }
     assert all(len(ax.lines) == 2 for ax in axes)
+    assert all(
+        ax.get_xlabel() == "training-sample budget" for ax in axes
+    )
 
 
 def test_plot_scaling_styles_models_and_dimensions():
@@ -83,12 +88,12 @@ def test_plot_scaling_styles_models_and_dimensions():
                 complexity=5,
                 dim=dim,
                 model=model,
-                budget=budget,
+                train_size=train_size,
                 target_kind="general",
             )
             for dim in (5, 9)
             for model in ("unconstrained", "monotone")
-            for budget in (1, 2)
+            for train_size in (32, 64)
         ]
     )
 
@@ -118,11 +123,11 @@ def test_plot_scaling_rejects_mixed_target_kinds():
                 complexity=5,
                 dim=5,
                 model="unconstrained",
-                budget=budget,
+                train_size=train_size,
                 target_kind=target_kind,
             )
             for target_kind in ("general", "monotone")
-            for budget in (1, 2)
+            for train_size in (32, 64)
         ]
     )
 
@@ -146,7 +151,7 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
                 complexity=complexity,
                 dim=dim,
                 model=model,
-                budget=budget,
+                train_size=train_size,
                 target_kind=target_kind,
                 noise_std=noise_std,
             )
@@ -154,7 +159,7 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
             for complexity in (5, 10)
             for dim in (3, 5)
             for model in models
-            for budget in (1, 2)
+            for train_size in (32, 64)
         ]
     )
 
@@ -323,7 +328,10 @@ def test_plot_higgs_models_by_dimension_facets_and_annotates_capacity():
     )
     assert all(len(ax.collections) == 5 for ax in fig.axes)
     assert all(ax.get_xscale() == "log" for ax in fig.axes)
-    assert all(ax.get_xlabel() == "examples seen by optimizer" for ax in fig.axes)
+    assert all(
+        ax.get_xlabel() == "training samples processed by optimizer"
+        for ax in fig.axes
+    )
     assert fig.axes[0].get_ylabel() == "test log loss ↓"
 
 
@@ -357,7 +365,7 @@ def test_plot_higgs_spectral_dimensions_uses_one_axis():
     assert fig.legends[0].get_title().get_text() == "dimension"
     assert len(fig.axes[0].collections) == 2
     assert fig.axes[0].get_xscale() == "log"
-    assert fig.axes[0].get_xlabel() == "examples seen by optimizer"
+    assert fig.axes[0].get_xlabel() == "training samples processed by optimizer"
     assert fig.axes[0].get_ylabel() == "test log loss ↓"
     assert fig._suptitle.get_text() == (
         "HIGGS test log loss: spectral neurons across dimensions"

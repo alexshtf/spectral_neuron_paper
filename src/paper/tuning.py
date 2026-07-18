@@ -10,6 +10,7 @@ RUN_COLUMNS = [
     "dim",
     "lr",
     "init_seed",
+    "batch_size",
 ]
 
 SELECTION_COLUMNS = [
@@ -18,7 +19,8 @@ SELECTION_COLUMNS = [
     "noise_std",
     "model",
     "dim",
-    "budget",
+    "batch_size",
+    "train_size",
 ]
 
 
@@ -32,19 +34,21 @@ def _lowest_validation_rows(
 
 
 def best_checkpoints(
-    raw: pd.DataFrame, budgets: list[int] | tuple[int, ...]
+    raw: pd.DataFrame, train_sizes: list[int] | tuple[int, ...]
 ) -> pd.DataFrame:
     selected = []
 
-    for budget in budgets:
-        eligible = raw.loc[raw["step"] <= budget].copy()
+    for train_size in train_sizes:
+        eligible = raw.loc[raw["train_size"] <= train_size].copy()
         if eligible.empty:
             continue
-        eligible["budget"] = budget
-        selected.append(_lowest_validation_rows(eligible, RUN_COLUMNS + ["budget"]))
+        eligible["train_size"] = train_size
+        selected.append(
+            _lowest_validation_rows(eligible, RUN_COLUMNS + ["train_size"])
+        )
 
     if not selected:
-        return raw.head(0).assign(budget=pd.Series(dtype=int))
+        return raw.head(0)
 
     return pd.concat(selected, ignore_index=True)
 
@@ -85,6 +89,6 @@ def summarize_selected(selected: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_raw(
-    raw: pd.DataFrame, budgets: list[int] | tuple[int, ...]
+    raw: pd.DataFrame, train_sizes: list[int] | tuple[int, ...]
 ) -> pd.DataFrame:
-    return summarize_selected(select_lr(best_checkpoints(raw, budgets)))
+    return summarize_selected(select_lr(best_checkpoints(raw, train_sizes)))

@@ -30,7 +30,9 @@ RAW_COLUMNS = [
     "dim",
     "lr",
     "init_seed",
+    "batch_size",
     "step",
+    "train_size",
     "val_rmse",
     "test_rmse",
 ]
@@ -51,7 +53,7 @@ class Profile:
     init_seeds: range
     dims: tuple[int, ...]
     lrs: tuple[float, ...]
-    budgets: tuple[int, ...]
+    train_sizes: tuple[int, ...]
     batch_size: int = 32
     noise_stds: tuple[float, ...] = (0.0,)
 
@@ -110,7 +112,7 @@ class RunGrid:
 @dataclass(frozen=True)
 class RunSettings:
     batch_size: int
-    budgets: tuple[int, ...]
+    train_sizes: tuple[int, ...]
     val_size: int
     test_size: int
 
@@ -123,7 +125,9 @@ def _make_seeded_model(
         return make_model(model_spec, input_dim)
 
 
-def _with_metadata(df: pd.DataFrame, *, config: RunConfig) -> pd.DataFrame:
+def _with_metadata(
+    df: pd.DataFrame, *, config: RunConfig, batch_size: int
+) -> pd.DataFrame:
     metadata = {
         "target_kind": config.target_spec.kind,
         "complexity": config.target_spec.complexity,
@@ -134,7 +138,19 @@ def _with_metadata(df: pd.DataFrame, *, config: RunConfig) -> pd.DataFrame:
         "lr": config.lr,
         "init_seed": config.init_seed,
     }
-    return df.assign(**metadata).loc[:, RAW_COLUMNS]
+    return df.assign(
+        **metadata,
+        batch_size=batch_size,
+        train_size=lambda rows: rows["step"] * batch_size,
+    ).loc[:, RAW_COLUMNS]
+
+
+def _steps_for_train_sizes(
+    train_sizes: tuple[int, ...], batch_size: int
+) -> tuple[int, ...]:
+    if any(train_size % batch_size for train_size in train_sizes):
+        raise ValueError("synthetic train sizes must be divisible by batch_size")
+    return tuple(train_size // batch_size for train_size in train_sizes)
 
 
 def run_config(
@@ -165,9 +181,9 @@ def run_config(
         model,
         lr=config.lr,
         train_seed=config.init_seed,
-        checkpoints=settings.budgets,
+        checkpoints=_steps_for_train_sizes(settings.train_sizes, settings.batch_size),
     )
-    return _with_metadata(df, config=config)
+    return _with_metadata(df, config=config, batch_size=settings.batch_size)
 
 
 def run_profile(
@@ -184,7 +200,7 @@ def run_profile(
     configs = RunGrid(profile)
     settings = RunSettings(
         batch_size=profile.batch_size,
-        budgets=profile.budgets,
+        train_sizes=profile.train_sizes,
         val_size=val_size,
         test_size=test_size,
     )

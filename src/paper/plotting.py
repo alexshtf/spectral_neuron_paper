@@ -14,7 +14,7 @@ SCALING_COLUMNS = {
     "complexity",
     "model",
     "dim",
-    "budget",
+    "train_size",
     "median_test_rmse",
     "q25_test_rmse",
     "q75_test_rmse",
@@ -29,6 +29,8 @@ BINARY_METRIC_LABELS = {
     "logloss": "test log loss",
     "brier": "test Brier score",
 }
+TRAIN_SIZE_LABEL = "training samples processed by optimizer"
+SYNTHETIC_TRAIN_SIZE_LABEL = "training-sample budget"
 
 HIGGS_MODEL_LABELS = {
     "linear": "Linear",
@@ -169,8 +171,8 @@ def _plot_curve(
     color: str | None = None,
     linestyle: str | None = None,
 ) -> None:
-    group = group.sort_values("budget")
-    x = group["budget"].to_numpy()
+    group = group.sort_values("train_size")
+    x = group["train_size"].to_numpy()
     median = group["median_test_rmse"].to_numpy()
     q25 = group["q25_test_rmse"].to_numpy()
     q75 = group["q75_test_rmse"].to_numpy()
@@ -293,7 +295,7 @@ def _plot_scaling_grid(
                     linestyle=linestyle,
                 )
         ax.set_title(f"complexity={complexity}")
-        ax.set_xlabel("budget")
+        ax.set_xlabel(SYNTHETIC_TRAIN_SIZE_LABEL)
         ax.set_ylabel("test RMSE")
         ax.set_xscale("log")
         if (sub["median_test_rmse"] > 0).all():
@@ -337,7 +339,7 @@ def _plot_pairwise_scaling(
                     _plot_curve(ax, group, label=model)
 
             ax.set_title(f"complexity={complexity}, dim={dim}")
-            ax.set_xlabel("budget")
+            ax.set_xlabel(SYNTHETIC_TRAIN_SIZE_LABEL)
             ax.set_ylabel("test RMSE")
             ax.set_xscale("log")
             if (sub["median_test_rmse"] > 0).all():
@@ -607,7 +609,7 @@ def _criteo_relplot(
         value=_check_criteo_results(results, metric),
         metric=metric,
         title=title,
-        x_label="impressions seen by optimizer",
+        x_label=TRAIN_SIZE_LABEL,
         by=by,
         hue_order=hue_order,
         palette=palette,
@@ -878,7 +880,7 @@ def plot_higgs_models_by_dimension(
         facet_kws={"sharex": True, "sharey": True},
     )
     grid.set_axis_labels(
-        "examples seen by optimizer",
+        TRAIN_SIZE_LABEL,
         f"{BINARY_METRIC_LABELS[metric]} ↓",
     )
     for dim, ax in zip(dimensions, grid.axes.flat):
@@ -918,7 +920,7 @@ def plot_higgs_spectral_dimensions(
             f"HIGGS {BINARY_METRIC_LABELS[metric]}: "
             "spectral neurons across dimensions"
         ),
-        x_label="examples seen by optimizer",
+        x_label=TRAIN_SIZE_LABEL,
         by="dim",
         hue_order=dimensions,
         palette=palette,
@@ -984,7 +986,7 @@ def plot_movielens_models_by_dimension(results: pd.DataFrame) -> Figure:
         faceted,
         value="test_rmse",
         title="MovieLens test RMSE: matched model families",
-        x_label="ratings seen by optimizer",
+        x_label=TRAIN_SIZE_LABEL,
         y_label="test RMSE ↓",
         by="model_label",
         hue_order=model_order,
@@ -1026,7 +1028,7 @@ def plot_movielens_dimensions(
         subset,
         value="test_rmse",
         title=f"MovieLens test RMSE: {family}",
-        x_label="ratings seen by optimizer",
+        x_label=TRAIN_SIZE_LABEL,
         y_label="test RMSE ↓",
         by=capacity,
         hue_order=values,
@@ -1059,7 +1061,7 @@ def plot_movielens_warm_coverage(results: pd.DataFrame) -> Figure:
     )
     ax.set(
         title="MovieLens test-set warm coverage",
-        xlabel="ratings seen by optimizer",
+        xlabel=TRAIN_SIZE_LABEL,
         ylabel="warm test fraction",
         ylim=(0, 1.02),
     )

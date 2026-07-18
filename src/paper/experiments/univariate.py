@@ -15,7 +15,7 @@ PROFILES: dict[str, Profile] = {
         init_seeds=range(1),
         dims=(5, 9),
         lrs=(1e-3, 1e-2),
-        budgets=(1, 2, 5, 10, 30),
+        train_sizes=tuple(32 * step for step in (1, 2, 5, 10, 30)),
         batch_size=32,
     ),
     "small": Profile(
@@ -24,7 +24,7 @@ PROFILES: dict[str, Profile] = {
         init_seeds=range(2),
         dims=(5, 9, 15),
         lrs=tuple(np.geomspace(1e-4, 1e-1, 4).tolist()),
-        budgets=(1, 2, 5, 10, 20, 50, 100, 200),
+        train_sizes=tuple(32 * step for step in (1, 2, 5, 10, 20, 50, 100, 200)),
         batch_size=32,
     ),
     "full": Profile(
@@ -33,7 +33,10 @@ PROFILES: dict[str, Profile] = {
         init_seeds=range(3),
         dims=(5, 9, 15),
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
-        budgets=(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000),
+        train_sizes=tuple(
+            32 * step
+            for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)
+        ),
         batch_size=32,
         noise_stds=(0.0, 1e-1),
     ),

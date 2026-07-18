@@ -31,7 +31,7 @@ def tiny_profile() -> Profile:
         init_seeds=range(1),
         dims=(3,),
         lrs=(1e-2,),
-        budgets=(1, 2),
+        train_sizes=(4, 8),
         batch_size=4,
     )
 
@@ -40,18 +40,20 @@ def test_tiny_profile_produces_raw_logs_and_summary():
     profile = tiny_profile()
 
     raw = run_profile(profile, val_size=16, test_size=16)
-    summary = summarize_raw(raw, profile.budgets)
+    summary = summarize_raw(raw, profile.train_sizes)
 
     assert not raw.empty
     assert not summary.empty
     assert set(RAW_COLUMNS).issubset(raw.columns)
+    assert raw["batch_size"].eq(profile.batch_size).all()
+    assert (raw["train_size"] == raw["step"] * raw["batch_size"]).all()
     assert {
         "target_kind",
         "complexity",
         "noise_std",
         "model",
         "dim",
-        "budget",
+        "train_size",
         "selected_lr",
         "median_test_rmse",
         "q25_test_rmse",
