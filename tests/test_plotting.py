@@ -16,6 +16,9 @@ from paper.plotting import (
     plot_criteo_spectral_dimensions,
     plot_higgs_models_by_dimension,
     plot_higgs_spectral_dimensions,
+    plot_movielens_dimensions,
+    plot_movielens_models_by_dimension,
+    plot_movielens_warm_coverage,
     plot_scaling,
 )
 from paper.targets import TargetSpec
@@ -396,3 +399,78 @@ def test_plot_higgs_models_rejects_inconsistent_capacity():
 
     with pytest.raises(ValueError, match="one recorded capacity"):
         plot_higgs_models_by_dimension(results)
+
+
+def _movielens_results() -> pd.DataFrame:
+    capacities = {3: (5, 6), 5: (14, 15)}
+    rows = []
+    for train_size, data_seed in product((2**18, 2**20), range(3)):
+        common = {
+            "train_size": train_size,
+            "data_seed": data_seed,
+            "test_warm_fraction": 0.8 + train_size / 10**7 + data_seed / 1000,
+        }
+        rows.append(
+            common
+            | {
+                "model": "linear",
+                "dim": 0,
+                "rank": 0,
+                "parameters_per_identity": 1,
+                "test_rmse": 1.0 - train_size / 10**7 + data_seed / 1000,
+            }
+        )
+        for dim, (rank, parameters) in capacities.items():
+            for model in ("fm", "spectral"):
+                rows.append(
+                    common
+                    | {
+                        "model": model,
+                        "dim": dim,
+                        "rank": rank if model == "fm" else 0,
+                        "parameters_per_identity": parameters,
+                        "test_rmse": (
+                            0.9
+                            - train_size / 10**7
+                            - dim / 100
+                            + data_seed / 1000
+                        ),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_plot_movielens_models_facets_matched_capacity():
+    figure = plot_movielens_models_by_dimension(_movielens_results())
+
+    assert [ax.get_title() for ax in figure.axes] == [
+        "dim=3 · 6 parameters/identity\nFM rank=5",
+        "dim=5 · 15 parameters/identity\nFM rank=14",
+    ]
+    assert _legend_labels(figure) == ["Linear", "FM", "Spectral"]
+    assert all(
+        sum(line.get_label().startswith("_child") for line in ax.lines) == 3
+        for ax in figure.axes
+    )
+    assert all(len(ax.collections) == 3 for ax in figure.axes)
+    assert figure.axes[0].get_ylabel() == "test RMSE ↓"
+
+
+@pytest.mark.parametrize(
+    ("model", "legend_title", "labels"),
+    [("spectral", "dimension", ["3", "5"]), ("fm", "rank", ["5", "14"])],
+)
+def test_plot_movielens_dimensions_uses_one_axis(model, legend_title, labels):
+    figure = plot_movielens_dimensions(_movielens_results(), model)
+
+    assert len(figure.axes) == 1
+    assert _legend_labels(figure) == labels
+    assert figure.legends[0].get_title().get_text() == legend_title
+    assert len(figure.axes[0].collections) == 2
+
+
+def test_plot_movielens_warm_coverage_deduplicates_model_runs():
+    figure = plot_movielens_warm_coverage(_movielens_results())
+
+    assert len(figure.axes[0].lines) == 1
+    assert figure.axes[0].get_ylim() == pytest.approx((0, 1.02))

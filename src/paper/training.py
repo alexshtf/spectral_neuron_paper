@@ -1,4 +1,6 @@
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
+from functools import partial
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -12,16 +14,25 @@ from paper.tasks import Task
 
 type Event = dict[str, Any]
 type ModelInputs = tuple[torch.Tensor, ...]
-type BinaryBatch = tuple[ModelInputs, torch.Tensor]
-type BatchFactory = Callable[[], Iterable[BinaryBatch]]
+type Batch = tuple[ModelInputs, torch.Tensor]
+type BatchFactory = Callable[[], Iterable[Batch]]
+type Loss = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+type Evaluator = Callable[[nn.Module, Iterable[Batch]], dict[str, float]]
 
 
-class BinaryTask(Protocol):
-    def train_batches(self, start: int, stop: int) -> Iterable[BinaryBatch]: ...
+@dataclass(frozen=True)
+class Objective:
+    loss: Loss
+    validation_metrics: Evaluator
+    test_metrics: Evaluator
 
-    def val_batches(self) -> Iterable[BinaryBatch]: ...
 
-    def test_batches(self) -> Iterable[BinaryBatch]: ...
+class ScalingTask(Protocol):
+    def train_batches(self, start: int, stop: int) -> Iterable[Batch]: ...
+
+    def val_batches(self) -> Iterable[Batch]: ...
+
+    def test_batches(self) -> Iterable[Batch]: ...
 
 
 def _checkpoints(values: Iterable[int]) -> tuple[int, ...]:
@@ -126,12 +137,25 @@ def _adam_optimizers(
     return optimizers
 
 
-def train_binary_scaling_events(
-    task: BinaryTask,
+def _predict(
+    model: nn.Module, model_inputs: ModelInputs, labels: torch.Tensor
+) -> torch.Tensor:
+    predictions = model(*model_inputs)
+    if predictions.shape != labels.shape:
+        raise ValueError(
+            f"predictions have shape {tuple(predictions.shape)}; "
+            f"labels have shape {tuple(labels.shape)}"
+        )
+    return predictions
+
+
+def train_scaling_events(
+    task: ScalingTask,
     model: nn.Module,
     *,
     lr: float,
     checkpoints: Iterable[int],
+    loss: Loss,
 ) -> Iterator[Event]:
     checkpoints = _checkpoints(checkpoints)
 
@@ -143,11 +167,10 @@ def train_binary_scaling_events(
         model.train()
         segment_started = perf_counter()
         for model_inputs, labels in task.train_batches(start, train_size):
-            logits = model(*model_inputs)
-            loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+            batch_loss = loss(_predict(model, model_inputs, labels), labels)
 
             model.zero_grad(set_to_none=True)
-            loss.backward()
+            batch_loss.backward()
             for optimizer in optimizers:
                 optimizer.step()
 
@@ -162,7 +185,7 @@ def train_binary_scaling_events(
 
 def evaluate_binary(
     model: nn.Module,
-    batches: Iterable[BinaryBatch],
+    batches: Iterable[Batch],
     *,
     include_brier: bool = True,
 ) -> dict[str, float]:
@@ -174,7 +197,7 @@ def evaluate_binary(
     try:
         with torch.inference_mode():
             for model_inputs, labels in batches:
-                logits = model(*model_inputs)
+                logits = _predict(model, model_inputs, labels)
                 total_logloss += nn.functional.binary_cross_entropy_with_logits(
                     logits, labels, reduction="sum"
                 ).item()
@@ -194,20 +217,51 @@ def evaluate_binary(
     return metrics
 
 
-def binary_metrics_on(
+def evaluate_regression(
+    model: nn.Module,
+    batches: Iterable[Batch],
+) -> dict[str, float]:
+    was_training = model.training
+    model.eval()
+    squared_error = 0.0
+    samples = 0
+    try:
+        with torch.inference_mode():
+            for model_inputs, labels in batches:
+                errors = _predict(model, model_inputs, labels) - labels
+                squared_error += errors.square().sum().item()
+                samples += labels.numel()
+    finally:
+        model.train(was_training)
+
+    if samples == 0:
+        raise ValueError("evaluation data must not be empty")
+    return {"rmse": (squared_error / samples) ** 0.5}
+
+
+BINARY_OBJECTIVE = Objective(
+    loss=nn.functional.binary_cross_entropy_with_logits,
+    validation_metrics=partial(evaluate_binary, include_brier=False),
+    test_metrics=evaluate_binary,
+)
+REGRESSION_OBJECTIVE = Objective(
+    loss=nn.functional.mse_loss,
+    validation_metrics=evaluate_regression,
+    test_metrics=evaluate_regression,
+)
+
+
+def metrics_on(
     name: str,
     batches: BatchFactory,
-    *,
-    include_brier: bool = True,
+    evaluate: Evaluator,
 ) -> Callable[[Event], Event]:
     elapsed_seconds = 0.0
 
     def augment(event: Event) -> Event:
         nonlocal elapsed_seconds
         started = perf_counter()
-        metrics = evaluate_binary(
-            event["model"], batches(), include_brier=include_brier
-        )
+        metrics = evaluate(event["model"], batches())
         elapsed_seconds += perf_counter() - started
         return {
             **{f"{name}_{key}": value for key, value in metrics.items()},
@@ -226,54 +280,82 @@ def _events_at_train_sizes(
             yield event
 
 
-def tune_binary_scaling_stream(
-    task: BinaryTask,
+def _scaling_results(
+    task: ScalingTask,
     model: nn.Module,
     *,
     lr: float,
     checkpoints: Iterable[int],
-    validation_checkpoints: Iterable[int] | None = None,
+    selected_checkpoints: Iterable[int] | None,
+    loss: Loss,
+    metric_name: str,
+    batches: BatchFactory,
+    evaluate: Evaluator,
 ) -> pd.DataFrame:
     checkpoints = _checkpoints(checkpoints)
     selected = (
         checkpoints
-        if validation_checkpoints is None
-        else _checkpoints(validation_checkpoints)
+        if selected_checkpoints is None
+        else tuple(map(int, selected_checkpoints))
     )
-    selected_set = set(selected)
-    if not selected_set <= set(checkpoints):
-        raise ValueError("validation_checkpoints must be drawn from checkpoints")
+    if not set(selected) <= set(checkpoints):
+        raise ValueError("metric checkpoints must be drawn from checkpoints")
 
-    trained = train_binary_scaling_events(
-        task, model, lr=lr, checkpoints=checkpoints
-    )
     events = fts.pipe(
-        _events_at_train_sizes(trained, selected_set),
-        fts.augment(binary_metrics_on("val", task.val_batches, include_brier=False)),
+        _events_at_train_sizes(
+            train_scaling_events(
+                task,
+                model,
+                lr=lr,
+                checkpoints=checkpoints,
+                loss=loss,
+            ),
+            selected,
+        ),
+        fts.augment(metrics_on(metric_name, batches, evaluate)),
     )
     return fts.collect_pd(events)
 
 
-def fit_and_test_binary_scaling(
-    task: BinaryTask,
+def tune_scaling_stream(
+    task: ScalingTask,
     model: nn.Module,
     *,
+    objective: Objective,
     lr: float,
     checkpoints: Iterable[int],
-    test_checkpoints: Iterable[int],
+    validation_checkpoints: Iterable[int] | None = None,
 ) -> pd.DataFrame:
-    checkpoints = _checkpoints(checkpoints)
-    test_checkpoints = set(map(int, test_checkpoints))
-    if not test_checkpoints <= set(checkpoints):
-        raise ValueError("test_checkpoints must be drawn from checkpoints")
-    trained = train_binary_scaling_events(
+    return _scaling_results(
         task,
         model,
         lr=lr,
         checkpoints=checkpoints,
+        selected_checkpoints=validation_checkpoints,
+        loss=objective.loss,
+        metric_name="val",
+        batches=task.val_batches,
+        evaluate=objective.validation_metrics,
     )
-    events = fts.pipe(
-        _events_at_train_sizes(trained, test_checkpoints),
-        fts.augment(binary_metrics_on("test", task.test_batches)),
+
+
+def fit_and_test_scaling(
+    task: ScalingTask,
+    model: nn.Module,
+    *,
+    objective: Objective,
+    lr: float,
+    checkpoints: Iterable[int],
+    test_checkpoints: Iterable[int],
+) -> pd.DataFrame:
+    return _scaling_results(
+        task,
+        model,
+        lr=lr,
+        checkpoints=checkpoints,
+        selected_checkpoints=test_checkpoints,
+        loss=objective.loss,
+        metric_name="test",
+        batches=task.test_batches,
+        evaluate=objective.test_metrics,
     )
-    return fts.collect_pd(events)

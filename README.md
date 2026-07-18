@@ -2,6 +2,48 @@
 
 Research code for the spectral neuron paper.
 
+## MovieLens scaling experiment
+
+The MovieLens experiment is a matrix-completion study using only user and movie
+identities to predict ratings. With exactly those two active fields, the FM is classical
+biased matrix factorization:
+
+```text
+rating(user, movie) = global bias + user bias + movie bias
+                    + dot(user embedding, movie embedding)
+```
+
+The fixed split is random 80/10/10 within each user. If a movie would otherwise be
+absent from training, one of its holdout ratings is moved into training. Thus every
+validation and test identity is estimable from the complete training pool, while each
+data seed changes only the permutation of that pool. Nested prefixes make one pass over
+that permutation. Prefix warm-coverage fractions are recorded because the complete
+split is warm but an early random prefix need not be.
+
+Users and movies are mapped to compact, disjoint ID ranges. There is no hashing or
+fitted feature preprocessing. Ratings are shifted by the fixed midpoint of the official
+0.5--5 scale for optimization; RMSE is unchanged and remains in rating units.
+For a spectral dimension `d`, each identity has `d * (d + 1) // 2` matrix coordinates.
+The matched FM rank is one less, because its per-identity linear bias consumes the
+remaining parameter.
+
+The runner accepts `ratings.csv`, its containing directory, or the official MovieLens
+ZIP. The first invocation writes compact NumPy memory maps to a reusable cache.
+
+```bash
+uv run python -m paper.experiments.movielens_scaling \
+  --data ~/datasets/ml-20m.zip \
+  --profile sanity \
+  --workers 2
+```
+
+The `small` profile is the inexpensive capacity pilot. The `full` profile runs from
+roughly one million to 15.8 million training ratings; the recorded warm coverage shows
+how much early checkpoints are still affected by unseen identities. Learning rates are
+selected from final-checkpoint validation RMSE; selected configurations are then
+initialized afresh and tested at every checkpoint. Use `--variant` with `linear`, `fm`,
+or `spectral`, plus `--write-mode append`, to run the grid in shards.
+
 ## HIGGS scaling experiment
 
 The HIGGS experiment consumes the headerless 11-million-row CSV. It uses the first

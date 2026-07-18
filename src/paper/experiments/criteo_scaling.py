@@ -28,8 +28,9 @@ from paper.experiments import run_many
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
 from paper.training import (
-    fit_and_test_binary_scaling,
-    tune_binary_scaling_stream,
+    BINARY_OBJECTIVE,
+    fit_and_test_scaling,
+    tune_scaling_stream,
 )
 
 
@@ -307,9 +308,10 @@ def _report_timings(
 
 def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
     task, model = _make_task_model(config, settings)
-    result = tune_binary_scaling_stream(
+    result = tune_scaling_stream(
         task,
         model,
+        objective=BINARY_OBJECTIVE,
         lr=config.lr,
         checkpoints=settings.train_sizes,
     )
@@ -326,9 +328,10 @@ def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
     checkpoints = tuple(
         size for size in settings.train_sizes if size <= max(selected.train_sizes)
     )
-    result = fit_and_test_binary_scaling(
+    result = fit_and_test_scaling(
         task,
         model,
+        objective=BINARY_OBJECTIVE,
         lr=selected.config.lr,
         checkpoints=checkpoints,
         test_checkpoints=selected.train_sizes,

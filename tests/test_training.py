@@ -6,14 +6,17 @@ from torch import nn
 from paper.models import SparseLinear
 from paper.tasks import Task
 from paper.training import (
+    BINARY_OBJECTIVE,
+    REGRESSION_OBJECTIVE,
     _adam_optimizers,
-    binary_metrics_on,
     evaluate_binary,
+    evaluate_regression,
     evaluate_rmse,
-    fit_and_test_binary_scaling,
+    fit_and_test_scaling,
+    metrics_on,
     run_one_stream,
-    train_binary_scaling_events,
-    tune_binary_scaling_stream,
+    train_scaling_events,
+    tune_scaling_stream,
 )
 
 
@@ -76,6 +79,23 @@ def test_evaluation_restores_model_mode(training):
     assert model.modes.pop() is False
     assert model.training is training
 
+    model.train(training)
+    evaluate_regression(model, [((x,), y)])
+    assert model.modes.pop() is False
+    assert model.training is training
+
+
+def test_regression_metrics_are_global_over_uneven_batches():
+    model = ModeRecorder()
+    batches = [
+        ((torch.zeros(1, 1),), torch.tensor([3.0])),
+        ((torch.zeros(3, 1),), torch.tensor([4.0, 0.0, 0.0])),
+    ]
+
+    metrics = evaluate_regression(model, batches)
+
+    assert metrics == {"rmse": 2.5}
+
 
 def test_binary_models_use_adam_and_sparse_adam():
     optimizers = _adam_optimizers(SparseLinear(3, 1), lr=0.1)
@@ -102,11 +122,12 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
 
     model = SparseLinear(num_features=1, num_fields=1)
     events = list(
-        train_binary_scaling_events(
+        train_scaling_events(
             RecordingTask(),
             model,
             lr=0.1,
             checkpoints=(3, 7),
+            loss=BINARY_OBJECTIVE.loss,
         )
     )
 
@@ -139,11 +160,12 @@ def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
                 nn.Flatten(start_dim=-2, end_dim=-1),
             )
         list(
-            train_binary_scaling_events(
+            train_scaling_events(
                 DenseTask(),
                 model,
                 lr=1e-2,
                 checkpoints=checkpoints,
+                loss=BINARY_OBJECTIVE.loss,
             )
         )
         return tuple(parameter.detach().clone() for parameter in model.parameters())
@@ -170,25 +192,22 @@ def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch)
             )
 
     events = list(
-        train_binary_scaling_events(
+        train_scaling_events(
             Task(),
             SparseLinear(num_features=1, num_fields=1),
             lr=0.1,
             checkpoints=(1, 2),
+            loss=BINARY_OBJECTIVE.loss,
         )
     )
 
     assert [event["train_seconds"] for event in events] == [2.0, 5.0]
 
 
-def test_binary_evaluation_time_is_cumulative(monkeypatch):
+def test_evaluation_time_is_cumulative(monkeypatch):
     ticks = iter((0.0, 2.0, 10.0, 13.0))
     monkeypatch.setattr("paper.training.perf_counter", lambda: next(ticks))
-    monkeypatch.setattr(
-        "paper.training.evaluate_binary",
-        lambda *_args, **_kwargs: {"logloss": 0.5},
-    )
-    augment = binary_metrics_on("val", lambda: ())
+    augment = metrics_on("val", lambda: (), lambda *_: {"logloss": 0.5})
 
     first = augment({"model": object()})
     second = augment({"model": object()})
@@ -219,9 +238,10 @@ def test_binary_scaling_tests_only_selected_checkpoints():
                 torch.zeros(1),
             )
 
-    result = fit_and_test_binary_scaling(
+    result = fit_and_test_scaling(
         RecordingTask(),
         SparseLinear(num_features=1, num_fields=1),
+        objective=BINARY_OBJECTIVE,
         lr=0.1,
         checkpoints=(3, 5, 7),
         test_checkpoints=(3, 7),
@@ -248,9 +268,10 @@ def test_binary_tuning_evaluates_only_selected_checkpoints():
             validation_calls += 1
             yield (torch.zeros(1, 1, dtype=torch.long),), torch.zeros(1)
 
-    result = tune_binary_scaling_stream(
+    result = tune_scaling_stream(
         Task(),
         SparseLinear(num_features=1, num_fields=1),
+        objective=BINARY_OBJECTIVE,
         lr=0.1,
         checkpoints=(3, 5, 7),
         validation_checkpoints=(7,),
@@ -258,3 +279,50 @@ def test_binary_tuning_evaluates_only_selected_checkpoints():
 
     assert result["train_size"].tolist() == [7]
     assert validation_calls == 1
+
+
+def test_regression_scaling_keeps_validation_and_test_separate():
+    validation_calls = 0
+    test_calls = 0
+
+    class Task:
+        @staticmethod
+        def train_batches(start: int, stop: int):
+            yield (torch.ones(stop - start, 1),), torch.ones(stop - start)
+
+        @staticmethod
+        def val_batches():
+            nonlocal validation_calls
+            validation_calls += 1
+            yield (torch.ones(1, 1),), torch.ones(1)
+
+        @staticmethod
+        def test_batches():
+            nonlocal test_calls
+            test_calls += 1
+            yield (torch.ones(1, 1),), torch.ones(1)
+
+    def model():
+        return nn.Sequential(nn.Linear(1, 1), nn.Flatten(start_dim=0))
+
+    tuning = tune_scaling_stream(
+        Task(),
+        model(),
+        objective=REGRESSION_OBJECTIVE,
+        lr=0.1,
+        checkpoints=(3, 5, 7),
+        validation_checkpoints=(5,),
+    )
+    testing = fit_and_test_scaling(
+        Task(),
+        model(),
+        objective=REGRESSION_OBJECTIVE,
+        lr=0.1,
+        checkpoints=(3, 5, 7),
+        test_checkpoints=(3, 7),
+    )
+
+    assert tuning["train_size"].tolist() == [5]
+    assert testing["train_size"].tolist() == [3, 7]
+    assert validation_calls == 1
+    assert test_calls == 2
