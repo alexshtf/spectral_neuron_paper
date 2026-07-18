@@ -33,7 +33,7 @@ PROFILES: dict[str, Profile] = {
         init_seeds=range(3),
         dims=(5, 9, 15),
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
-        budgets=(1, 2, 5, 10, 20, 50, 100, 200, 500),
+        budgets=(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000),
         batch_size=32,
         noise_stds=(0.0, 1e-1),
     ),
