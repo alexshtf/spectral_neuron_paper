@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.figure import Figure, SubFigure
+from matplotlib.lines import Line2D
 
 from paper.targets import TargetSpec, make_bivariate_target, make_target
 
@@ -360,14 +361,18 @@ def _plot_noise_subfigures(
     noise_stds = _noise_stds(summary)
     width, height = _scaling_figure_size(summary, pair_by_dim=pair_by_dim)
     fig = plt.figure(
-        figsize=(width, height * len(noise_stds)),
+        figsize=(width * len(noise_stds), height),
         layout="constrained",
     )
-    subfigures = fig.subfigures(len(noise_stds), 1, squeeze=False).ravel()
+    subfigures = fig.subfigures(1, len(noise_stds), squeeze=False).ravel()
+
+    # 5. Add a vertical line in the exact middle of the main figure canvas
+    line = Line2D([0.5, 0.5], [0.02, 0.98], transform=fig.transFigure, color='gray', linestyle='--', linewidth=3)
+    fig.add_artist(line)
 
     for noise_std, subfigure in zip(noise_stds, subfigures):
         noise_summary = summary.loc[summary["noise_std"] == noise_std]
-        subfigure.suptitle(_noise_title(noise_std), x=0.01, ha="left")
+        subfigure.suptitle(_noise_title(noise_std), fontsize='x-large')
         if pair_by_dim:
             _plot_pairwise_scaling(
                 noise_summary,
