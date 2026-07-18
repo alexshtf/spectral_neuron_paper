@@ -8,6 +8,8 @@ Optimize for clear, minimal experiment infrastructure that supports the paper. D
 
 Prefer modern, explicit Python when it improves clarity. Keep tensor code vectorized and shape-aware; do not replace vectorized numerical work with Python loops unless the problem is genuinely tiny and clarity wins.
 
+The objective of experiments here is showing the usefulness of the above-mentioned model family: our paper establishes theoretical properties, such as feature sensitivity via spectral norms, shape control via PSD matrices, convexity / concavity via eigenvalue index. Here our aim is showing that the family is trainable and improves with scaling, not that it beats some SOTA. This is to support the main thesis: we have a model family that has easy sensitivity and control properties, while improving with size.
+
 ## Experiment Infrastructure
 
 - Keep notebooks thin. Put reusable logic in `src/paper/`; notebooks should run, summarize, and plot.
