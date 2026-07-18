@@ -100,23 +100,32 @@ def test_movie_seen_only_in_holdout_is_moved_to_training(tmp_path):
 
 def test_training_order_permutes_the_full_pool_deterministically(tmp_path):
     corpus, _ = _prepare(tmp_path)
-    first = np.load(corpus.order_path(11))
+    metadata = (corpus.cache_dir / "metadata.json").read_bytes()
+    first_path, second_path = corpus.shuffled_epochs(11).prepare(2)
+    first = np.load(first_path)
+    second = np.load(second_path)
 
     np.testing.assert_array_equal(np.sort(first), np.arange(corpus.train_rows))
     np.testing.assert_array_equal(np.load(corpus.order_path(11)), first)
     assert not np.array_equal(first, np.load(corpus.order_path(12)))
+    assert not np.array_equal(first, second)
+    assert (corpus.cache_dir / "metadata.json").read_bytes() == metadata
 
 
 def test_task_batches_are_local_centered_and_report_warm_coverage(tmp_path):
     corpus, _ = _prepare(tmp_path)
     task = MovieLensTask(corpus, data_seed=3, batch_size=5)
     feature_ids, ratings = corpus.feature_ids(), corpus.ratings()
-    order = np.load(corpus.order_path(3))
+    orders = [np.load(path) for path in corpus.shuffled_epochs(3).prepare(2)]
 
-    batches = list(task.train_batches(2, 10))
+    max_examples = corpus.train_rows + 3
+    batches = list(task.train_batches(max_examples))
     actual_ids = np.concatenate([inputs[0].numpy() for inputs, _ in batches])
     actual_ratings = np.concatenate([targets.numpy() for _, targets in batches])
-    expected_rows = np.concatenate((np.sort(order[2:7]), np.sort(order[7:10])))
+    stream = np.concatenate((orders[0], orders[1][:3]))
+    expected_rows = np.concatenate(
+        [np.sort(stream[start : start + 5]) for start in range(0, max_examples, 5)]
+    )
 
     np.testing.assert_array_equal(actual_ids, feature_ids[expected_rows])
     np.testing.assert_allclose(
@@ -126,12 +135,17 @@ def test_task_batches_are_local_centered_and_report_warm_coverage(tmp_path):
     assert corpus.rating_center == 2.75
     assert batches[0][0][0].dtype == torch.int32
     assert batches[0][1].dtype == torch.float32
+    assert [len(targets) for _, targets in batches] == [5] * 7
 
-    coverage = task.warm_coverage((0, 8, corpus.train_rows))
+    coverage = task.warm_coverage(
+        (0, 8, corpus.train_rows, corpus.train_rows + 3, 2 * corpus.train_rows)
+    )
     assert coverage[0] == (0.0, 0.0)
     assert coverage[8][0] <= coverage[corpus.train_rows][0]
     assert coverage[8][1] <= coverage[corpus.train_rows][1]
     assert coverage[corpus.train_rows] == (1.0, 1.0)
+    assert coverage[corpus.train_rows + 3] == (1.0, 1.0)
+    assert coverage[2 * corpus.train_rows] == (1.0, 1.0)
 
 
 def test_accepts_directory_and_official_style_zip(tmp_path):

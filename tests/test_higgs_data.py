@@ -220,31 +220,16 @@ def test_interrupted_conversion_closes_and_removes_temporary_files(
     assert not list(cache_dir.glob(".*.tmp"))
 
 
-def test_order_is_deterministic_complete_and_regenerates_invalid_cache(tmp_path):
-    _, _, corpus, _ = _prepare(tmp_path)
-    order_path = corpus.order_path(7)
-    order = np.load(order_path, mmap_mode="r")
-    original = np.array(order)
-
-    assert order.dtype == np.uint32
-    np.testing.assert_array_equal(np.sort(order), np.arange(corpus.train_stop))
-    np.testing.assert_array_equal(np.load(corpus.order_path(7)), original)
-
-    with order_path.open("wb") as file:
-        np.save(file, np.arange(2, dtype=np.uint32))
-    regenerated = np.load(corpus.order_path(7))
-    np.testing.assert_array_equal(regenerated, original)
-
-
 def test_task_emits_sorted_training_batches_without_mutating_order(tmp_path):
     _, _, corpus, values = _prepare(tmp_path)
+    order_path = corpus.shuffled_epochs(7).prepare(1)[0]
     task = HiggsTask(corpus, data_seed=7, batch_size=3)
-    order = np.load(corpus.order_path(7), mmap_mode="r")
+    order = np.load(order_path, mmap_mode="r")
     original_order = np.array(order)
     mean = np.asarray(corpus.feature_mean, dtype=np.float32)
     scale = np.asarray(corpus.feature_scale, dtype=np.float32)
 
-    batches = list(task.train_batches(0, 5))
+    batches = list(task.train_batches(5))
 
     assert all(len(model_inputs) == 1 for model_inputs, _ in batches)
     actual_features = np.concatenate(
@@ -266,6 +251,31 @@ def test_task_emits_sorted_training_batches_without_mutating_order(tmp_path):
     )
 
 
+def test_task_globally_batches_across_shuffled_pass_boundaries(tmp_path):
+    _, cache_dir, corpus, values = _prepare(tmp_path)
+    metadata = (cache_dir / METADATA_FILE).read_bytes()
+    paths = corpus.shuffled_epochs(7).prepare(2)
+    orders = [np.load(path, mmap_mode="r") for path in paths]
+    global_order = np.concatenate(orders)
+    task = HiggsTask(corpus, data_seed=7, batch_size=3)
+
+    batches = list(task.train_batches(10))
+
+    assert [len(labels) for _, labels in batches] == [3, 3, 3, 1]
+    expected_rows = [
+        np.sort(global_order[start : min(start + 3, 10)])
+        for start in range(0, 10, 3)
+    ]
+    actual_labels = [labels.numpy() for _, labels in batches]
+    for labels, rows in zip(actual_labels, expected_rows, strict=True):
+        np.testing.assert_array_equal(labels, values[rows, 0])
+
+    boundary_rows = np.sort(np.concatenate((orders[0][6:8], orders[1][:1])))
+    np.testing.assert_array_equal(actual_labels[2], values[boundary_rows, 0])
+    assert {path.parent.name for path in paths} == {"shuffle-v1"}
+    assert (cache_dir / METADATA_FILE).read_bytes() == metadata
+
+
 def test_task_uses_exact_sequential_holdout_boundaries(tmp_path):
     _, _, corpus, values = _prepare(tmp_path)
     task = HiggsTask(corpus, data_seed=3, batch_size=3)
@@ -281,13 +291,12 @@ def test_task_uses_exact_sequential_holdout_boundaries(tmp_path):
     np.testing.assert_array_equal(test_labels, values[TINY_LAYOUT.val_stop :, 0])
 
 
-@pytest.mark.parametrize(("start", "stop"), [(-1, 2), (3, 2), (0, 9)])
-def test_task_rejects_invalid_training_ranges(tmp_path, start, stop):
+def test_task_rejects_negative_training_size(tmp_path):
     _, _, corpus, _ = _prepare(tmp_path)
     task = HiggsTask(corpus, data_seed=0, batch_size=3)
 
-    with pytest.raises(ValueError, match="start"):
-        list(task.train_batches(start, stop))
+    with pytest.raises(ValueError, match="nonnegative"):
+        list(task.train_batches(-1))
 
 
 def test_task_drops_open_memmaps_when_pickled(tmp_path):
@@ -299,5 +308,4 @@ def test_task_drops_open_memmaps_when_pickled(tmp_path):
 
     assert restored._features is None
     assert restored._labels is None
-    assert restored._order is None
     assert next(restored.val_batches())[0][0].shape == (2, NUM_FEATURES)

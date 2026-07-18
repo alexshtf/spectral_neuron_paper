@@ -1,17 +1,23 @@
+import fcntl
 import json
 import pickle
+import shutil
 import sys
-from collections.abc import Iterable, Iterator, Mapping
+import tempfile
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
-from hashlib import file_digest, sha256
-from itertools import pairwise
+from hashlib import file_digest
 from pathlib import Path
 from typing import ClassVar, Literal, TextIO
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 import torch
 from tqdm.auto import tqdm
+
+from paper.shuffling import ShuffledEpochs
 
 
 NUM_NUMERIC_FIELDS = 13
@@ -26,7 +32,7 @@ COLUMNS = (LABEL, *NUMERIC_COLUMNS, *CATEGORICAL_COLUMNS)
 CACHE_VERSION = 2
 # Bump when the corresponding fitted or encoded artifact changes meaning.
 PREPROCESSOR_CACHE_VERSION = 1
-ENCODED_CACHE_VERSION = 2
+ENCODED_CACHE_VERSION = 3
 ENCODED_CHUNK_SIZE = 2**18
 NUMERICS_FILE = "numerics.dat"
 CATEGORICALS_FILE = "categoricals.dat"
@@ -36,6 +42,13 @@ MISSING_NUMERIC = np.iinfo(np.int32).min
 
 type PreprocessingKind = Literal["bucket", "hybrid"]
 type FeatureArrays = tuple[np.ndarray, np.ndarray | None]
+
+
+@contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    with path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def _bucket_numeric(values: np.ndarray) -> np.ndarray:
@@ -95,62 +108,70 @@ def prepare_corpus(
     """Convert the headerless challenge TSV to compact memory-mapped arrays."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = cache_dir / METADATA_FILE
-    if metadata_path.exists():
-        corpus = CriteoCorpus.open(cache_dir)
-        if progress:
-            tqdm.write(
-                f"Criteo corpus: {corpus.rows:,} rows (cached)",
-                file=sys.stderr if progress_file is None else progress_file,
-            )
-        return corpus
-
-    numeric_tmp = cache_dir / f".{NUMERICS_FILE}.tmp"
-    categorical_tmp = cache_dir / f".{CATEGORICALS_FILE}.tmp"
-    label_tmp = cache_dir / f".{LABELS_FILE}.tmp"
-    rows = 0
-    dtypes = {LABEL: np.uint8, **dict.fromkeys(CATEGORICAL_COLUMNS, "string")}
-
-    with (
-        numeric_tmp.open("wb") as numeric_file,
-        categorical_tmp.open("wb") as categorical_file,
-        label_tmp.open("wb") as label_file,
-    ):
-        chunks = pd.read_csv(
-            raw_path,
-            sep="\t",
-            header=None,
-            names=COLUMNS,
-            dtype=dtypes,
-            chunksize=chunk_size,
-        )
-        progress_bar = tqdm(
-            desc="Preparing Criteo corpus",
-            unit="rows",
-            unit_scale=True,
-            disable=not progress,
-            file=progress_file,
-        )
-        with progress_bar:
-            for chunk in chunks:
-                categoricals = np.empty(
-                    (len(chunk), NUM_CATEGORICAL_FIELDS), dtype=np.uint32
+    with _exclusive_lock(cache_dir / ".corpus.lock"):
+        if metadata_path.exists():
+            corpus = CriteoCorpus.open(cache_dir)
+            if progress:
+                tqdm.write(
+                    f"Criteo corpus: {corpus.rows:,} rows (cached)",
+                    file=sys.stderr if progress_file is None else progress_file,
                 )
-                for field, column in enumerate(CATEGORICAL_COLUMNS):
-                    categoricals[:, field] = _parse_hex(chunk[column])
+            return corpus
 
-                _parse_numerics(chunk).tofile(numeric_file)
-                categoricals.tofile(categorical_file)
-                chunk[LABEL].to_numpy(dtype=np.uint8).tofile(label_file)
-                rows += len(chunk)
-                progress_bar.update(len(chunk))
+        with tempfile.TemporaryDirectory(prefix=".corpus-", dir=cache_dir) as tmp:
+            temporary = Path(tmp)
+            numeric_tmp = temporary / NUMERICS_FILE
+            categorical_tmp = temporary / CATEGORICALS_FILE
+            label_tmp = temporary / LABELS_FILE
+            rows = 0
+            dtypes = {
+                LABEL: np.uint8,
+                **dict.fromkeys(CATEGORICAL_COLUMNS, "string"),
+            }
 
-    numeric_tmp.replace(cache_dir / NUMERICS_FILE)
-    categorical_tmp.replace(cache_dir / CATEGORICALS_FILE)
-    label_tmp.replace(cache_dir / LABELS_FILE)
-    metadata_tmp = cache_dir / f".{METADATA_FILE}.tmp"
-    metadata_tmp.write_text(json.dumps({"version": CACHE_VERSION, "rows": rows}))
-    metadata_tmp.replace(metadata_path)
-    return CriteoCorpus.open(cache_dir)
+            with (
+                numeric_tmp.open("wb") as numeric_file,
+                categorical_tmp.open("wb") as categorical_file,
+                label_tmp.open("wb") as label_file,
+            ):
+                chunks = pd.read_csv(
+                    raw_path,
+                    sep="\t",
+                    header=None,
+                    names=COLUMNS,
+                    dtype=dtypes,
+                    chunksize=chunk_size,
+                )
+                progress_bar = tqdm(
+                    desc="Preparing Criteo corpus",
+                    unit="rows",
+                    unit_scale=True,
+                    disable=not progress,
+                    file=progress_file,
+                )
+                with progress_bar:
+                    for chunk in chunks:
+                        categoricals = np.empty(
+                            (len(chunk), NUM_CATEGORICAL_FIELDS), dtype=np.uint32
+                        )
+                        for field, column in enumerate(CATEGORICAL_COLUMNS):
+                            categoricals[:, field] = _parse_hex(chunk[column])
+
+                        _parse_numerics(chunk).tofile(numeric_file)
+                        categoricals.tofile(categorical_file)
+                        chunk[LABEL].to_numpy(dtype=np.uint8).tofile(label_file)
+                        rows += len(chunk)
+                        progress_bar.update(len(chunk))
+
+            numeric_tmp.replace(cache_dir / NUMERICS_FILE)
+            categorical_tmp.replace(cache_dir / CATEGORICALS_FILE)
+            label_tmp.replace(cache_dir / LABELS_FILE)
+            metadata_tmp = temporary / METADATA_FILE
+            metadata_tmp.write_text(
+                json.dumps({"version": CACHE_VERSION, "rows": rows})
+            )
+            metadata_tmp.replace(metadata_path)
+        return CriteoCorpus.open(cache_dir)
 
 
 @dataclass(frozen=True)
@@ -199,18 +220,8 @@ class CriteoCorpus:
     def labels(self) -> np.memmap:
         return self._memmap(LABELS_FILE, np.uint8)
 
-    def order_path(self, seed: int) -> Path:
-        path = self.cache_dir / f"train_order_seed{seed}.npy"
-        if path.exists():
-            return path
-
-        order = np.random.default_rng(seed).permutation(self.train_stop)
-        dtype = np.uint32 if self.train_stop < 2**32 else np.uint64
-        tmp = path.with_name(f".{path.name}.tmp")
-        with tmp.open("wb") as file:
-            np.save(file, order.astype(dtype, copy=False))
-        tmp.replace(path)
-        return path
+    def shuffled_epochs(self, seed: int) -> ShuffledEpochs:
+        return ShuffledEpochs(self.cache_dir, self.train_stop, seed)
 
 
 def _mix32(values: np.ndarray) -> np.ndarray:
@@ -399,10 +410,16 @@ def _preprocessor_path(
 
 
 def _save_preprocessor(preprocessor: FittedPreprocessor, path: Path) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    with tmp.open("wb") as file:
-        pickle.dump(preprocessor, file, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(path)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    with _exclusive_lock(path.with_name(f".{path.name}.lock")):
+        if path.exists():
+            return
+        try:
+            with temporary.open("xb") as file:
+                pickle.dump(preprocessor, file, protocol=pickle.HIGHEST_PROTOCOL)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def load_preprocessor(path: Path) -> FittedPreprocessor:
@@ -532,70 +549,75 @@ type EncodedArrays = tuple[np.ndarray, np.ndarray | None, np.ndarray]
 def load_encoded(path: Path) -> EncodedArrays:
     values_path = path / "feature_values.npy"
     return (
-        np.load(path / "feature_ids.npy", mmap_mode="c"),
-        np.load(values_path, mmap_mode="c") if values_path.exists() else None,
-        np.load(path / "labels.npy", mmap_mode="c"),
+        np.load(path / "feature_ids.npy", mmap_mode="c", allow_pickle=False),
+        (
+            np.load(values_path, mmap_mode="c", allow_pickle=False)
+            if values_path.exists()
+            else None
+        ),
+        np.load(path / "labels.npy", mmap_mode="c", allow_pickle=False),
     )
-
-
-def training_rows(
-    order: np.ndarray,
-    checkpoints: tuple[int, ...],
-    batch_size: int,
-) -> np.ndarray:
-    """Compile the exact physical row order consumed by one trajectory."""
-    rows = np.array(order[: checkpoints[-1]], copy=True)
-    for start, stop in pairwise((0, *checkpoints)):
-        for batch_start in range(start, stop, batch_size):
-            rows[batch_start : min(batch_start + batch_size, stop)].sort()
-    return rows
 
 
 @dataclass(frozen=True)
 class EncodedData:
     num_features: int
-    train: dict[int, Path]
+    train: Path
     holdout: Path
     validation_rows: int
 
 
-def _source_rows(
-    rows: range | np.ndarray,
-    start: int,
-    stop: int,
-) -> tuple[slice | np.ndarray, np.ndarray | None]:
-    chunk = rows[start:stop]
-    if isinstance(chunk, range):
-        return slice(chunk.start, chunk.stop), None
+def _valid_encoded_split(
+    path: Path,
+    *,
+    row_count: int,
+    kind: PreprocessingKind,
+) -> bool:
+    if not (path / "complete").exists():
+        return False
+    try:
+        feature_ids = np.load(
+            path / "feature_ids.npy", mmap_mode="r", allow_pickle=False
+        )
+        labels = np.load(path / "labels.npy", mmap_mode="r", allow_pickle=False)
+        values_path = path / "feature_values.npy"
+        feature_values = (
+            np.load(values_path, mmap_mode="r", allow_pickle=False)
+            if values_path.exists()
+            else None
+        )
+    except (EOFError, OSError, ValueError):
+        return False
 
-    chunk = np.asarray(chunk)
-    sorter = np.argsort(chunk)
-    inverse = np.empty_like(sorter)
-    inverse[sorter] = np.arange(len(sorter), dtype=sorter.dtype)
-    return chunk[sorter], inverse
+    shape = (row_count, NUM_FIELDS)
+    valid_values = feature_values is None
+    if kind == "hybrid":
+        valid_values = (
+            feature_values is not None
+            and feature_values.dtype == np.float32
+            and feature_values.shape == shape
+        )
+    return (
+        feature_ids.dtype == np.int32
+        and feature_ids.shape == shape
+        and labels.dtype == np.uint8
+        and labels.shape == (row_count,)
+        and valid_values
+    )
 
 
-def _prepare_encoded_split(
+def _write_encoded_split(
     corpus: CriteoCorpus,
     preprocessor: FittedPreprocessor,
-    rows: range | np.ndarray,
+    rows: range,
     path: Path,
     *,
     description: str,
     chunk_size: int,
     progress: bool,
     progress_file: TextIO | None,
-) -> Path:
+) -> None:
     row_count = len(rows)
-    if (path / "complete").exists():
-        if progress:
-            tqdm.write(
-                f"{description}: {row_count:,} rows (cached)",
-                file=sys.stderr if progress_file is None else progress_file,
-            )
-        return path
-
-    path.mkdir(parents=True, exist_ok=True)
     shape = (row_count, NUM_FIELDS)
     feature_ids = np.lib.format.open_memmap(
         path / "feature_ids.npy", mode="w+", dtype=np.int32, shape=shape
@@ -627,34 +649,78 @@ def _prepare_encoded_split(
     with progress_bar:
         for start in range(0, row_count, chunk_size):
             stop = min(start + chunk_size, row_count)
-            source, inverse = _source_rows(rows, start, stop)
+            source = rows[start:stop]
             batch_ids, batch_values = preprocessor.encode(
-                np.asarray(numerics[source]),
-                np.asarray(categoricals[source]),
+                np.asarray(numerics[source.start : source.stop]),
+                np.asarray(categoricals[source.start : source.stop]),
             )
-            batch_labels = np.asarray(labels[source])
-            if inverse is not None:
-                batch_ids = batch_ids[inverse]
-                batch_values = None if batch_values is None else batch_values[inverse]
-                batch_labels = batch_labels[inverse]
 
             feature_ids[start:stop] = batch_ids
             if batch_values is not None:
                 feature_values[start:stop] = batch_values
-            encoded_labels[start:stop] = batch_labels
+            encoded_labels[start:stop] = labels[source.start : source.stop]
             progress_bar.update(stop - start)
 
     for output in (feature_ids, feature_values, encoded_labels):
         if output is not None:
             output.flush()
     (path / "complete").touch()
-    return path
+
+
+def _prepare_encoded_split(
+    corpus: CriteoCorpus,
+    preprocessor: FittedPreprocessor,
+    rows: range,
+    path: Path,
+    *,
+    description: str,
+    chunk_size: int,
+    progress: bool,
+    progress_file: TextIO | None,
+) -> Path:
+    row_count = len(rows)
+
+    def validity(candidate: Path) -> bool:
+        return _valid_encoded_split(
+            candidate,
+            row_count=row_count,
+            kind=preprocessor.kind,
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _exclusive_lock(path.with_name(f".{path.name}.lock")):
+        if validity(path):
+            if progress:
+                tqdm.write(
+                    f"{description}: {row_count:,} rows (cached)",
+                    file=sys.stderr if progress_file is None else progress_file,
+                )
+            return path
+
+        if path.exists():
+            shutil.rmtree(path)
+
+        temporary = Path(tempfile.mkdtemp(prefix=f".{path.name}-", dir=path.parent))
+        try:
+            _write_encoded_split(
+                corpus,
+                preprocessor,
+                rows,
+                temporary,
+                description=description,
+                chunk_size=chunk_size,
+                progress=progress,
+                progress_file=progress_file,
+            )
+            temporary.replace(path)
+            return path
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
 
 
 def prepare_encoded_data(
     corpus: CriteoCorpus,
     preprocessor_path: Path,
-    rows_by_seed: Mapping[int, np.ndarray],
     *,
     chunk_size: int = ENCODED_CHUNK_SIZE,
     progress: bool = False,
@@ -675,7 +741,7 @@ def prepare_encoded_data(
         / f"{preprocessor_path.stem}-{digest}"
     )
 
-    def prepare(name: str, rows: range | np.ndarray) -> Path:
+    def prepare(name: str, rows: range) -> Path:
         return _prepare_encoded_split(
             corpus,
             preprocessor,
@@ -687,11 +753,8 @@ def prepare_encoded_data(
             progress_file=progress_file,
         )
 
+    train = prepare("train", range(corpus.train_stop))
     holdout = prepare("holdout", range(corpus.train_stop, corpus.rows))
-    train = {}
-    for seed, rows in sorted(rows_by_seed.items()):
-        plan_digest = sha256(rows).hexdigest()[:16]
-        train[seed] = prepare(f"train_seed{seed}_{plan_digest}", rows)
 
     return EncodedData(
         num_features=preprocessor.num_features,
@@ -704,19 +767,22 @@ def prepare_encoded_data(
 @dataclass
 class CriteoTask:
     data: EncodedData
-    data_seed: int
+    order: ShuffledEpochs
     batch_size: int
     _train_arrays: EncodedArrays = dataclass_field(init=False, repr=False)
     _holdout_arrays: EncodedArrays = dataclass_field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._train_arrays = load_encoded(self.data.train[self.data_seed])
+        self._train_arrays = load_encoded(self.data.train)
         self._holdout_arrays = load_encoded(self.data.holdout)
+        if self.order.size != len(self._train_arrays[0]):
+            raise ValueError("shuffle size must match the encoded training split")
         if not 0 < self.data.validation_rows < len(self._holdout_arrays[0]):
             raise ValueError("validation and test data must not be empty")
 
-    def train_batches(self, start: int, stop: int) -> Iterator[BinaryBatch]:
-        yield from self._batches(self._train_arrays, start, stop)
+    def train_batches(self, max_examples: int) -> Iterator[BinaryBatch]:
+        for rows in self.order.batches(max_examples, self.batch_size):
+            yield self._batch(self._train_arrays, rows)
 
     def val_batches(self) -> Iterator[BinaryBatch]:
         yield from self._batches(self._holdout_arrays, 0, self.data.validation_rows)
@@ -734,19 +800,25 @@ class CriteoTask:
         start: int,
         stop: int,
     ) -> Iterator[BinaryBatch]:
-        feature_ids, feature_values, labels = arrays
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
-            rows = slice(batch_start, batch_stop)
-            batch_values = (
-                None if feature_values is None else np.asarray(feature_values[rows])
-            )
-            batch_ids = torch.from_numpy(np.asarray(feature_ids[rows]))
-            model_inputs = (
-                (batch_ids,)
-                if batch_values is None
-                else (batch_ids, torch.from_numpy(batch_values))
-            )
-            yield model_inputs, torch.from_numpy(
-                np.asarray(labels[rows], dtype=np.float32)
-            )
+            yield self._batch(arrays, slice(batch_start, batch_stop))
+
+    @staticmethod
+    def _batch(
+        arrays: EncodedArrays,
+        rows: slice | np.ndarray,
+    ) -> BinaryBatch:
+        feature_ids, feature_values, labels = arrays
+        batch_values = (
+            None if feature_values is None else np.asarray(feature_values[rows])
+        )
+        batch_ids = torch.from_numpy(np.asarray(feature_ids[rows]))
+        model_inputs = (
+            (batch_ids,)
+            if batch_values is None
+            else (batch_ids, torch.from_numpy(batch_values))
+        )
+        return model_inputs, torch.from_numpy(
+            np.asarray(labels[rows], dtype=np.float32)
+        )

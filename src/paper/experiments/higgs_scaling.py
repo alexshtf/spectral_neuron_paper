@@ -27,6 +27,7 @@ from paper.higgs import (
     prepare_corpus,
 )
 from paper.models import KthEigval
+from paper.shuffling import resolve_train_sizes
 from paper.training import (
     BINARY_OBJECTIVE,
     fit_and_test_scaling,
@@ -49,12 +50,13 @@ MLP_DEPTHS: dict[Variant, int] = {
     "mlp-3": 3,
 }
 
-PROTOCOL = "one_pass"
+PROTOCOL = "repeated_shuffle"
 OPTIMIZER = "adam"
 
 IDENTITY_COLUMNS = [
     "protocol",
     "optimizer",
+    "train_pool_size",
     "phase",
     "train_size",
     "data_seed",
@@ -74,7 +76,7 @@ RAW_COLUMNS = IDENTITY_COLUMNS + METRIC_COLUMNS
 
 _TIMING_COLUMNS = ["train_seconds", "val_seconds", "test_seconds"]
 
-EXPERIMENT_COLUMNS = ["protocol", "optimizer"]
+EXPERIMENT_COLUMNS = ["protocol", "optimizer", "train_pool_size"]
 MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "model",
     "dim",
@@ -165,6 +167,7 @@ class Profile:
     tuning_seeds: SeedGrid
     evaluation_seeds: SeedGrid
     batch_size: int = 4096
+    passes: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -190,6 +193,8 @@ class Profile:
             raise ValueError("tuning and evaluation seed grids must be non-empty")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.passes is not None:
+            _positive("passes", self.passes)
 
 
 PROFILES: dict[str, Profile] = {
@@ -220,7 +225,7 @@ PROFILES: dict[str, Profile] = {
             2**20,
             2**22,
             2**23,
-            10_000_000,
+            2**24,
         ),
         dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
@@ -229,6 +234,7 @@ PROFILES: dict[str, Profile] = {
             data_seeds=range(1, 3), init_seeds=range(2, 5)
         ),
         batch_size=4096,
+        passes=2,
     ),
 }
 
@@ -371,9 +377,11 @@ def _format_result(
     phase: Literal["tuning", "evaluation"],
     config: RunConfig,
     model: nn.Module,
+    train_pool_size: int,
 ) -> pd.DataFrame:
     return result.assign(
         phase=phase,
+        train_pool_size=train_pool_size,
         **_metadata(config, model),
     ).reindex(columns=RAW_COLUMNS + _TIMING_COLUMNS)
 
@@ -412,6 +420,7 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
         phase="tuning",
         config=config,
         model=model,
+        train_pool_size=settings.corpus.train_stop,
     )
 
 
@@ -430,6 +439,7 @@ def run_selected(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
         phase="evaluation",
         config=config,
         model=model,
+        train_pool_size=settings.corpus.train_stop,
     )
 
 
@@ -502,11 +512,12 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    if max(profile.train_sizes) > corpus.train_stop:
-        raise ValueError(
-            f"profile requests {max(profile.train_sizes)} training rows, "
-            f"but the training split contains {corpus.train_stop}"
-        )
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=corpus.train_stop,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
 
     variants = (variant,) if variant is not None else VARIANTS
     model_specs = _model_specs(profile, variants)
@@ -515,11 +526,12 @@ def run_profile(
         set(profile.tuning_seeds.data_seeds)
         | set(profile.evaluation_seeds.data_seeds)
     )
+    passes = (train_sizes[-1] + corpus.train_stop - 1) // corpus.train_stop
     for data_seed in data_seeds:
-        corpus.order_path(data_seed)
+        corpus.shuffled_epochs(data_seed).prepare(passes)
 
     settings = RunSettings(
-        train_sizes=profile.train_sizes,
+        train_sizes=train_sizes,
         batch_size=profile.batch_size,
         corpus=corpus,
         threads_per_worker=1 if workers > 1 else None,
@@ -618,6 +630,15 @@ def validate_raw(
         raise ValueError(f"expected protocol={PROTOCOL!r}")
     if set(raw["optimizer"]) != {OPTIMIZER}:
         raise ValueError(f"expected optimizer={OPTIMIZER!r}")
+    train_pool_sizes = raw["train_pool_size"].unique()
+    if (
+        len(train_pool_sizes) != 1
+        or isinstance(train_pool_sizes[0], (bool, np.bool_))
+        or not isinstance(train_pool_sizes[0], (int, np.integer))
+        or train_pool_sizes[0] <= 0
+    ):
+        raise ValueError("results must contain one positive integer train_pool_size")
+    train_pool_size = int(train_pool_sizes[0])
     if set(raw["phase"]) != {"tuning", "evaluation"}:
         raise ValueError("results must contain tuning and evaluation phases")
     if raw.duplicated(IDENTITY_COLUMNS[2:]).any():
@@ -649,9 +670,15 @@ def validate_raw(
 
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
-    if set(tuning["train_size"]) != {profile.train_sizes[-1]}:
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=train_pool_size,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
+    if set(tuning["train_size"]) != {train_sizes[-1]}:
         raise ValueError("tuning must contain only the final checkpoint")
-    if set(evaluation["train_size"]) != set(profile.train_sizes):
+    if set(evaluation["train_size"]) != set(train_sizes):
         raise ValueError("evaluation must contain every profile checkpoint")
     if tuning[["test_logloss", "test_brier"]].notna().any().any():
         raise ValueError("tuning rows must not contain test metrics")
@@ -700,7 +727,7 @@ def validate_raw(
         for row in _best_lrs(tuning).itertuples(index=False)
     }
     evaluation_seeds = set(profile.evaluation_seeds)
-    expected_checkpoints = set(profile.train_sizes)
+    expected_checkpoints = set(train_sizes)
     for spec, rows in evaluation.groupby(["model", "dim"]):
         seeds = set(
             rows[["data_seed", "init_seed"]]
@@ -723,7 +750,9 @@ def validate_raw(
 
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
     suffix = f"_{variant}" if variant is not None else ""
-    return DEFAULT_RUNS_DIR / f"higgs_scaling_{profile_name}{suffix}.csv"
+    return DEFAULT_RUNS_DIR / (
+        f"higgs_scaling_{profile_name}_repeated_shuffle{suffix}.csv"
+    )
 
 
 def build_arg_parser(

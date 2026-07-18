@@ -1,5 +1,6 @@
 import argparse
 import sys
+import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -22,11 +23,11 @@ from paper.criteo import (
     fit_preprocessors,
     prepare_corpus,
     prepare_encoded_data,
-    training_rows,
 )
 from paper.experiments import run_many
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
+from paper.shuffling import ShuffledEpochs, resolve_train_sizes
 from paper.training import (
     BINARY_OBJECTIVE,
     fit_and_test_scaling,
@@ -50,14 +51,15 @@ VARIANTS: tuple[Variant, ...] = (
     "spectral-new",
 )
 
-PROTOCOL = "one_pass"
+PROTOCOL = "repeated_shuffle"
 OPTIMIZER = "adam+sparseadam"
 
-RAW_COLUMNS = [
+IDENTITY_COLUMNS = [
     "protocol",
     "optimizer",
     "preprocessor_sample_size",
     "preprocessor_seed",
+    "train_pool_size",
     "phase",
     "train_size",
     "data_seed",
@@ -65,10 +67,15 @@ RAW_COLUMNS = [
     "dim",
     "lr",
     "init_seed",
+]
+
+METRIC_COLUMNS = [
     "val_logloss",
     "test_logloss",
     "test_brier",
 ]
+
+RAW_COLUMNS = IDENTITY_COLUMNS + METRIC_COLUMNS
 
 _TIMING_COLUMNS = ["train_seconds", "val_seconds", "test_seconds"]
 
@@ -77,6 +84,7 @@ EXPERIMENT_COLUMNS = [
     "optimizer",
     "preprocessor_sample_size",
     "preprocessor_seed",
+    "train_pool_size",
 ]
 
 MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
@@ -110,6 +118,7 @@ class Profile:
     preprocessor_seed: int = 0
     min_count: int = 10
     buckets_per_field: int = 2**15
+    passes: int | None = None
 
     def __post_init__(self) -> None:
         if not self.train_sizes or self.train_sizes != tuple(
@@ -122,6 +131,8 @@ class Profile:
             raise ValueError("batch_size must be positive")
         if not 0 < self.preprocessor_fraction <= 1:
             raise ValueError("preprocessor_fraction must be in (0, 1]")
+        if self.passes is not None and self.passes <= 0:
+            raise ValueError("passes must be positive")
 
 
 PROFILES: dict[str, Profile] = {
@@ -144,9 +155,7 @@ PROFILES: dict[str, Profile] = {
         batch_size=4096,
     ),
     "full": Profile(
-        train_sizes=(
-            *tuple(2**power for power in range(12, 25, 2)),
-        ),
+        train_sizes=tuple(2**power for power in range(12, 27, 2)),
         dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-3, 1e-1, 8).tolist()),
         tuning_seeds=SeedGrid(init_seeds=range(8)),
@@ -155,6 +164,7 @@ PROFILES: dict[str, Profile] = {
             init_seeds=range(3, 9),
         ),
         batch_size=4096,
+        passes=2,
     ),
 }
 
@@ -208,6 +218,8 @@ class RunSettings:
     train_sizes: tuple[int, ...]
     batch_size: int
     encoded_data: dict[PreprocessingKind, EncodedData]
+    orders: dict[int, ShuffledEpochs]
+    train_pool_size: int
     preprocessor_sample_size: int
     preprocessor_seed: int
     threads_per_worker: int | None
@@ -248,7 +260,7 @@ def _make_task_model(
 
     preprocessing = config.model_spec.preprocessing
     data = settings.encoded_data[preprocessing]
-    task = CriteoTask(data, config.data_seed, settings.batch_size)
+    task = CriteoTask(data, settings.orders[config.data_seed], settings.batch_size)
     model = _make_seeded_model(
         config.model_spec,
         num_features=data.num_features,
@@ -266,6 +278,7 @@ def _metadata(
         "optimizer": OPTIMIZER,
         "preprocessor_sample_size": settings.preprocessor_sample_size,
         "preprocessor_seed": settings.preprocessor_seed,
+        "train_pool_size": settings.train_pool_size,
         "data_seed": config.data_seed,
         "model": config.model_spec.variant,
         "dim": config.model_spec.dim,
@@ -388,11 +401,12 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    if max(profile.train_sizes) > corpus.train_stop:
-        raise ValueError(
-            f"profile requests {max(profile.train_sizes)} training rows, "
-            f"but the 80% split contains {corpus.train_stop}"
-        )
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=corpus.train_stop,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
 
     sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
     variants = (variant,) if variant is not None else VARIANTS
@@ -417,30 +431,26 @@ def run_profile(
             | set(profile.evaluation_seeds.data_seeds)
         )
     )
-    rows_by_seed = {
-        seed: training_rows(
-            np.load(corpus.order_path(seed), mmap_mode="r"),
-            profile.train_sizes,
-            profile.batch_size,
-        )
-        for seed in data_seeds
-    }
+    orders = {seed: corpus.shuffled_epochs(seed) for seed in data_seeds}
+    required_passes = (train_sizes[-1] + corpus.train_stop - 1) // corpus.train_stop
+    for order in orders.values():
+        order.prepare(required_passes)
     encoded_data = {
         kind: prepare_encoded_data(
             corpus,
             preprocessor_paths[kind],
-            rows_by_seed,
             progress=progress,
             progress_file=progress_file,
         )
         for kind in preprocessing_kinds
     }
-    del rows_by_seed
 
     settings = RunSettings(
-        train_sizes=profile.train_sizes,
+        train_sizes=train_sizes,
         batch_size=profile.batch_size,
         encoded_data=encoded_data,
+        orders=orders,
+        train_pool_size=corpus.train_stop,
         preprocessor_sample_size=sample_size,
         preprocessor_seed=profile.preprocessor_seed,
         threads_per_worker=1 if workers > 1 else None,
@@ -481,11 +491,22 @@ def run_profile(
 
 
 def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
+    if tuning.empty:
+        raise ValueError("tuning results must not be empty")
+    model_keys = tuning.loc[:, MODEL_COLUMNS].drop_duplicates()
+    finite = tuning.loc[np.isfinite(tuning["val_logloss"])]
     scores = (
-        tuning.groupby(MODEL_COLUMNS + ["lr"], as_index=False)["val_logloss"]
+        finite.groupby(MODEL_COLUMNS + ["lr"], as_index=False)["val_logloss"]
         .median()
         .rename(columns={"val_logloss": "median_val_logloss"})
     )
+    available = scores.loc[:, MODEL_COLUMNS].drop_duplicates()
+    missing = model_keys.merge(available, on=MODEL_COLUMNS, how="left", indicator=True)
+    missing = missing.loc[missing["_merge"] == "left_only", MODEL_COLUMNS]
+    if not missing.empty:
+        checkpoints = missing[["model", "dim", "train_size"]].to_dict("records")
+        raise ValueError(f"no finite validation log loss for {checkpoints}")
+
     best = (
         scores.sort_values(
             MODEL_COLUMNS + ["median_val_logloss", "lr"], kind="mergesort"
@@ -529,9 +550,135 @@ def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _same_lrs(actual: pd.Series, expected: tuple[float, ...]) -> bool:
+    values = np.sort(actual.unique())
+    return len(values) == len(expected) and np.allclose(
+        values, expected, rtol=1e-12, atol=0
+    )
+
+
+def validate_raw(
+    raw: pd.DataFrame,
+    profile: Profile,
+    variant: Variant | None = None,
+) -> None:
+    """Validate that raw results are a complete Criteo profile run."""
+    if variant is not None and variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}")
+    if list(raw.columns) != RAW_COLUMNS:
+        raise ValueError("incompatible Criteo result schema")
+    if raw[IDENTITY_COLUMNS].isna().any().any():
+        raise ValueError("Criteo run identity columns must not contain missing values")
+    if set(raw["protocol"]) != {PROTOCOL}:
+        raise ValueError(f"expected protocol={PROTOCOL!r}")
+    if set(raw["optimizer"]) != {OPTIMIZER}:
+        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
+
+    train_pool_sizes = raw["train_pool_size"].unique()
+    if (
+        len(train_pool_sizes) != 1
+        or isinstance(train_pool_sizes[0], (bool, np.bool_))
+        or not isinstance(train_pool_sizes[0], (int, np.integer))
+        or train_pool_sizes[0] <= 0
+    ):
+        raise ValueError("results must contain one positive integer train_pool_size")
+    train_pool_size = int(train_pool_sizes[0])
+    sample_size = max(1, round(profile.preprocessor_fraction * train_pool_size))
+    if set(raw["preprocessor_sample_size"]) != {sample_size}:
+        raise ValueError("preprocessor sample size does not match the profile")
+    if set(raw["preprocessor_seed"]) != {profile.preprocessor_seed}:
+        raise ValueError("preprocessor seed does not match the profile")
+    if set(raw["phase"]) != {"tuning", "evaluation"}:
+        raise ValueError("results must contain tuning and evaluation phases")
+    if raw.duplicated(IDENTITY_COLUMNS).any():
+        raise ValueError("results contain duplicate trajectory checkpoints")
+
+    variants = (variant,) if variant is not None else VARIANTS
+    specs = _model_specs(profile, variants)
+    expected_specs = {(spec.variant, spec.dim) for spec in specs}
+    observed_specs = set(
+        raw[["model", "dim"]].drop_duplicates().itertuples(index=False, name=None)
+    )
+    if observed_specs != expected_specs:
+        raise ValueError(
+            f"model/dimension grid mismatch: expected {sorted(expected_specs)}, "
+            f"got {sorted(observed_specs)}"
+        )
+
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=train_pool_size,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
+    expected_curves = {
+        (spec.variant, spec.dim, train_size)
+        for spec in specs
+        for train_size in train_sizes
+    }
+    tuning = raw.loc[raw["phase"] == "tuning"]
+    evaluation = raw.loc[raw["phase"] == "evaluation"]
+    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
+        observed_curves = set(
+            rows[["model", "dim", "train_size"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        if observed_curves != expected_curves:
+            raise ValueError(f"{phase} has an incomplete model/checkpoint grid")
+
+    if tuning[["test_logloss", "test_brier"]].notna().any().any():
+        raise ValueError("tuning rows must not contain test metrics")
+    if evaluation["val_logloss"].notna().any():
+        raise ValueError("evaluation rows must not contain validation metrics")
+    if not np.isfinite(
+        evaluation[["test_logloss", "test_brier"]].to_numpy(dtype=float)
+    ).all():
+        raise ValueError("evaluation test metrics must be finite")
+
+    nonfinite_tuning = ~np.isfinite(tuning["val_logloss"].to_numpy(dtype=float))
+    if nonfinite_tuning.any():
+        warnings.warn(
+            f"{nonfinite_tuning.sum()} tuning trajectories have nonfinite "
+            "validation loss",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    if not _same_lrs(tuning["lr"], profile.lrs):
+        raise ValueError("tuning learning-rate grid does not match the profile")
+    tuning_seeds = set(profile.tuning_seeds)
+    for curve, rows in tuning.groupby(["model", "dim", "train_size"]):
+        if not _same_lrs(rows["lr"], profile.lrs):
+            raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
+        for lr, lr_rows in rows.groupby("lr"):
+            seeds = set(
+                lr_rows[["data_seed", "init_seed"]].itertuples(index=False, name=None)
+            )
+            if seeds != tuning_seeds:
+                raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
+
+    selected_lrs = {
+        (row.model, row.dim, row.train_size): row.selected_lr
+        for row in _best_lrs(tuning).itertuples(index=False)
+    }
+    evaluation_seeds = set(profile.evaluation_seeds)
+    for curve, rows in evaluation.groupby(["model", "dim", "train_size"]):
+        seeds = set(rows[["data_seed", "init_seed"]].itertuples(index=False, name=None))
+        if seeds != evaluation_seeds:
+            raise ValueError(f"incomplete evaluation seeds for {curve}")
+        lrs = rows["lr"].unique()
+        if len(lrs) != 1 or not np.isclose(
+            lrs[0], selected_lrs[curve], rtol=1e-12, atol=0
+        ):
+            raise ValueError(f"evaluation does not use the selected LR for {curve}")
+
+
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
     suffix = f"_{variant}" if variant is not None else ""
-    return DEFAULT_RUNS_DIR / f"criteo_scaling_{profile_name}{suffix}.csv"
+    return DEFAULT_RUNS_DIR / (
+        f"criteo_scaling_{profile_name}_repeated_shuffle{suffix}.csv"
+    )
 
 
 def build_arg_parser(

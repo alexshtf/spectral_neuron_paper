@@ -28,7 +28,7 @@ class Objective:
 
 
 class ScalingTask(Protocol):
-    def train_batches(self, start: int, stop: int) -> Iterable[Batch]: ...
+    def train_batches(self, max_examples: int) -> Iterable[Batch]: ...
 
     def val_batches(self) -> Iterable[Batch]: ...
 
@@ -160,13 +160,14 @@ def train_scaling_events(
     checkpoints = _checkpoints(checkpoints)
 
     optimizers = _adam_optimizers(model, lr=lr)
-    start = 0
+    batches = iter(task.train_batches(checkpoints[-1]))
+    examples_seen = 0
     train_seconds = 0.0
 
-    for train_size in checkpoints:
+    for checkpoint in checkpoints:
         model.train()
         segment_started = perf_counter()
-        for model_inputs, labels in task.train_batches(start, train_size):
+        for model_inputs, labels in batches:
             batch_loss = loss(_predict(model, model_inputs, labels), labels)
 
             model.zero_grad(set_to_none=True)
@@ -174,13 +175,25 @@ def train_scaling_events(
             for optimizer in optimizers:
                 optimizer.step()
 
+            examples_seen += len(labels)
+            if examples_seen >= checkpoint:
+                break
+
         train_seconds += perf_counter() - segment_started
-        start = train_size
+        assert examples_seen == checkpoint, (
+            f"training stream reached {examples_seen} examples; "
+            f"expected checkpoint {checkpoint}"
+        )
         yield {
-            "train_size": train_size,
+            "train_size": examples_seen,
             "train_seconds": train_seconds,
             "model": model,
         }
+
+    sentinel = object()
+    assert next(batches, sentinel) is sentinel, (
+        f"training stream yielded more than {checkpoints[-1]} examples"
+    )
 
 
 def evaluate_binary(

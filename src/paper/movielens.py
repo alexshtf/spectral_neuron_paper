@@ -14,6 +14,8 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from paper.shuffling import ShuffledEpochs
+
 
 CACHE_VERSION = 1
 NUM_FIELDS = 2
@@ -317,26 +319,10 @@ class MovieLensCorpus:
         )
 
     def order_path(self, seed: int) -> Path:
-        seed = index(seed)
-        if seed < 0:
-            raise ValueError(f"data seed must be nonnegative; got {seed}")
-        path = self.cache_dir / f"train_order_seed{seed}.npy"
-        if path.exists():
-            order = np.load(path, mmap_mode="r", allow_pickle=False)
-            if order.dtype == np.uint32 and order.shape == (self.train_rows,):
-                return path
+        return self.shuffled_epochs(seed).prepare(1)[0]
 
-        order = np.random.default_rng(seed).permutation(self.train_rows).astype(
-            np.uint32, copy=False
-        )
-        temporary = _temporary_path(self.cache_dir, path.name)
-        try:
-            with temporary.open("wb") as file:
-                np.save(file, order, allow_pickle=False)
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return path
+    def shuffled_epochs(self, seed: int) -> ShuffledEpochs:
+        return ShuffledEpochs(self.cache_dir, self.train_rows, seed)
 
 
 @dataclass
@@ -344,33 +330,22 @@ class MovieLensTask:
     corpus: MovieLensCorpus
     data_seed: int
     batch_size: int
-    _order_path: Path = field(init=False, repr=False)
+    _shuffled_epochs: ShuffledEpochs = field(init=False, repr=False)
     _feature_ids: np.memmap | None = field(init=False, default=None, repr=False)
     _ratings: np.memmap | None = field(init=False, default=None, repr=False)
-    _order: np.memmap | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.batch_size = index(self.batch_size)
         if self.batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {self.batch_size}")
-        self._order_path = self.corpus.order_path(self.data_seed)
+        self._shuffled_epochs = self.corpus.shuffled_epochs(self.data_seed)
 
     def __getstate__(self) -> dict[str, Any]:
-        return vars(self) | {"_feature_ids": None, "_ratings": None, "_order": None}
+        return vars(self) | {"_feature_ids": None, "_ratings": None}
 
-    def train_batches(self, start: int, stop: int) -> Iterator[RatingBatch]:
-        if not 0 <= start <= stop <= self.corpus.train_rows:
-            raise ValueError(
-                "expected 0 <= start <= stop <= train_rows; "
-                f"got {start}, {stop}, {self.corpus.train_rows}"
-            )
-        feature_ids, ratings, order = self._arrays()
-        for batch_start in range(start, stop, self.batch_size):
-            rows = np.array(
-                order[batch_start : min(batch_start + self.batch_size, stop)],
-                copy=True,
-            )
-            rows.sort()
+    def train_batches(self, max_examples: int) -> Iterator[RatingBatch]:
+        feature_ids, ratings = self._arrays()
+        for rows in self._shuffled_epochs.batches(max_examples, self.batch_size):
             yield self._batch(feature_ids, ratings, rows)
 
     def val_batches(self) -> Iterator[RatingBatch]:
@@ -386,10 +361,13 @@ class MovieLensTask:
     ) -> dict[int, tuple[float, float]]:
         """Fraction of holdout rows whose user and movie have appeared by a prefix."""
         checkpoints = tuple(map(index, checkpoints))
-        if any(not 0 <= stop <= self.corpus.train_rows for stop in checkpoints):
-            raise ValueError("coverage checkpoints must lie within the training set")
+        if any(stop < 0 for stop in checkpoints):
+            raise ValueError("coverage checkpoints must be nonnegative")
 
-        feature_ids, _, order = self._arrays()
+        feature_ids, _ = self._arrays()
+        order = np.load(
+            self._shuffled_epochs.prepare(1)[0], mmap_mode="r", allow_pickle=False
+        )
         holdouts = (
             feature_ids[self.corpus.train_rows : self.corpus.val_stop],
             feature_ids[self.corpus.val_stop :],
@@ -397,30 +375,23 @@ class MovieLensTask:
         seen = np.zeros(self.corpus.num_features, dtype=bool)
         result: dict[int, tuple[float, float]] = {}
         start = 0
-        for stop in sorted(set(checkpoints)):
+        for stop in sorted({min(stop, self.corpus.train_rows) for stop in checkpoints}):
             seen[feature_ids[order[start:stop]].ravel()] = True
             result[stop] = tuple(
                 float(seen[rows].all(axis=1).mean()) for rows in holdouts
             )
             start = stop
-        return {stop: result[stop] for stop in checkpoints}
+        return {stop: result[min(stop, self.corpus.train_rows)] for stop in checkpoints}
 
-    def _arrays(self) -> tuple[np.memmap, np.memmap, np.memmap]:
+    def _arrays(self) -> tuple[np.memmap, np.memmap]:
         if self._feature_ids is None:
             self._feature_ids = self.corpus.feature_ids()
             self._ratings = self.corpus.ratings()
-            self._order = np.load(
-                self._order_path, mmap_mode="r", allow_pickle=False
-            )
-        assert (
-            self._feature_ids is not None
-            and self._ratings is not None
-            and self._order is not None
-        )
-        return self._feature_ids, self._ratings, self._order
+        assert self._feature_ids is not None and self._ratings is not None
+        return self._feature_ids, self._ratings
 
     def _sequential_batches(self, start: int, stop: int) -> Iterator[RatingBatch]:
-        feature_ids, ratings, _ = self._arrays()
+        feature_ids, ratings = self._arrays()
         for batch_start in range(start, stop, self.batch_size):
             yield self._batch(
                 feature_ids,

@@ -18,6 +18,7 @@ from paper.experiments import run_many
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
 from paper.movielens import MovieLensCorpus, MovieLensTask, prepare_corpus
+from paper.shuffling import resolve_train_sizes
 from paper.training import (
     REGRESSION_OBJECTIVE,
     fit_and_test_scaling,
@@ -29,13 +30,14 @@ type Variant = Literal["linear", "fm", "spectral"]
 
 VARIANTS: tuple[Variant, ...] = ("linear", "fm", "spectral")
 NUM_FIELDS = 2
-PROTOCOL = "one_pass_random_prefix"
+PROTOCOL = "repeated_shuffle"
 OPTIMIZER = "adam+sparseadam"
 
-RAW_COLUMNS = [
+IDENTITY_COLUMNS = [
     "protocol",
     "optimizer",
     "split_seed",
+    "train_pool_size",
     "phase",
     "train_size",
     "data_seed",
@@ -46,14 +48,17 @@ RAW_COLUMNS = [
     "num_parameters",
     "lr",
     "init_seed",
+]
+METRIC_COLUMNS = [
     "val_rmse",
     "val_warm_fraction",
     "test_rmse",
     "test_warm_fraction",
 ]
+RAW_COLUMNS = IDENTITY_COLUMNS + METRIC_COLUMNS
 _TIMING_COLUMNS = ["train_seconds", "val_seconds", "test_seconds"]
 
-EXPERIMENT_COLUMNS = ["protocol", "optimizer", "split_seed"]
+EXPERIMENT_COLUMNS = ["protocol", "optimizer", "split_seed", "train_pool_size"]
 MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "model",
     "dim",
@@ -85,6 +90,7 @@ class Profile:
     evaluation_seeds: SeedGrid
     batch_size: int = 4096
     split_seed: int = 0
+    passes: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -110,6 +116,8 @@ class Profile:
             raise ValueError("tuning and evaluation seed grids must be non-empty")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.passes is not None and self.passes <= 0:
+            raise ValueError("passes must be positive when specified")
 
 
 PROFILES: dict[str, Profile] = {
@@ -131,13 +139,14 @@ PROFILES: dict[str, Profile] = {
         ),
     ),
     "full": Profile(
-        train_sizes=(2**20, 2**21, 2**22, 2**23, 15_800_000),
+        train_sizes=(2**20, 2**21, 2**22, 2**23, 2**24),
         dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-3, 1e-1, 6).tolist()),
         tuning_seeds=SeedGrid(init_seeds=range(4)),
         evaluation_seeds=SeedGrid(
             data_seeds=range(1, 3), init_seeds=range(4, 8)
         ),
+        passes=2,
     ),
 }
 
@@ -256,6 +265,7 @@ def _metadata(
         "protocol": PROTOCOL,
         "optimizer": OPTIMIZER,
         "split_seed": settings.corpus.split_seed,
+        "train_pool_size": settings.corpus.train_rows,
         "data_seed": config.data_seed,
         "model": spec.variant,
         "dim": spec.dim,
@@ -411,11 +421,12 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    if max(profile.train_sizes) > corpus.train_rows:
-        raise ValueError(
-            f"profile requests {max(profile.train_sizes):,} training ratings, "
-            f"but the training split contains {corpus.train_rows:,}"
-        )
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=corpus.train_rows,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
 
     variants = (variant,) if variant is not None else VARIANTS
     specs = _model_specs(profile, variants)
@@ -424,15 +435,18 @@ def run_profile(
         *profile.tuning_seeds.data_seeds,
         *profile.evaluation_seeds.data_seeds,
     }
+    passes = (train_sizes[-1] + corpus.train_rows - 1) // corpus.train_rows
+    for data_seed in data_seeds:
+        corpus.shuffled_epochs(data_seed).prepare(passes)
     warm_coverage = {
         data_seed: MovieLensTask(corpus, data_seed, profile.batch_size).warm_coverage(
-            profile.train_sizes
+            train_sizes
         )
         for data_seed in data_seeds
     }
 
     settings = RunSettings(
-        train_sizes=profile.train_sizes,
+        train_sizes=train_sizes,
         batch_size=profile.batch_size,
         corpus=corpus,
         warm_coverage=warm_coverage,
@@ -494,39 +508,188 @@ def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _same_lrs(actual: pd.Series, expected: tuple[float, ...]) -> bool:
+    values = np.sort(actual.unique())
+    return len(values) == len(expected) and np.allclose(
+        values, expected, rtol=1e-12, atol=0
+    )
+
+
+def _capacity_num_features(spec: MovieLensModelSpec, num_parameters: int) -> int:
+    if isinstance(num_parameters, (bool, np.bool_)) or not isinstance(
+        num_parameters, (int, np.integer)
+    ):
+        raise ValueError
+    if spec.variant == "linear":
+        num_features, remainder = num_parameters - 1, 0
+    elif spec.variant == "fm":
+        num_features, remainder = divmod(
+            num_parameters - 1, spec.parameters_per_identity
+        )
+    else:
+        matrices, remainder = divmod(num_parameters, spec.parameters_per_identity)
+        num_features = matrices - 1
+    if num_features <= 0 or remainder:
+        raise ValueError
+    return num_features
+
+
 def validate_raw(
     raw: pd.DataFrame, profile: Profile, variant: Variant | None = None
 ) -> None:
+    """Validate that raw results are a complete run of a MovieLens profile."""
+    if variant is not None and variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}")
     if list(raw.columns) != RAW_COLUMNS:
-        raise ValueError("results do not have the MovieLens raw schema")
+        raise ValueError("incompatible MovieLens result schema")
+    if raw[IDENTITY_COLUMNS].isna().any().any():
+        raise ValueError(
+            "MovieLens run identity columns must not contain missing values"
+        )
+    if set(raw["protocol"]) != {PROTOCOL}:
+        raise ValueError(f"expected protocol={PROTOCOL!r}")
+    if set(raw["optimizer"]) != {OPTIMIZER}:
+        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
+    if set(raw["split_seed"]) != {profile.split_seed}:
+        raise ValueError(f"expected split_seed={profile.split_seed}")
+
+    train_pool_sizes = raw["train_pool_size"].unique()
+    if (
+        len(train_pool_sizes) != 1
+        or isinstance(train_pool_sizes[0], (bool, np.bool_))
+        or not isinstance(train_pool_sizes[0], (int, np.integer))
+        or train_pool_sizes[0] <= 0
+    ):
+        raise ValueError("results must contain one positive integer train_pool_size")
+    train_pool_size = int(train_pool_sizes[0])
     if set(raw["phase"]) != {"tuning", "evaluation"}:
         raise ValueError("results must contain tuning and evaluation phases")
+    if raw.duplicated(IDENTITY_COLUMNS).any():
+        raise ValueError("results contain duplicate trajectory checkpoints")
+
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=train_pool_size,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
 
     variants = (variant,) if variant is not None else VARIANTS
-    expected = {(spec.variant, spec.dim) for spec in _model_specs(profile, variants)}
-    observed = set(
+    specs = _model_specs(profile, variants)
+    expected_specs = {(spec.variant, spec.dim) for spec in specs}
+    observed_specs = set(
         raw[["model", "dim"]].drop_duplicates().itertuples(index=False, name=None)
     )
-    if observed != expected:
-        raise ValueError(f"expected model grid {sorted(expected)}; got {sorted(observed)}")
+    if observed_specs != expected_specs:
+        raise ValueError(
+            f"model/capacity grid mismatch: expected {sorted(expected_specs)}, "
+            f"got {sorted(observed_specs)}"
+        )
+
+    num_features = set()
+    for spec in specs:
+        rows = raw.loc[
+            (raw["model"] == spec.variant) & (raw["dim"] == spec.dim),
+            ["rank", "parameters_per_identity", "num_parameters"],
+        ].drop_duplicates()
+        if (
+            len(rows) != 1
+            or tuple(rows.iloc[0, :2])
+            != (spec.rank, spec.parameters_per_identity)
+        ):
+            raise ValueError(f"inconsistent capacity metadata for {spec}")
+        try:
+            num_features.add(_capacity_num_features(spec, rows.iloc[0, 2]))
+        except ValueError:
+            raise ValueError(f"inconsistent capacity metadata for {spec}") from None
+    if len(num_features) != 1:
+        raise ValueError("capacity metadata implies inconsistent feature counts")
 
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
-    if set(tuning["train_size"]) != {profile.train_sizes[-1]}:
-        raise ValueError("tuning must evaluate only the final checkpoint")
-    if set(evaluation["train_size"]) != set(profile.train_sizes):
-        raise ValueError("evaluation must contain every checkpoint")
-    if tuning["test_rmse"].notna().any():
+    if set(tuning["train_size"]) != {train_sizes[-1]}:
+        raise ValueError("tuning must contain only the final checkpoint")
+    if set(evaluation["train_size"]) != set(train_sizes):
+        raise ValueError("evaluation must contain every profile checkpoint")
+    if tuning[["test_rmse", "test_warm_fraction"]].notna().any().any():
         raise ValueError("tuning rows must not contain test metrics")
-    if tuning["test_warm_fraction"].notna().any():
-        raise ValueError("tuning rows must not contain test diagnostics")
     if evaluation[["val_rmse", "val_warm_fraction"]].notna().any().any():
         raise ValueError("evaluation rows must not contain validation metrics")
+
+    for phase, rows, metric, warm in (
+        ("tuning", tuning, "val_rmse", "val_warm_fraction"),
+        ("evaluation", evaluation, "test_rmse", "test_warm_fraction"),
+    ):
+        if not np.isfinite(rows[[metric, warm]].to_numpy(dtype=float)).all():
+            raise ValueError(f"{phase} metrics and warm fractions must be finite")
+        if (rows[metric] < 0).any() or not rows[warm].between(0, 1).all():
+            raise ValueError(f"{phase} metrics or warm fractions are out of range")
+
+    if not tuning.loc[
+        tuning["train_size"] >= train_pool_size, "val_warm_fraction"
+    ].eq(1.0).all():
+        raise ValueError("validation warm coverage must saturate after one pass")
+    if not evaluation.loc[
+        evaluation["train_size"] >= train_pool_size, "test_warm_fraction"
+    ].eq(1.0).all():
+        raise ValueError("test warm coverage must saturate after one pass")
+
+    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
+        phase_specs = set(
+            rows[["model", "dim"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        if phase_specs != expected_specs:
+            raise ValueError(f"{phase} has an incomplete model/capacity grid")
+
+    if not _same_lrs(tuning["lr"], profile.lrs):
+        raise ValueError("tuning learning-rate grid does not match the profile")
+    tuning_seeds = set(profile.tuning_seeds)
+    for spec, rows in tuning.groupby(["model", "dim"]):
+        if not _same_lrs(rows["lr"], profile.lrs):
+            raise ValueError(f"incomplete tuning learning-rate grid for {spec}")
+        for lr, lr_rows in rows.groupby("lr"):
+            seeds = set(
+                lr_rows[["data_seed", "init_seed"]].itertuples(
+                    index=False, name=None
+                )
+            )
+            if seeds != tuning_seeds:
+                raise ValueError(f"incomplete tuning seeds for {spec}, lr={lr:g}")
+
+    selected_lrs = {
+        (row.model, row.dim): row.selected_lr
+        for row in _best_lrs(tuning).itertuples(index=False)
+    }
+    evaluation_seeds = set(profile.evaluation_seeds)
+    expected_checkpoints = set(train_sizes)
+    for spec, rows in evaluation.groupby(["model", "dim"]):
+        seeds = set(
+            rows[["data_seed", "init_seed"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+        if seeds != evaluation_seeds:
+            raise ValueError(f"incomplete evaluation seeds for {spec}")
+        lrs = rows["lr"].unique()
+        if len(lrs) != 1 or not np.isclose(
+            lrs[0], selected_lrs[spec], rtol=1e-12, atol=0
+        ):
+            raise ValueError(f"evaluation does not use the selected LR for {spec}")
+        checkpoints = rows.groupby(["data_seed", "init_seed"])["train_size"].agg(
+            set
+        )
+        if not checkpoints.map(lambda values: values == expected_checkpoints).all():
+            raise ValueError(f"incomplete evaluation trajectory for {spec}")
 
 
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
     suffix = f"_{variant}" if variant is not None else ""
-    return DEFAULT_RUNS_DIR / f"movielens_scaling_{profile_name}{suffix}.csv"
+    return (
+        DEFAULT_RUNS_DIR
+        / f"movielens_scaling_{profile_name}_repeated_shuffle{suffix}.csv"
+    )
 
 
 def build_arg_parser(

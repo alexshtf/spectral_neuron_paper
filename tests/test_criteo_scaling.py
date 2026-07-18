@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from paper.criteo import (
     MISSING_NUMERIC,
@@ -17,16 +18,19 @@ from paper.criteo import (
     load_preprocessor,
     prepare_corpus,
     prepare_encoded_data,
-    training_rows,
 )
 from paper.experiments.criteo_scaling import (
+    PROFILES,
     RAW_COLUMNS,
     Profile,
     SeedGrid,
+    _best_lrs,
     build_arg_parser,
+    default_raw_path,
     run_profile,
     select_lr,
     summarize_raw,
+    validate_raw,
 )
 
 
@@ -62,6 +66,18 @@ def _tiny_profile() -> Profile:
     )
 
 
+@pytest.fixture(scope="module")
+def complete_raw(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("complete-criteo-run")
+    raw_path = directory / "train.txt"
+    _write_tiny_criteo(raw_path)
+    return run_profile(
+        _tiny_profile(),
+        raw_path=raw_path,
+        cache_dir=directory / "cache",
+    )
+
+
 def _frequent_categories() -> tuple[np.ndarray, ...]:
     return tuple(np.array([7], dtype=np.uint32) for _ in range(NUM_CATEGORICAL_FIELDS))
 
@@ -80,6 +96,13 @@ def test_cli_accepts_append_mode():
     )
 
     assert args.write_mode == "append"
+
+
+def test_default_path_is_protocol_specific():
+    assert default_raw_path("full").name == ("criteo_scaling_full_repeated_shuffle.csv")
+    assert default_raw_path("full", "linear-new").name == (
+        "criteo_scaling_full_repeated_shuffle_linear-new.csv"
+    )
 
 
 def test_winner_style_numeric_buckets():
@@ -172,20 +195,7 @@ def test_preprocessing_reports_progress(tmp_path):
     np.testing.assert_allclose(hybrid.positive_scale[0], scale if scale > 0 else 1.0)
 
 
-def test_training_rows_compile_checkpoint_and_minibatch_order():
-    order = np.array([9, 1, 8, 2, 7, 3, 6, 4, 5, 0], dtype=np.uint32)
-    original = order.copy()
-
-    rows = training_rows(order, checkpoints=(3, 8, 10), batch_size=4)
-
-    np.testing.assert_array_equal(rows, [1, 8, 9, 2, 3, 6, 7, 4, 0, 5])
-    np.testing.assert_array_equal(order, original)
-    np.testing.assert_array_equal(
-        rows[:8], training_rows(order, checkpoints=(3, 8), batch_size=4)
-    )
-
-
-def test_encoded_cache_preserves_preprocessing_and_minibatches(tmp_path):
+def test_encoded_cache_is_canonical_and_tasks_gather_shuffled_batches(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path, rows=103)
@@ -198,24 +208,19 @@ def test_encoded_cache_preserves_preprocessing_and_minibatches(tmp_path):
         min_count=2,
         buckets_per_field=32,
     )
-    order = np.load(corpus.order_path(7), mmap_mode="r")
-    np.testing.assert_array_equal(np.sort(order), np.arange(corpus.train_stop))
-    assert np.any(order[:8] >= 8)
-    np.testing.assert_array_equal(order, np.load(corpus.order_path(7)))
-    checkpoints = (3, 8, 10)
     batch_size = 4
-    plan = training_rows(order, checkpoints, batch_size)
+    order = corpus.shuffled_epochs(7)
+    order.prepare(2)
 
     for kind, path in paths.items():
         preprocessor = load_preprocessor(path)
         data = prepare_encoded_data(
             corpus,
             path,
-            {7: plan},
             chunk_size=3,
         )
         sources = (
-            (data.train[7], plan),
+            (data.train, slice(0, corpus.train_stop)),
             (data.holdout, slice(corpus.train_stop, corpus.rows)),
         )
         for split, rows in sources:
@@ -230,8 +235,32 @@ def test_encoded_cache_preserves_preprocessing_and_minibatches(tmp_path):
                 ),
             )
 
+        task = CriteoTask(data, order, batch_size)
+        train_size = corpus.train_stop + 3
+        batches = list(task.train_batches(train_size))
+        actual_ids = np.concatenate(
+            [model_inputs[0].numpy() for model_inputs, _ in batches]
+        )
+        actual_values = (
+            None
+            if kind == "bucket"
+            else np.concatenate(
+                [model_inputs[1].numpy() for model_inputs, _ in batches]
+            )
+        )
+        actual_labels = np.concatenate([labels.numpy() for _, labels in batches])
+        expected_rows = np.concatenate(list(order.batches(train_size, batch_size)))
+        expected_ids, expected_values, expected_labels = load_encoded(data.train)
+        _assert_arrays(
+            (actual_ids, actual_values, actual_labels),
+            (
+                expected_ids[expected_rows],
+                None if expected_values is None else expected_values[expected_rows],
+                expected_labels[expected_rows],
+            ),
+        )
+
         if kind == "bucket":
-            task = CriteoTask(data, 7, batch_size)
             val_labels = np.concatenate(
                 [labels.numpy() for _, labels in task.val_batches()]
             )
@@ -244,11 +273,55 @@ def test_encoded_cache_preserves_preprocessing_and_minibatches(tmp_path):
             )
             np.testing.assert_array_equal(test_labels, labels[corpus.val_stop :])
 
-            alternate_plan = training_rows(order, (4, 8, 10), batch_size)
-            alternate = prepare_encoded_data(
-                corpus, path, {7: alternate_plan}, chunk_size=3
+            repeated = prepare_encoded_data(corpus, path, chunk_size=3)
+            assert repeated.train == data.train
+            assert (data.train / "complete").exists()
+            assert data.train.with_name(f".{data.train.name}.lock").exists()
+            assert not list(data.train.parent.glob(f".{data.train.name}-*"))
+
+            (data.train / "labels.npy").write_bytes(b"corrupt")
+            recovered = prepare_encoded_data(corpus, path, chunk_size=3)
+            np.testing.assert_array_equal(
+                load_encoded(recovered.train)[2],
+                corpus.labels()[: corpus.train_stop],
             )
-            assert alternate.train[7] != data.train[7]
+            (recovered.train / "complete").unlink()
+            recovered = prepare_encoded_data(corpus, path, chunk_size=3)
+            assert (recovered.train / "complete").exists()
+
+
+def test_full_profile_runs_through_two_passes():
+    profile = PROFILES["full"]
+
+    assert profile.train_sizes[-1] == 2**26
+    assert profile.passes == 2
+
+
+def test_two_pass_profile_ends_at_exactly_twice_the_training_pool(tmp_path):
+    raw_path = tmp_path / "train.txt"
+    cache_dir = tmp_path / "cache"
+    _write_tiny_criteo(raw_path)
+    profile = Profile(
+        train_sizes=(16,),
+        dims=(3,),
+        lrs=(1e-3,),
+        tuning_seeds=SeedGrid(),
+        evaluation_seeds=SeedGrid(),
+        batch_size=16,
+        min_count=2,
+        buckets_per_field=32,
+        passes=2,
+    )
+
+    raw = run_profile(
+        profile,
+        raw_path=raw_path,
+        cache_dir=cache_dir,
+        variant="linear",
+    )
+
+    train_pool_size = raw["train_pool_size"].unique().item()
+    assert raw.groupby("phase")["train_size"].max().eq(2 * train_pool_size).all()
 
 
 def test_tiny_profile_runs_end_to_end(tmp_path):
@@ -274,10 +347,11 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
         "spectral-old",
         "spectral-new",
     }
-    assert set(raw["protocol"]) == {"one_pass"}
+    assert set(raw["protocol"]) == {"repeated_shuffle"}
     assert set(raw["optimizer"]) == {"adam+sparseadam"}
     assert set(raw["phase"]) == {"tuning", "evaluation"}
     assert set(raw["preprocessor_sample_size"]) == {8}
+    assert set(raw["train_pool_size"]) == {80}
     assert set(RAW_COLUMNS) == set(raw.columns)
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
@@ -294,6 +368,7 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     assert {"q25_test_brier", "q75_test_brier"} <= set(summary)
     assert len(summary) == 10
     printed = output.getvalue()
+    assert "Encoding bucket train" in printed
     assert "Encoding bucket holdout" in printed
     assert "Encoding hybrid holdout" in printed
     assert "Tuning aggregate trajectory time: training=" in printed
@@ -306,6 +381,8 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
+    legacy = cache_dir / "encoded-v2" / "legacy"
+    legacy.mkdir(parents=True)
 
     raw = run_profile(
         _tiny_profile(),
@@ -316,7 +393,82 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
 
     assert set(raw["model"]) == {"linear-new"}
     assert len(list(cache_dir.glob("preprocessor-v1_*.pkl"))) == 1
-    assert len(list((cache_dir / "encoded-v2").iterdir())) == 1
+    assert legacy.exists()
+    assert len(list((cache_dir / "encoded-v3").iterdir())) == 1
+
+
+def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw):
+    validate_raw(complete_raw, _tiny_profile())
+    linear = complete_raw.loc[complete_raw["model"] == "linear"].copy()
+    validate_raw(linear, _tiny_profile(), variant="linear")
+
+
+def test_validate_raw_rejects_identity_and_incomplete_grids(complete_raw):
+    with pytest.raises(ValueError, match="schema"):
+        validate_raw(complete_raw.drop(columns="test_brier"), _tiny_profile())
+
+    noninteger_pool = complete_raw.copy()
+    noninteger_pool["train_pool_size"] = noninteger_pool["train_pool_size"].astype(
+        float
+    )
+    with pytest.raises(ValueError, match="positive integer train_pool_size"):
+        validate_raw(noninteger_pool, _tiny_profile())
+
+    duplicate = pd.concat((complete_raw, complete_raw.iloc[[0]]), ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_raw(duplicate, _tiny_profile())
+
+    incomplete = complete_raw.drop(
+        complete_raw.index[complete_raw["phase"] == "tuning"][0]
+    )
+    with pytest.raises(ValueError, match="tuning"):
+        validate_raw(incomplete, _tiny_profile())
+
+
+def test_validate_raw_checks_metrics_and_checkpoint_selected_lrs(complete_raw):
+    nonfinite = complete_raw.copy()
+    index = nonfinite.index[nonfinite["phase"] == "evaluation"][0]
+    nonfinite.loc[index, "test_logloss"] = np.inf
+    with pytest.raises(ValueError, match="finite"):
+        validate_raw(nonfinite, _tiny_profile())
+
+    wrong_lr = complete_raw.copy()
+    row = wrong_lr.loc[wrong_lr["phase"] == "evaluation"].iloc[0]
+    mask = (
+        (wrong_lr["phase"] == "evaluation")
+        & (wrong_lr["model"] == row["model"])
+        & (wrong_lr["dim"] == row["dim"])
+        & (wrong_lr["train_size"] == row["train_size"])
+    )
+    alternate_lr = next(lr for lr in _tiny_profile().lrs if lr != row["lr"])
+    wrong_lr.loc[mask, "lr"] = alternate_lr
+    with pytest.raises(ValueError, match="selected LR"):
+        validate_raw(wrong_lr, _tiny_profile())
+
+
+def test_best_lrs_filters_nonfinite_and_requires_one_per_checkpoint(complete_raw):
+    tuning = complete_raw.loc[complete_raw["phase"] == "tuning"].copy()
+    row = tuning.iloc[0]
+    curve = (
+        (tuning["model"] == row["model"])
+        & (tuning["dim"] == row["dim"])
+        & (tuning["train_size"] == row["train_size"])
+    )
+    lr = tuning.loc[curve, "lr"].iloc[0]
+    tuning.loc[curve & (tuning["lr"] == lr), "val_logloss"] = np.inf
+
+    best = _best_lrs(tuning)
+    selected = best.loc[
+        (best["model"] == row["model"])
+        & (best["dim"] == row["dim"])
+        & (best["train_size"] == row["train_size"]),
+        "selected_lr",
+    ]
+    assert selected.item() != lr
+
+    tuning.loc[curve, "val_logloss"] = np.nan
+    with pytest.raises(ValueError, match="no finite validation"):
+        _best_lrs(tuning)
 
 
 def test_parallel_profile_matches_serial_results(tmp_path):
@@ -336,10 +488,11 @@ def test_parallel_profile_matches_serial_results(tmp_path):
 
 def test_lr_selection_uses_median_tuning_validation_only():
     common = {
-        "protocol": "one_pass",
+        "protocol": "repeated_shuffle",
         "optimizer": "adam+sparseadam",
         "preprocessor_sample_size": 8,
         "preprocessor_seed": 0,
+        "train_pool_size": 80,
         "train_size": 32,
         "model": "linear",
         "dim": 0,
@@ -373,3 +526,44 @@ def test_lr_selection_uses_median_tuning_validation_only():
     assert selected[["lr", "median_val_logloss", "test_logloss"]].to_dict(
         "records"
     ) == [{"lr": 0.1, "median_val_logloss": 1.0, "test_logloss": 4.0}]
+
+
+def test_lr_selection_keeps_training_pools_separate():
+    rows = []
+    for train_pool_size, selected_lr in ((40, 0.01), (80, 0.1)):
+        common = {
+            "protocol": "repeated_shuffle",
+            "optimizer": "adam+sparseadam",
+            "preprocessor_sample_size": 8,
+            "preprocessor_seed": 0,
+            "train_pool_size": train_pool_size,
+            "train_size": 32,
+            "model": "linear",
+            "dim": 0,
+            "data_seed": 0,
+            "init_seed": 0,
+        }
+        for lr in (0.01, 0.1):
+            rows.append(
+                common
+                | {
+                    "phase": "tuning",
+                    "lr": lr,
+                    "val_logloss": float(lr != selected_lr),
+                }
+            )
+            rows.append(
+                common
+                | {
+                    "phase": "evaluation",
+                    "lr": lr,
+                    "test_logloss": train_pool_size + lr,
+                }
+            )
+
+    selected = select_lr(pd.DataFrame(rows))
+
+    assert selected[["train_pool_size", "lr"]].to_dict("records") == [
+        {"train_pool_size": 40, "lr": 0.01},
+        {"train_pool_size": 80, "lr": 0.1},
+    ]

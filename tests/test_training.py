@@ -105,12 +105,14 @@ def test_binary_models_use_adam_and_sparse_adam():
 
 def test_binary_scaling_consumes_each_nested_prefix_once():
     seen: list[int] = []
+    calls: list[int] = []
 
     class RecordingTask:
         @staticmethod
-        def train_batches(start: int, stop: int):
-            for batch_start in range(start, stop, 2):
-                rows = list(range(batch_start, min(batch_start + 2, stop)))
+        def train_batches(max_examples: int):
+            calls.append(max_examples)
+            for batch_start in range(0, max_examples, 2):
+                rows = list(range(batch_start, min(batch_start + 2, max_examples)))
                 seen.extend(rows)
                 yield (
                     (
@@ -126,13 +128,41 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
             RecordingTask(),
             model,
             lr=0.1,
-            checkpoints=(3, 7),
+            checkpoints=(4, 7),
             loss=BINARY_OBJECTIVE.loss,
         )
     )
 
+    assert calls == [7]
     assert seen == list(range(7))
-    assert [event["train_size"] for event in events] == [3, 7]
+    assert [event["train_size"] for event in events] == [4, 7]
+
+
+@pytest.mark.parametrize(
+    ("batch_sizes", "message"),
+    [
+        ((2,), "reached 2 examples; expected checkpoint 3"),
+        ((4,), "reached 4 examples; expected checkpoint 3"),
+        ((3, 1), "yielded more than 3 examples"),
+    ],
+)
+def test_scaling_trainer_asserts_actual_example_count(batch_sizes, message):
+    class InvalidTask:
+        @staticmethod
+        def train_batches(max_examples: int):
+            for size in batch_sizes:
+                yield (torch.zeros(size, 1),), torch.zeros(size, 1)
+
+    with pytest.raises(AssertionError, match=message):
+        list(
+            train_scaling_events(
+                InvalidTask(),
+                nn.Linear(1, 1),
+                lr=0.1,
+                checkpoints=(3,),
+                loss=nn.functional.mse_loss,
+            )
+        )
 
 
 def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
@@ -142,9 +172,9 @@ def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
 
     class DenseTask:
         @staticmethod
-        def train_batches(start: int, stop: int):
-            for batch_start in range(start, stop, 4):
-                batch_stop = min(batch_start + 4, stop)
+        def train_batches(max_examples: int):
+            for batch_start in range(0, max_examples, 4):
+                batch_stop = min(batch_start + 4, max_examples)
                 yield (
                     (features[batch_start:batch_stop],),
                     labels[batch_start:batch_stop],
@@ -173,9 +203,7 @@ def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
     without_intermediate = trained_parameters((16,))
     with_intermediate = trained_parameters((8, 16))
 
-    for expected, actual in zip(
-        without_intermediate, with_intermediate, strict=True
-    ):
+    for expected, actual in zip(without_intermediate, with_intermediate, strict=True):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
@@ -185,11 +213,12 @@ def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch)
 
     class Task:
         @staticmethod
-        def train_batches(start: int, stop: int):
-            yield (
-                (torch.zeros(stop - start, 1, dtype=torch.long),),
-                torch.zeros(stop - start),
-            )
+        def train_batches(max_examples: int):
+            for _ in range(max_examples):
+                yield (
+                    (torch.zeros(1, 1, dtype=torch.long),),
+                    torch.zeros(1),
+                )
 
     events = list(
         train_scaling_events(
@@ -221,15 +250,16 @@ def test_binary_scaling_tests_only_selected_checkpoints():
 
     class RecordingTask:
         @staticmethod
-        def train_batches(start: int, stop: int):
-            seen.extend(range(start, stop))
-            yield (
-                (
-                    torch.zeros(stop - start, 1, dtype=torch.long),
-                    torch.ones(stop - start, 1),
-                ),
-                torch.zeros(stop - start),
-            )
+        def train_batches(max_examples: int):
+            seen.extend(range(max_examples))
+            for _ in range(max_examples):
+                yield (
+                    (
+                        torch.zeros(1, 1, dtype=torch.long),
+                        torch.ones(1, 1),
+                    ),
+                    torch.zeros(1),
+                )
 
         @staticmethod
         def test_batches():
@@ -256,11 +286,12 @@ def test_binary_tuning_evaluates_only_selected_checkpoints():
 
     class Task:
         @staticmethod
-        def train_batches(start: int, stop: int):
-            yield (
-                (torch.zeros(stop - start, 1, dtype=torch.long),),
-                torch.zeros(stop - start),
-            )
+        def train_batches(max_examples: int):
+            for _ in range(max_examples):
+                yield (
+                    (torch.zeros(1, 1, dtype=torch.long),),
+                    torch.zeros(1),
+                )
 
         @staticmethod
         def val_batches():
@@ -287,8 +318,9 @@ def test_regression_scaling_keeps_validation_and_test_separate():
 
     class Task:
         @staticmethod
-        def train_batches(start: int, stop: int):
-            yield (torch.ones(stop - start, 1),), torch.ones(stop - start)
+        def train_batches(max_examples: int):
+            for _ in range(max_examples):
+                yield (torch.ones(1, 1),), torch.ones(1)
 
         @staticmethod
         def val_batches():

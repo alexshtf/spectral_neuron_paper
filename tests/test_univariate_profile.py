@@ -1,6 +1,7 @@
 from io import StringIO
 
 import pandas as pd
+import pytest
 import torch
 
 from paper.experiments.synthetic import (
@@ -64,8 +65,7 @@ def test_run_grid_declares_the_scientific_fit_pairs():
     configs = list(grid)
 
     assert {
-        (config.target_spec.kind, config.model_spec.kind)
-        for config in configs
+        (config.target_spec.kind, config.model_spec.kind) for config in configs
     } == EXPECTED_FIT_PAIRS
     assert len(configs) == len(grid) == len(EXPECTED_FIT_PAIRS)
 
@@ -81,6 +81,19 @@ def test_write_mode_appends_or_replaces_results(tmp_path):
 
     write_csv(pd.DataFrame({"value": [3]}), path)
     assert pd.read_csv(path)["value"].tolist() == [3]
+
+
+def test_append_rejects_an_incompatible_csv_schema(tmp_path):
+    path = tmp_path / "results.csv"
+    original = "value,metric\n1,2\n"
+    path.write_text(original)
+
+    with pytest.raises(ValueError, match="CSV header"):
+        write_csv(
+            pd.DataFrame({"metric": [3], "value": [4]}), path, write_mode="append"
+        )
+
+    assert path.read_text() == original
 
 
 def test_run_profile_reports_progress():

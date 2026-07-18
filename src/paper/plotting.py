@@ -607,7 +607,7 @@ def _criteo_relplot(
         value=_check_criteo_results(results, metric),
         metric=metric,
         title=title,
-        x_label="training impressions",
+        x_label="impressions seen by optimizer",
         by=by,
         hue_order=hue_order,
         palette=palette,
@@ -1039,7 +1039,7 @@ def plot_movielens_dimensions(
 
 
 def plot_movielens_warm_coverage(results: pd.DataFrame) -> Figure:
-    """Show the fraction of fixed test ratings warm at each random prefix."""
+    """Show fixed-test warm coverage against ratings seen by the optimizer."""
     _check_movielens_results(results)
     coverage = results[
         ["train_size", "data_seed", "test_warm_fraction"]
@@ -1059,7 +1059,7 @@ def plot_movielens_warm_coverage(results: pd.DataFrame) -> Figure:
     )
     ax.set(
         title="MovieLens test-set warm coverage",
-        xlabel="ratings in training prefix",
+        xlabel="ratings seen by optimizer",
         ylabel="warm test fraction",
         ylim=(0, 1.02),
     )

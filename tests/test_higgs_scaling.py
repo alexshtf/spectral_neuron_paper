@@ -19,6 +19,7 @@ from paper.experiments.higgs_scaling import (
     _model_specs,
     _selected_configs,
     _tuning_configs,
+    default_raw_path,
     make_model,
     matched_mlp_width,
     mlp_parameter_count,
@@ -30,6 +31,7 @@ from paper.experiments.higgs_scaling import (
 )
 from paper.higgs import NUM_FEATURES, HiggsLayout
 from paper.models import KthEigval
+from paper.shuffling import resolve_train_sizes
 
 
 def _write_tiny_higgs(path: Path, rows: int) -> None:
@@ -215,8 +217,9 @@ def test_model_spec_validation():
 
 def _tuning_row(*, lr: float, score: float, init_seed: int) -> dict[str, object]:
     return {
-        "protocol": "one_pass",
+        "protocol": "repeated_shuffle",
         "optimizer": "adam",
+        "train_pool_size": 100,
         "phase": "tuning",
         "train_size": 100,
         "data_seed": 0,
@@ -281,8 +284,9 @@ def test_profiles_have_the_documented_trajectory_counts(
         [
             {
                 **dict.fromkeys(MODEL_COLUMNS),
-                "protocol": "one_pass",
+                "protocol": "repeated_shuffle",
                 "optimizer": "adam",
+                "train_pool_size": 10_000_000,
                 "model": spec.variant,
                 "dim": spec.dim,
                 "width": spec.width(NUM_FEATURES),
@@ -306,8 +310,9 @@ def test_tiny_profile_runs_all_families_with_one_coherent_selected_lr(complete_r
     assert list(raw.columns) == RAW_COLUMNS
     assert set(raw["model"]) == set(VARIANTS)
     assert set(raw["phase"]) == {"tuning", "evaluation"}
-    assert set(raw["protocol"]) == {"one_pass"}
+    assert set(raw["protocol"]) == {"repeated_shuffle"}
     assert set(raw["optimizer"]) == {"adam"}
+    assert set(raw["train_pool_size"]) == {16}
 
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
@@ -320,6 +325,7 @@ def test_tiny_profile_runs_all_families_with_one_coherent_selected_lr(complete_r
     assert evaluation.groupby(MODEL_COLUMNS)["lr"].nunique().eq(1).all()
     identity = [
         "phase",
+        "train_pool_size",
         "train_size",
         "data_seed",
         "model",
@@ -332,6 +338,42 @@ def test_tiny_profile_runs_all_families_with_one_coherent_selected_lr(complete_r
     assert raw[identity].notna().all().all()
     assert not raw.duplicated(identity).any()
     assert len(summary) == 10
+
+
+def test_full_profile_resolves_requested_grid_and_runtime_pass_landmarks():
+    profile = PROFILES["full"]
+
+    train_sizes = resolve_train_sizes(
+        profile.train_sizes,
+        train_pool_size=10_000_000,
+        batch_size=profile.batch_size,
+        passes=profile.passes,
+    )
+    assert profile.train_sizes[-1] == 2**24
+    assert 10_000_000 not in profile.train_sizes
+    assert train_sizes == (
+        2**12,
+        2**14,
+        2**16,
+        2**18,
+        2**20,
+        2**22,
+        2**23,
+        10_002_432,
+        2**24,
+        20_000_000,
+    )
+
+
+def test_default_result_path_does_not_target_legacy_one_pass_results():
+    assert (
+        default_raw_path("full").name
+        == "higgs_scaling_full_repeated_shuffle.csv"
+    )
+    assert (
+        default_raw_path("full", "spectral").name
+        == "higgs_scaling_full_repeated_shuffle_spectral.csv"
+    )
 
 
 def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw):
@@ -348,6 +390,11 @@ def test_validate_raw_rejects_schema_identity_and_capacity_errors(complete_raw):
     missing_identity.loc[0, "width"] = np.nan
     with pytest.raises(ValueError, match="identity"):
         validate_raw(missing_identity, _tiny_profile())
+
+    mixed_pool_sizes = complete_raw.copy()
+    mixed_pool_sizes.loc[0, "train_pool_size"] = 8
+    with pytest.raises(ValueError, match="one positive integer train_pool_size"):
+        validate_raw(mixed_pool_sizes, _tiny_profile())
 
     duplicate = pd.concat((complete_raw, complete_raw.iloc[[0]]), ignore_index=True)
     with pytest.raises(ValueError, match="duplicate"):

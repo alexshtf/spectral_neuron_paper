@@ -12,6 +12,8 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from paper.shuffling import ShuffledEpochs
+
 
 NUM_FEATURES = 28
 CACHE_VERSION = 1
@@ -348,34 +350,10 @@ class HiggsCorpus:
         )
 
     def order_path(self, seed: int) -> Path:
-        try:
-            seed = index(seed)
-        except TypeError as error:
-            raise TypeError("data seed must be an integer") from error
-        if seed < 0:
-            raise ValueError(f"data seed must be nonnegative; got {seed}")
+        return self.shuffled_epochs(seed).prepare(1)[0]
 
-        path = self.cache_dir / f"train_order_seed{seed}.npy"
-        if path.exists() and self._valid_order(path):
-            return path
-
-        order = np.arange(self.train_stop, dtype=np.uint32)
-        np.random.default_rng(seed).shuffle(order)
-        temporary = _temporary_path(self.cache_dir, path.name)
-        try:
-            with temporary.open("wb") as file:
-                np.save(file, order, allow_pickle=False)
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return path
-
-    def _valid_order(self, path: Path) -> bool:
-        try:
-            order = np.load(path, mmap_mode="r", allow_pickle=False)
-        except (OSError, ValueError):
-            return False
-        return order.dtype == np.uint32 and order.shape == (self.train_stop,)
+    def shuffled_epochs(self, seed: int) -> ShuffledEpochs:
+        return ShuffledEpochs(self.cache_dir, self.train_stop, seed)
 
 
 @dataclass
@@ -383,12 +361,11 @@ class HiggsTask:
     corpus: HiggsCorpus
     data_seed: int
     batch_size: int
-    _order_path: Path = field(init=False, repr=False)
+    _shuffled_epochs: ShuffledEpochs = field(init=False, repr=False)
     _mean: np.ndarray = field(init=False, repr=False)
     _scale: np.ndarray = field(init=False, repr=False)
     _features: np.memmap | None = field(init=False, default=None, repr=False)
     _labels: np.memmap | None = field(init=False, default=None, repr=False)
-    _order: np.memmap | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -397,26 +374,18 @@ class HiggsTask:
             raise TypeError("batch_size must be an integer") from error
         if self.batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {self.batch_size}")
-        self._order_path = self.corpus.order_path(self.data_seed)
+        self._shuffled_epochs = self.corpus.shuffled_epochs(self.data_seed)
         self._mean = np.asarray(self.corpus.feature_mean, dtype=np.float32)
         self._scale = np.asarray(self.corpus.feature_scale, dtype=np.float32)
 
     def __getstate__(self) -> dict[str, Any]:
         state = vars(self).copy()
-        state.update(_features=None, _labels=None, _order=None)
+        state.update(_features=None, _labels=None)
         return state
 
-    def train_batches(self, start: int, stop: int) -> Iterator[BinaryBatch]:
-        if not 0 <= start <= stop <= self.corpus.train_stop:
-            raise ValueError(
-                "expected 0 <= start <= stop <= train_stop; "
-                f"got {start}, {stop}, {self.corpus.train_stop}"
-            )
-        features, labels, order = self._arrays()
-        for batch_start in range(start, stop, self.batch_size):
-            batch_stop = min(batch_start + self.batch_size, stop)
-            rows = np.array(order[batch_start:batch_stop], copy=True)
-            rows.sort()
+    def train_batches(self, max_examples: int) -> Iterator[BinaryBatch]:
+        features, labels = self._arrays()
+        for rows in self._shuffled_epochs.batches(max_examples, self.batch_size):
             yield self._batch(features, labels, rows)
 
     def val_batches(self) -> Iterator[BinaryBatch]:
@@ -431,29 +400,15 @@ class HiggsTask:
             self.corpus.rows,
         )
 
-    def _arrays(self) -> tuple[np.memmap, np.memmap, np.memmap]:
+    def _arrays(self) -> tuple[np.memmap, np.memmap]:
         if self._features is None:
             self._features = self.corpus.features()
             self._labels = self.corpus.labels()
-            self._order = np.load(
-                self._order_path,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-            if (
-                self._order.dtype != np.uint32
-                or self._order.shape != (self.corpus.train_stop,)
-            ):
-                raise ValueError(f"invalid HIGGS training order: {self._order_path}")
-        assert (
-            self._features is not None
-            and self._labels is not None
-            and self._order is not None
-        )
-        return self._features, self._labels, self._order
+        assert self._features is not None and self._labels is not None
+        return self._features, self._labels
 
     def _sequential_batches(self, start: int, stop: int) -> Iterator[BinaryBatch]:
-        features, labels, _ = self._arrays()
+        features, labels = self._arrays()
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
             yield self._batch(features, labels, slice(batch_start, batch_stop))
