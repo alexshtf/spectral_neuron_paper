@@ -144,13 +144,11 @@ PROFILES: dict[str, Profile] = {
     ),
     "full": Profile(
         train_sizes=(
-            *tuple(2**power for power in range(11, 23, 2)),
-            2**22,
-            36_672_493 // 8,
+            *tuple(2**power for power in range(12, 25, 2)),
         ),
-        dims=(3, 5, 9, 15),
+        dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-3, 1e-1, 8).tolist()),
-        tuning_seeds=SeedGrid(init_seeds=range(3)),
+        tuning_seeds=SeedGrid(init_seeds=range(8)),
         evaluation_seeds=SeedGrid(
             data_seeds=range(1, 5),
             init_seeds=range(3, 9),
