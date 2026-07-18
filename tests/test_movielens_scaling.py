@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from paper.experiments.movielens_scaling import (
+    CURVE_COLUMNS,
     PROFILES,
     RAW_COLUMNS,
     MovieLensModelSpec,
@@ -40,7 +41,7 @@ def _tiny_profile() -> Profile:
         train_sizes=(8, 16),
         dims=(3,),
         lrs=(1e-2, 1e-1),
-        tuning_seeds=SeedGrid(),
+        tuning_seeds=SeedGrid(init_seeds=range(2)),
         evaluation_seeds=SeedGrid(data_seeds=range(1, 2), init_seeds=range(1, 2)),
         batch_size=8,
         passes=2,
@@ -128,18 +129,40 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
 
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
-    assert set(tuning["train_size"]) == {96}
+    assert set(tuning["train_size"]) == {8, 16, 48, 96}
     assert tuning["val_rmse"].notna().all()
-    assert tuning["val_warm_fraction"].eq(1).all()
+    assert tuning["val_warm_fraction"].between(0, 1).all()
+    assert (tuning.loc[tuning["train_size"] < 48, "val_warm_fraction"] < 1).any()
+    assert tuning.loc[tuning["train_size"] >= 48, "val_warm_fraction"].eq(1).all()
     assert tuning["test_rmse"].isna().all()
     assert tuning["test_warm_fraction"].isna().all()
     assert evaluation["val_rmse"].isna().all()
     assert evaluation["val_warm_fraction"].isna().all()
     assert np.isfinite(evaluation["test_rmse"]).all()
     assert evaluation["test_warm_fraction"].between(0, 1).all()
+    assert (
+        evaluation.loc[evaluation["train_size"] < 48, "test_warm_fraction"] < 1
+    ).any()
     assert evaluation.loc[
         evaluation["train_size"] >= 48, "test_warm_fraction"
     ].eq(1).all()
+
+    expected = (
+        tuning.groupby(CURVE_COLUMNS + ["lr"], as_index=False)["val_rmse"]
+        .median()
+        .sort_values(CURVE_COLUMNS + ["val_rmse", "lr"], kind="mergesort")
+        .groupby(CURVE_COLUMNS, as_index=False, sort=False)
+        .head(1)
+        .rename(columns={"lr": "expected_lr"})
+    )
+    observed = evaluation.merge(
+        expected[CURVE_COLUMNS + ["expected_lr"]],
+        on=CURVE_COLUMNS,
+        how="left",
+        validate="many_to_one",
+    )
+    np.testing.assert_allclose(observed["lr"], observed["expected_lr"])
+
     assert set(summary["train_size"]) == {8, 16, 48, 96}
     assert len(summary) == 12
 
@@ -224,14 +247,14 @@ def test_validate_raw_rejects_incomplete_grids_and_wrong_selected_lr(complete_ra
         validate_raw(complete_raw.drop(tuning_index), _tiny_profile())
 
     evaluation_index = complete_raw.index[complete_raw["phase"] == "evaluation"][0]
-    with pytest.raises(ValueError, match="evaluation trajectory"):
+    with pytest.raises(ValueError, match="evaluation"):
         validate_raw(complete_raw.drop(evaluation_index), _tiny_profile())
 
     wrong_lr = complete_raw.copy()
-    mask = (wrong_lr["phase"] == "evaluation") & (wrong_lr["model"] == "linear")
-    selected_lr = wrong_lr.loc[mask, "lr"].iloc[0]
+    index = wrong_lr.index[wrong_lr["phase"] == "evaluation"][0]
+    selected_lr = wrong_lr.loc[index, "lr"]
     alternate_lr = next(lr for lr in _tiny_profile().lrs if lr != selected_lr)
-    wrong_lr.loc[mask, "lr"] = alternate_lr
+    wrong_lr.loc[index, "lr"] = alternate_lr
     with pytest.raises(ValueError, match="selected LR"):
         validate_raw(wrong_lr, _tiny_profile())
 
@@ -240,8 +263,23 @@ def test_validate_raw_rejects_nonfinite_and_out_of_range_metrics(complete_raw):
     nonfinite = complete_raw.copy()
     index = nonfinite.index[nonfinite["phase"] == "tuning"][0]
     nonfinite.loc[index, "val_rmse"] = np.nan
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.warns(RuntimeWarning, match="nonfinite"):
         validate_raw(nonfinite, _tiny_profile())
+
+    no_finite_checkpoint = complete_raw.copy()
+    row = no_finite_checkpoint.loc[index]
+    mask = (
+        no_finite_checkpoint["phase"].eq("tuning")
+        & no_finite_checkpoint["model"].eq(row["model"])
+        & no_finite_checkpoint["dim"].eq(row["dim"])
+        & no_finite_checkpoint["train_size"].eq(row["train_size"])
+    )
+    no_finite_checkpoint.loc[mask, "val_rmse"] = np.nan
+    with (
+        pytest.warns(RuntimeWarning, match="nonfinite"),
+        pytest.raises(ValueError, match="no finite validation"),
+    ):
+        validate_raw(no_finite_checkpoint, _tiny_profile())
 
     invalid_warm_fraction = complete_raw.copy()
     index = invalid_warm_fraction.index[

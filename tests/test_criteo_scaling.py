@@ -457,7 +457,8 @@ def test_best_lrs_filters_nonfinite_and_requires_one_per_checkpoint(complete_raw
     lr = tuning.loc[curve, "lr"].iloc[0]
     tuning.loc[curve & (tuning["lr"] == lr), "val_logloss"] = np.inf
 
-    best = _best_lrs(tuning)
+    with pytest.warns(RuntimeWarning, match="nonfinite"):
+        best = _best_lrs(tuning)
     selected = best.loc[
         (best["model"] == row["model"])
         & (best["dim"] == row["dim"])
@@ -467,7 +468,10 @@ def test_best_lrs_filters_nonfinite_and_requires_one_per_checkpoint(complete_raw
     assert selected.item() != lr
 
     tuning.loc[curve, "val_logloss"] = np.nan
-    with pytest.raises(ValueError, match="no finite validation"):
+    with (
+        pytest.warns(RuntimeWarning, match="nonfinite"),
+        pytest.raises(ValueError, match="no finite validation"),
+    ):
         _best_lrs(tuning)
 
 

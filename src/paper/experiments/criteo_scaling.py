@@ -1,11 +1,9 @@
 import argparse
 import sys
-import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
-from itertools import product
 from pathlib import Path
 from typing import Literal, TextIO
 
@@ -25,6 +23,16 @@ from paper.criteo import (
     prepare_encoded_data,
 )
 from paper.experiments import run_many
+from paper.experiments.scaling import (
+    RunConfig,
+    SeedGrid,
+    SelectedRun,
+    best_lrs,
+    select_lr as select_scaling_lr,
+    selected_runs,
+    summarize_scaling,
+    tuning_configs,
+)
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
 from paper.shuffling import ShuffledEpochs, resolve_train_sizes
@@ -88,22 +96,11 @@ EXPERIMENT_COLUMNS = [
 ]
 
 MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
-    "train_size",
     "model",
     "dim",
 ]
 
-
-@dataclass(frozen=True)
-class SeedGrid:
-    data_seeds: range = range(1)
-    init_seeds: range = range(1)
-
-    def __len__(self) -> int:
-        return len(self.data_seeds) * len(self.init_seeds)
-
-    def __iter__(self) -> Iterator[tuple[int, int]]:
-        return product(self.data_seeds, self.init_seeds)
+CURVE_COLUMNS = MODEL_COLUMNS + ["train_size"]
 
 
 @dataclass(frozen=True)
@@ -179,14 +176,6 @@ class CriteoModelSpec:
         return "hybrid" if self.variant.endswith("-new") else "bucket"
 
 
-@dataclass(frozen=True)
-class RunConfig:
-    data_seed: int
-    model_spec: CriteoModelSpec
-    lr: float
-    init_seed: int
-
-
 def _model_specs(
     profile: Profile, variants: tuple[Variant, ...]
 ) -> tuple[CriteoModelSpec, ...]:
@@ -201,16 +190,8 @@ def _model_specs(
 
 def _tuning_configs(
     profile: Profile, model_specs: tuple[CriteoModelSpec, ...]
-) -> tuple[RunConfig, ...]:
-    return tuple(
-        RunConfig(data_seed, model_spec, lr, init_seed)
-        for data_seed, model_spec, lr, init_seed in product(
-            profile.tuning_seeds.data_seeds,
-            model_specs,
-            profile.lrs,
-            profile.tuning_seeds.init_seeds,
-        )
-    )
+) -> tuple[RunConfig[CriteoModelSpec], ...]:
+    return tuning_configs(model_specs, profile.lrs, profile.tuning_seeds)
 
 
 @dataclass(frozen=True)
@@ -223,12 +204,6 @@ class RunSettings:
     preprocessor_sample_size: int
     preprocessor_seed: int
     threads_per_worker: int | None
-
-
-@dataclass(frozen=True)
-class SelectedRun:
-    config: RunConfig
-    train_sizes: tuple[int, ...]
 
 
 def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
@@ -253,7 +228,7 @@ def _make_seeded_model(
 
 
 def _make_task_model(
-    config: RunConfig, settings: RunSettings
+    config: RunConfig[CriteoModelSpec], settings: RunSettings
 ) -> tuple[CriteoTask, nn.Module]:
     if settings.threads_per_worker is not None:
         torch.set_num_threads(settings.threads_per_worker)
@@ -270,7 +245,7 @@ def _make_task_model(
 
 
 def _metadata(
-    config: RunConfig,
+    config: RunConfig[CriteoModelSpec],
     settings: RunSettings,
 ) -> dict[str, int | float | str]:
     return {
@@ -291,7 +266,7 @@ def _format_result(
     result: pd.DataFrame,
     *,
     phase: Literal["tuning", "evaluation"],
-    config: RunConfig,
+    config: RunConfig[CriteoModelSpec],
     settings: RunSettings,
 ) -> pd.DataFrame:
     return result.assign(
@@ -319,7 +294,9 @@ def _report_timings(
     )
 
 
-def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
+def run_config(
+    config: RunConfig[CriteoModelSpec], settings: RunSettings
+) -> pd.DataFrame:
     task, model = _make_task_model(config, settings)
     result = tune_scaling_stream(
         task,
@@ -336,7 +313,9 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
     )
 
 
-def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
+def run_selected(
+    selected: SelectedRun[CriteoModelSpec], settings: RunSettings
+) -> pd.DataFrame:
     task, model = _make_task_model(selected.config, settings)
     checkpoints = tuple(
         size for size in settings.train_sizes if size <= max(selected.train_sizes)
@@ -360,22 +339,15 @@ def run_selected(selected: SelectedRun, settings: RunSettings) -> pd.DataFrame:
 def _selected_runs(
     tuning: pd.DataFrame,
     evaluation_seeds: SeedGrid,
-) -> list[SelectedRun]:
-    train_sizes: dict[RunConfig, list[int]] = {}
-    for row in _best_lrs(tuning).itertuples(index=False):
-        for data_seed, init_seed in evaluation_seeds:
-            config = RunConfig(
-                data_seed=data_seed,
-                model_spec=CriteoModelSpec(row.model, row.dim),
-                lr=row.selected_lr,
-                init_seed=init_seed,
-            )
-            train_sizes.setdefault(config, []).append(row.train_size)
-
-    return [
-        SelectedRun(config, tuple(sorted(set(sizes))))
-        for config, sizes in train_sizes.items()
-    ]
+) -> tuple[SelectedRun[CriteoModelSpec], ...]:
+    return selected_runs(
+        tuning,
+        experiment_columns=EXPERIMENT_COLUMNS,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_logloss",
+        evaluation_seeds=evaluation_seeds,
+        make_model_spec=CriteoModelSpec,
+    )
 
 
 def run_profile(
@@ -471,12 +443,11 @@ def run_profile(
     if progress:
         _report_timings("Tuning", "val", tuning_results, progress_file)
     tuning = pd.concat(tuning_results, ignore_index=True)
-    selected_runs = _selected_runs(tuning, profile.evaluation_seeds)
 
     test = partial(run_selected, settings=settings)
     test_results = run_many(
         test,
-        selected_runs,
+        _selected_runs(tuning, profile.evaluation_seeds),
         workers=workers,
         desc="Evaluation (retrain + test)",
         unit="trajectory",
@@ -491,62 +462,27 @@ def run_profile(
 
 
 def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
-    if tuning.empty:
-        raise ValueError("tuning results must not be empty")
-    model_keys = tuning.loc[:, MODEL_COLUMNS].drop_duplicates()
-    finite = tuning.loc[np.isfinite(tuning["val_logloss"])]
-    scores = (
-        finite.groupby(MODEL_COLUMNS + ["lr"], as_index=False)["val_logloss"]
-        .median()
-        .rename(columns={"val_logloss": "median_val_logloss"})
+    return best_lrs(
+        tuning,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_logloss",
     )
-    available = scores.loc[:, MODEL_COLUMNS].drop_duplicates()
-    missing = model_keys.merge(available, on=MODEL_COLUMNS, how="left", indicator=True)
-    missing = missing.loc[missing["_merge"] == "left_only", MODEL_COLUMNS]
-    if not missing.empty:
-        checkpoints = missing[["model", "dim", "train_size"]].to_dict("records")
-        raise ValueError(f"no finite validation log loss for {checkpoints}")
-
-    best = (
-        scores.sort_values(
-            MODEL_COLUMNS + ["median_val_logloss", "lr"], kind="mergesort"
-        )
-        .groupby(MODEL_COLUMNS, as_index=False, sort=False)
-        .head(1)
-        .rename(columns={"lr": "selected_lr"})
-    )
-    return best[MODEL_COLUMNS + ["selected_lr", "median_val_logloss"]]
 
 
 def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
-    tuning = raw.loc[raw["phase"] == "tuning"]
-    evaluation = raw.loc[raw["phase"] == "evaluation"]
-    best = _best_lrs(tuning)
-    selected = evaluation.merge(
-        best[MODEL_COLUMNS + ["selected_lr", "median_val_logloss"]],
-        on=MODEL_COLUMNS,
-        how="inner",
-    )
-    return selected.loc[selected["lr"] == selected["selected_lr"]].reset_index(
-        drop=True
+    return select_scaling_lr(
+        raw,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_logloss",
     )
 
 
 def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    selected = select_lr(raw)
-    groups = MODEL_COLUMNS + ["selected_lr"]
-    return (
-        selected.groupby(groups)
-        .agg(
-            median_test_logloss=("test_logloss", "median"),
-            q25_test_logloss=("test_logloss", lambda s: s.quantile(0.25)),
-            q75_test_logloss=("test_logloss", lambda s: s.quantile(0.75)),
-            median_test_brier=("test_brier", "median"),
-            q25_test_brier=("test_brier", lambda s: s.quantile(0.25)),
-            q75_test_brier=("test_brier", lambda s: s.quantile(0.75)),
-            n=("test_logloss", "size"),
-        )
-        .reset_index()
+    return summarize_scaling(
+        raw,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_logloss",
+        quantile_metrics=("test_logloss", "test_brier"),
     )
 
 
@@ -611,8 +547,15 @@ def validate_raw(
         batch_size=profile.batch_size,
         passes=profile.passes,
     )
+    experiment = (
+        PROTOCOL,
+        OPTIMIZER,
+        sample_size,
+        profile.preprocessor_seed,
+        train_pool_size,
+    )
     expected_curves = {
-        (spec.variant, spec.dim, train_size)
+        (*experiment, spec.variant, spec.dim, train_size)
         for spec in specs
         for train_size in train_sizes
     }
@@ -620,7 +563,7 @@ def validate_raw(
     evaluation = raw.loc[raw["phase"] == "evaluation"]
     for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
         observed_curves = set(
-            rows[["model", "dim", "train_size"]]
+            rows[CURVE_COLUMNS]
             .drop_duplicates()
             .itertuples(index=False, name=None)
         )
@@ -636,19 +579,10 @@ def validate_raw(
     ).all():
         raise ValueError("evaluation test metrics must be finite")
 
-    nonfinite_tuning = ~np.isfinite(tuning["val_logloss"].to_numpy(dtype=float))
-    if nonfinite_tuning.any():
-        warnings.warn(
-            f"{nonfinite_tuning.sum()} tuning trajectories have nonfinite "
-            "validation loss",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
     if not _same_lrs(tuning["lr"], profile.lrs):
         raise ValueError("tuning learning-rate grid does not match the profile")
     tuning_seeds = set(profile.tuning_seeds)
-    for curve, rows in tuning.groupby(["model", "dim", "train_size"]):
+    for curve, rows in tuning.groupby(CURVE_COLUMNS):
         if not _same_lrs(rows["lr"], profile.lrs):
             raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
         for lr, lr_rows in rows.groupby("lr"):
@@ -659,11 +593,11 @@ def validate_raw(
                 raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
 
     selected_lrs = {
-        (row.model, row.dim, row.train_size): row.selected_lr
+        tuple(getattr(row, column) for column in CURVE_COLUMNS): row.selected_lr
         for row in _best_lrs(tuning).itertuples(index=False)
     }
     evaluation_seeds = set(profile.evaluation_seeds)
-    for curve, rows in evaluation.groupby(["model", "dim", "train_size"]):
+    for curve, rows in evaluation.groupby(CURVE_COLUMNS):
         seeds = set(rows[["data_seed", "init_seed"]].itertuples(index=False, name=None))
         if seeds != evaluation_seeds:
             raise ValueError(f"incomplete evaluation seeds for {curve}")

@@ -281,7 +281,7 @@ def test_binary_scaling_tests_only_selected_checkpoints():
     assert result["train_size"].tolist() == [3, 7]
 
 
-def test_binary_tuning_evaluates_only_selected_checkpoints():
+def test_binary_tuning_evaluates_every_checkpoint():
     validation_calls = 0
 
     class Task:
@@ -305,11 +305,10 @@ def test_binary_tuning_evaluates_only_selected_checkpoints():
         objective=BINARY_OBJECTIVE,
         lr=0.1,
         checkpoints=(3, 5, 7),
-        validation_checkpoints=(7,),
     )
 
-    assert result["train_size"].tolist() == [7]
-    assert validation_calls == 1
+    assert result["train_size"].tolist() == [3, 5, 7]
+    assert validation_calls == 3
 
 
 def test_regression_scaling_keeps_validation_and_test_separate():
@@ -343,7 +342,6 @@ def test_regression_scaling_keeps_validation_and_test_separate():
         objective=REGRESSION_OBJECTIVE,
         lr=0.1,
         checkpoints=(3, 5, 7),
-        validation_checkpoints=(5,),
     )
     testing = fit_and_test_scaling(
         Task(),
@@ -354,7 +352,7 @@ def test_regression_scaling_keeps_validation_and_test_separate():
         test_checkpoints=(3, 7),
     )
 
-    assert tuning["train_size"].tolist() == [5]
+    assert tuning["train_size"].tolist() == [3, 5, 7]
     assert testing["train_size"].tolist() == [3, 7]
-    assert validation_calls == 1
+    assert validation_calls == 3
     assert test_calls == 2

@@ -337,14 +337,13 @@ def tune_scaling_stream(
     objective: Objective,
     lr: float,
     checkpoints: Iterable[int],
-    validation_checkpoints: Iterable[int] | None = None,
 ) -> pd.DataFrame:
     return _scaling_results(
         task,
         model,
         lr=lr,
         checkpoints=checkpoints,
-        selected_checkpoints=validation_checkpoints,
+        selected_checkpoints=None,
         loss=objective.loss,
         metric_name="val",
         batches=task.val_batches,

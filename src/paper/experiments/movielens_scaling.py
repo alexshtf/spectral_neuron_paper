@@ -1,10 +1,9 @@
 import argparse
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
-from itertools import product
 from pathlib import Path
 from typing import Literal, TextIO
 
@@ -15,6 +14,16 @@ from torch import nn
 from tqdm.auto import tqdm
 
 from paper.experiments import run_many
+from paper.experiments.scaling import (
+    RunConfig,
+    SeedGrid,
+    SelectedRun,
+    best_lrs,
+    select_lr as select_scaling_lr,
+    selected_runs,
+    summarize_scaling,
+    tuning_configs,
+)
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
 from paper.movielens import MovieLensCorpus, MovieLensTask, prepare_corpus
@@ -67,18 +76,6 @@ MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
     "num_parameters",
 ]
 CURVE_COLUMNS = MODEL_COLUMNS + ["train_size"]
-
-
-@dataclass(frozen=True)
-class SeedGrid:
-    data_seeds: range = range(1)
-    init_seeds: range = range(1)
-
-    def __len__(self) -> int:
-        return len(self.data_seeds) * len(self.init_seeds)
-
-    def __iter__(self) -> Iterator[tuple[int, int]]:
-        return product(self.data_seeds, self.init_seeds)
 
 
 @dataclass(frozen=True)
@@ -175,14 +172,6 @@ class MovieLensModelSpec:
 
 
 @dataclass(frozen=True)
-class RunConfig:
-    data_seed: int
-    model_spec: MovieLensModelSpec
-    lr: float
-    init_seed: int
-
-
-@dataclass(frozen=True)
 class RunSettings:
     train_sizes: tuple[int, ...]
     batch_size: int
@@ -205,16 +194,8 @@ def _model_specs(
 
 def _tuning_configs(
     profile: Profile, specs: tuple[MovieLensModelSpec, ...]
-) -> tuple[RunConfig, ...]:
-    return tuple(
-        RunConfig(data_seed, spec, lr, init_seed)
-        for data_seed, spec, lr, init_seed in product(
-            profile.tuning_seeds.data_seeds,
-            specs,
-            profile.lrs,
-            profile.tuning_seeds.init_seeds,
-        )
-    )
+) -> tuple[RunConfig[MovieLensModelSpec], ...]:
+    return tuning_configs(specs, profile.lrs, profile.tuning_seeds)
 
 
 def make_model(spec: MovieLensModelSpec, num_features: int) -> nn.Module:
@@ -244,7 +225,7 @@ def _make_seeded_model(
 
 
 def _make_task_model(
-    config: RunConfig, settings: RunSettings
+    config: RunConfig[MovieLensModelSpec], settings: RunSettings
 ) -> tuple[MovieLensTask, nn.Module]:
     if settings.threads_per_worker is not None:
         torch.set_num_threads(settings.threads_per_worker)
@@ -258,7 +239,9 @@ def _make_task_model(
 
 
 def _metadata(
-    config: RunConfig, settings: RunSettings, model: nn.Module
+    config: RunConfig[MovieLensModelSpec],
+    settings: RunSettings,
+    model: nn.Module,
 ) -> dict[str, int | float | str]:
     spec = config.model_spec
     return {
@@ -281,7 +264,7 @@ def _format_result(
     result: pd.DataFrame,
     *,
     phase: Literal["tuning", "evaluation"],
-    config: RunConfig,
+    config: RunConfig[MovieLensModelSpec],
     settings: RunSettings,
     model: nn.Module,
 ) -> pd.DataFrame:
@@ -314,7 +297,9 @@ def _report_timings(
     )
 
 
-def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
+def run_config(
+    config: RunConfig[MovieLensModelSpec], settings: RunSettings
+) -> pd.DataFrame:
     task, model = _make_task_model(config, settings)
     result = tune_scaling_stream(
         task,
@@ -322,7 +307,6 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
         objective=REGRESSION_OBJECTIVE,
         lr=config.lr,
         checkpoints=settings.train_sizes,
-        validation_checkpoints=(settings.train_sizes[-1],),
     )
     return _format_result(
         result,
@@ -333,67 +317,48 @@ def run_config(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
     )
 
 
-def run_selected(config: RunConfig, settings: RunSettings) -> pd.DataFrame:
-    task, model = _make_task_model(config, settings)
+def run_selected(
+    selected: SelectedRun[MovieLensModelSpec], settings: RunSettings
+) -> pd.DataFrame:
+    task, model = _make_task_model(selected.config, settings)
+    checkpoints = tuple(
+        size for size in settings.train_sizes if size <= max(selected.train_sizes)
+    )
     result = fit_and_test_scaling(
         task,
         model,
         objective=REGRESSION_OBJECTIVE,
-        lr=config.lr,
-        checkpoints=settings.train_sizes,
-        test_checkpoints=settings.train_sizes,
+        lr=selected.config.lr,
+        checkpoints=checkpoints,
+        test_checkpoints=selected.train_sizes,
     )
     return _format_result(
         result,
         phase="evaluation",
-        config=config,
+        config=selected.config,
         settings=settings,
         model=model,
     )
 
 
 def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
-    if tuning.empty:
-        raise ValueError("tuning results must not be empty")
-    model_keys = tuning.loc[:, MODEL_COLUMNS].drop_duplicates()
-    finite = tuning.loc[np.isfinite(tuning["val_rmse"])]
-    scores = (
-        finite.groupby(MODEL_COLUMNS + ["lr"], as_index=False)["val_rmse"]
-        .median()
-        .rename(columns={"val_rmse": "median_val_rmse"})
+    return best_lrs(
+        tuning,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_rmse",
     )
-    available = scores.loc[:, MODEL_COLUMNS].drop_duplicates()
-    missing = model_keys.merge(
-        available, on=MODEL_COLUMNS, how="left", indicator=True
-    )
-    missing = missing.loc[missing["_merge"] == "left_only", MODEL_COLUMNS]
-    if not missing.empty:
-        families = missing[["model", "dim"]].to_dict("records")
-        raise ValueError(f"no finite validation RMSE for {families}")
-
-    best = (
-        scores.sort_values(
-            MODEL_COLUMNS + ["median_val_rmse", "lr"], kind="mergesort"
-        )
-        .groupby(MODEL_COLUMNS, as_index=False, sort=False)
-        .head(1)
-        .rename(columns={"lr": "selected_lr"})
-    )
-    return best[MODEL_COLUMNS + ["selected_lr", "median_val_rmse"]]
 
 
-def _selected_configs(
+def _selected_runs(
     tuning: pd.DataFrame, evaluation_seeds: SeedGrid
-) -> tuple[RunConfig, ...]:
-    return tuple(
-        RunConfig(
-            data_seed=data_seed,
-            model_spec=MovieLensModelSpec(row.model, int(row.dim)),
-            lr=row.selected_lr,
-            init_seed=init_seed,
-        )
-        for row in _best_lrs(tuning).itertuples(index=False)
-        for data_seed, init_seed in evaluation_seeds
+) -> tuple[SelectedRun[MovieLensModelSpec], ...]:
+    return selected_runs(
+        tuning,
+        experiment_columns=EXPERIMENT_COLUMNS,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_rmse",
+        evaluation_seeds=evaluation_seeds,
+        make_model_spec=MovieLensModelSpec,
     )
 
 
@@ -456,7 +421,7 @@ def run_profile(
         partial(run_config, settings=settings),
         configs,
         workers=workers,
-        desc="Tuning (train + final validation)",
+        desc="Tuning (train + validation)",
         unit="trajectory",
         progress=progress,
         progress_file=progress_file,
@@ -469,7 +434,7 @@ def run_profile(
 
     evaluation_results = run_many(
         partial(run_selected, settings=settings),
-        _selected_configs(tuning, profile.evaluation_seeds),
+        _selected_runs(tuning, profile.evaluation_seeds),
         workers=workers,
         desc="Evaluation (retrain + test)",
         unit="trajectory",
@@ -484,27 +449,20 @@ def run_profile(
 
 
 def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
-    tuning = raw.loc[raw["phase"] == "tuning"]
-    evaluation = raw.loc[raw["phase"] == "evaluation"]
-    best = _best_lrs(tuning)
-    selected = evaluation.merge(best, on=MODEL_COLUMNS, how="inner")
-    return selected.loc[selected["lr"] == selected["selected_lr"]].reset_index(
-        drop=True
+    return select_scaling_lr(
+        raw,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_rmse",
     )
 
 
 def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    selected = select_lr(raw)
-    return (
-        selected.groupby(CURVE_COLUMNS + ["selected_lr"])
-        .agg(
-            median_test_rmse=("test_rmse", "median"),
-            q25_test_rmse=("test_rmse", lambda s: s.quantile(0.25)),
-            q75_test_rmse=("test_rmse", lambda s: s.quantile(0.75)),
-            median_test_warm_fraction=("test_warm_fraction", "median"),
-            n=("test_rmse", "size"),
-        )
-        .reset_index()
+    return summarize_scaling(
+        raw,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_rmse",
+        quantile_metrics=("test_rmse",),
+        median_metrics=("test_warm_fraction",),
     )
 
 
@@ -607,23 +565,36 @@ def validate_raw(
 
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
-    if set(tuning["train_size"]) != {train_sizes[-1]}:
-        raise ValueError("tuning must contain only the final checkpoint")
-    if set(evaluation["train_size"]) != set(train_sizes):
-        raise ValueError("evaluation must contain every profile checkpoint")
+    models = raw[MODEL_COLUMNS].drop_duplicates()
+    expected_curves = {
+        (*model, train_size)
+        for model in models.itertuples(index=False, name=None)
+        for train_size in train_sizes
+    }
+    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
+        observed_curves = set(
+            rows[CURVE_COLUMNS].drop_duplicates().itertuples(index=False, name=None)
+        )
+        if observed_curves != expected_curves:
+            raise ValueError(f"{phase} has an incomplete model/checkpoint grid")
+
     if tuning[["test_rmse", "test_warm_fraction"]].notna().any().any():
         raise ValueError("tuning rows must not contain test metrics")
     if evaluation[["val_rmse", "val_warm_fraction"]].notna().any().any():
         raise ValueError("evaluation rows must not contain validation metrics")
 
-    for phase, rows, metric, warm in (
-        ("tuning", tuning, "val_rmse", "val_warm_fraction"),
-        ("evaluation", evaluation, "test_rmse", "test_warm_fraction"),
+    if not np.isfinite(evaluation["test_rmse"].to_numpy(dtype=float)).all():
+        raise ValueError("evaluation test RMSE must be finite")
+    if (tuning["val_rmse"] < 0).any() or (evaluation["test_rmse"] < 0).any():
+        raise ValueError("validation and test RMSE must be nonnegative")
+    for phase, rows, warm in (
+        ("tuning", tuning, "val_warm_fraction"),
+        ("evaluation", evaluation, "test_warm_fraction"),
     ):
-        if not np.isfinite(rows[[metric, warm]].to_numpy(dtype=float)).all():
-            raise ValueError(f"{phase} metrics and warm fractions must be finite")
-        if (rows[metric] < 0).any() or not rows[warm].between(0, 1).all():
-            raise ValueError(f"{phase} metrics or warm fractions are out of range")
+        if not np.isfinite(rows[warm].to_numpy(dtype=float)).all():
+            raise ValueError(f"{phase} warm fractions must be finite")
+        if not rows[warm].between(0, 1).all():
+            raise ValueError(f"{phase} warm fractions are out of range")
 
     if not tuning.loc[
         tuning["train_size"] >= train_pool_size, "val_warm_fraction"
@@ -634,21 +605,12 @@ def validate_raw(
     ].eq(1.0).all():
         raise ValueError("test warm coverage must saturate after one pass")
 
-    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
-        phase_specs = set(
-            rows[["model", "dim"]]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
-        )
-        if phase_specs != expected_specs:
-            raise ValueError(f"{phase} has an incomplete model/capacity grid")
-
     if not _same_lrs(tuning["lr"], profile.lrs):
         raise ValueError("tuning learning-rate grid does not match the profile")
     tuning_seeds = set(profile.tuning_seeds)
-    for spec, rows in tuning.groupby(["model", "dim"]):
+    for curve, rows in tuning.groupby(CURVE_COLUMNS):
         if not _same_lrs(rows["lr"], profile.lrs):
-            raise ValueError(f"incomplete tuning learning-rate grid for {spec}")
+            raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
         for lr, lr_rows in rows.groupby("lr"):
             seeds = set(
                 lr_rows[["data_seed", "init_seed"]].itertuples(
@@ -656,32 +618,24 @@ def validate_raw(
                 )
             )
             if seeds != tuning_seeds:
-                raise ValueError(f"incomplete tuning seeds for {spec}, lr={lr:g}")
+                raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
 
     selected_lrs = {
-        (row.model, row.dim): row.selected_lr
+        tuple(getattr(row, column) for column in CURVE_COLUMNS): row.selected_lr
         for row in _best_lrs(tuning).itertuples(index=False)
     }
     evaluation_seeds = set(profile.evaluation_seeds)
-    expected_checkpoints = set(train_sizes)
-    for spec, rows in evaluation.groupby(["model", "dim"]):
+    for curve, rows in evaluation.groupby(CURVE_COLUMNS):
         seeds = set(
-            rows[["data_seed", "init_seed"]]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
+            rows[["data_seed", "init_seed"]].itertuples(index=False, name=None)
         )
         if seeds != evaluation_seeds:
-            raise ValueError(f"incomplete evaluation seeds for {spec}")
+            raise ValueError(f"incomplete evaluation seeds for {curve}")
         lrs = rows["lr"].unique()
         if len(lrs) != 1 or not np.isclose(
-            lrs[0], selected_lrs[spec], rtol=1e-12, atol=0
+            lrs[0], selected_lrs[curve], rtol=1e-12, atol=0
         ):
-            raise ValueError(f"evaluation does not use the selected LR for {spec}")
-        checkpoints = rows.groupby(["data_seed", "init_seed"])["train_size"].agg(
-            set
-        )
-        if not checkpoints.map(lambda values: values == expected_checkpoints).all():
-            raise ValueError(f"incomplete evaluation trajectory for {spec}")
+            raise ValueError(f"evaluation does not use the selected LR for {curve}")
 
 
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
