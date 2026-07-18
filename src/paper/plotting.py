@@ -199,7 +199,7 @@ def _use_pairwise_scaling(
     return target_kinds == {"monotone"} and set(model_pair).issubset(models)
 
 
-def _add_shared_legend(fig, axes) -> None:
+def _add_shared_legend(fig, axes, *, borderaxespad: float = 0.5) -> None:
     handles = []
     labels = []
 
@@ -217,6 +217,7 @@ def _add_shared_legend(fig, axes) -> None:
             loc="outside upper center",
             ncols=len(labels),
             frameon=False,
+            borderaxespad=borderaxespad,
         )
 
 
@@ -347,7 +348,11 @@ def _plot_pairwise_scaling(
                 ax.set_yscale("log")
             ax.grid(True, alpha=0.25)
 
-    _add_shared_legend(fig, axs.ravel())
+    _add_shared_legend(
+        fig,
+        axs.ravel(),
+        borderaxespad=2 if isinstance(fig, SubFigure) else 0.5,
+    )
 
     return fig
 
@@ -364,6 +369,7 @@ def _plot_noise_subfigures(
         figsize=(width * len(noise_stds), height),
         layout="constrained",
     )
+    fig.get_layout_engine().set(h_pad=0.12)
     subfigures = fig.subfigures(1, len(noise_stds), squeeze=False).ravel()
 
     # 5. Add a vertical line in the exact middle of the main figure canvas
@@ -372,7 +378,7 @@ def _plot_noise_subfigures(
 
     for noise_std, subfigure in zip(noise_stds, subfigures):
         noise_summary = summary.loc[summary["noise_std"] == noise_std]
-        subfigure.suptitle(_noise_title(noise_std), fontsize='x-large')
+        subfigure.suptitle(_noise_title(noise_std), y=1, fontsize="x-large")
         if pair_by_dim:
             _plot_pairwise_scaling(
                 noise_summary,

@@ -175,6 +175,39 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
         assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
 
 
+@pytest.mark.parametrize(("figsize", "dpi"), [((16, 6), 72), ((24, 9), 200)])
+def test_plot_scaling_separates_noise_titles_legends_and_axes(figsize, dpi):
+    summary = pd.DataFrame(
+        [
+            _row(
+                complexity=complexity,
+                dim=dim,
+                model=model,
+                train_size=train_size,
+                noise_std=noise_std,
+            )
+            for noise_std in (0.0, 0.1)
+            for complexity in (5, 10)
+            for dim in (3, 5)
+            for model in ("unconstrained", "monotone")
+            for train_size in (32, 64)
+        ]
+    )
+
+    fig = plot_scaling(summary)
+    fig.set_size_inches(figsize)
+    fig.set_dpi(dpi)
+    fig.canvas.draw()
+
+    for subfigure in fig.subfigs:
+        title = subfigure._suptitle.get_window_extent()
+        legend = subfigure.legends[0].get_window_extent()
+        axes_titles = [ax.title.get_window_extent() for ax in subfigure.axes[:2]]
+
+        assert title.y0 > legend.y1
+        assert legend.y0 > max(axis_title.y1 for axis_title in axes_titles)
+
+
 def test_plot_bivariate_target_gallery_draws_contours():
     specs = [
         TargetSpec(kind="general", complexity=5, seed=0),
