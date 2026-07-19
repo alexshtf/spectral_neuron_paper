@@ -15,6 +15,7 @@ from tqdm.auto import tqdm
 
 from paper.experiments import run_many
 from paper.experiments.scaling import (
+    PROTOCOL,
     RunConfig,
     SeedGrid,
     SelectedRun,
@@ -39,7 +40,6 @@ type Variant = Literal["linear", "fm", "spectral"]
 
 VARIANTS: tuple[Variant, ...] = ("linear", "fm", "spectral")
 NUM_FIELDS = 2
-PROTOCOL = "repeated_shuffle"
 OPTIMIZER = "adam+sparseadam"
 
 IDENTITY_COLUMNS = [

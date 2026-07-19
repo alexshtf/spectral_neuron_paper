@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 
 from paper.experiments import run_many
 from paper.experiments.scaling import (
+    PROTOCOL,
     RunConfig,
     SeedGrid,
     SelectedRun,
@@ -59,7 +60,6 @@ MLP_DEPTHS: dict[Variant, int] = {
     "mlp-3": 3,
 }
 
-PROTOCOL = "repeated_shuffle"
 OPTIMIZER = "adam"
 
 IDENTITY_COLUMNS = [

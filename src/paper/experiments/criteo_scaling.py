@@ -24,6 +24,7 @@ from paper.criteo import (
 )
 from paper.experiments import run_many
 from paper.experiments.scaling import (
+    PROTOCOL,
     RunConfig,
     SeedGrid,
     SelectedRun,
@@ -59,7 +60,6 @@ VARIANTS: tuple[Variant, ...] = (
     "spectral-new",
 )
 
-PROTOCOL = "repeated_shuffle"
 OPTIMIZER = "adam+sparseadam"
 
 IDENTITY_COLUMNS = [

@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 
 
+PROTOCOL = "repeated_shuffle"
+
+
 @dataclass(frozen=True)
 class SeedGrid:
     data_seeds: range = range(1)
