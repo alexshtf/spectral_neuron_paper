@@ -164,7 +164,6 @@ class Profile:
     tuning_seeds: SeedGrid
     evaluation_seeds: SeedGrid
     batch_size: int = 4096
-    passes: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -190,8 +189,6 @@ class Profile:
             raise ValueError("tuning and evaluation seed grids must be non-empty")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.passes is not None:
-            _positive("passes", self.passes)
 
 
 PROFILES: dict[str, Profile] = {
@@ -231,7 +228,6 @@ PROFILES: dict[str, Profile] = {
             data_seeds=range(1, 3), init_seeds=range(2, 5)
         ),
         batch_size=4096,
-        passes=2,
     ),
 }
 
@@ -482,9 +478,7 @@ def run_profile(
     )
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=corpus.train_stop,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
 
     variants = (variant,) if variant is not None else VARIANTS
@@ -494,9 +488,9 @@ def run_profile(
         set(profile.tuning_seeds.data_seeds)
         | set(profile.evaluation_seeds.data_seeds)
     )
-    passes = (train_sizes[-1] + corpus.train_stop - 1) // corpus.train_stop
+    required_passes = (train_sizes[-1] + corpus.train_stop - 1) // corpus.train_stop
     for data_seed in data_seeds:
-        corpus.shuffled_epochs(data_seed).prepare(passes)
+        corpus.shuffled_epochs(data_seed).prepare(required_passes)
 
     settings = RunSettings(
         train_sizes=train_sizes,
@@ -629,9 +623,7 @@ def validate_raw(
     evaluation = raw.loc[raw["phase"] == "evaluation"]
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=train_pool_size,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
     experiment = (PROTOCOL, OPTIMIZER, train_pool_size)
     expected_curves = {

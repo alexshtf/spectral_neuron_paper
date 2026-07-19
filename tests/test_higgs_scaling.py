@@ -324,29 +324,15 @@ def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_r
     assert len(summary) == 10
 
 
-def test_full_profile_resolves_requested_grid_and_runtime_pass_landmarks():
+def test_full_profile_resolves_only_requested_checkpoints():
     profile = PROFILES["full"]
 
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=10_000_000,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
     assert profile.train_sizes[-1] == 2**24
-    assert 10_000_000 not in profile.train_sizes
-    assert train_sizes == (
-        2**12,
-        2**14,
-        2**16,
-        2**18,
-        2**20,
-        2**22,
-        2**23,
-        10_002_432,
-        2**24,
-        20_000_000,
-    )
+    assert train_sizes == profile.train_sizes
 
 
 def test_default_result_path_does_not_target_legacy_one_pass_results():

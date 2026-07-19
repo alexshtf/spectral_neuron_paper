@@ -9,13 +9,14 @@ Within one trajectory, `data_seed` initializes a deterministic stream of success
 fresh permutations of the fixed training pool. The permutations are concatenated and
 batched as one stream rather than batched separately; a minibatch may therefore cross a
 pass boundary. The first permutation preserves the earlier seeded one-pass order, while
-later permutations are fresh and deterministic. Nonterminal checkpoint requests round
-up to the next global minibatch boundary, and result rows report those actual
-`train_size` counts together with the fixed `train_pool_size`. Thus the x-axis is
-examples seen by the optimizer, not the number of distinct available rows. The full
-profile for every dataset includes a one-pass landmark rounded forward to the next
-global minibatch boundary, then ends exactly at `2 * train_pool_size`, after two
-complete passes through the pool.
+later permutations are fresh and deterministic. The profile's explicit `train_sizes`
+are the only evaluation checkpoints, and their maximum is the final training budget.
+The runner automatically creates as many permutations as that budget requires; dataset
+pass boundaries do not add checkpoints or change the endpoint. Nonterminal checkpoint
+requests must lie on global minibatch boundaries; the final checkpoint may end with a
+partial minibatch. Result rows report the explicit `train_size` counts together with the
+fixed `train_pool_size`. Thus the x-axis is examples seen by the optimizer, not the
+number of distinct available rows.
 
 At every resolved `train_size`, each model-capacity configuration selects the learning
 rate with the best median validation metric across tuning seeds: log loss for HIGGS and
@@ -31,10 +32,10 @@ repeated-shuffle output. Use `--write-mode overwrite` for the first shard and
 `--write-mode append` only for later shards. Append mode checks that a nonempty CSV's
 header exactly matches the new result columns. Repeated-shuffle rows include
 `train_pool_size`, so do not append them to legacy one-pass results. Existing locally
-generated HIGGS and MovieLens repeated-shuffle files use the old final-checkpoint
-selection contract and must be overwritten before analysis. The committed unsuffixed
-CSVs under `notebooks/runs/` are retained as historical provenance and are unsuitable
-for claims that rely on the aligned protocol.
+generated repeated-shuffle files with injected pass-boundary checkpoints use the old
+contract and must be overwritten before analysis. The committed unsuffixed CSVs under
+`notebooks/runs/` are retained as historical provenance and are unsuitable for claims
+that rely on the aligned protocol.
 
 ## MovieLens scaling experiment
 
@@ -71,12 +72,12 @@ uv run python -m paper.experiments.movielens_scaling \
   --workers 2
 ```
 
-The `small` profile is the inexpensive capacity pilot. The `full` profile resolves its
-checkpoints from the training-pool size at runtime, includes the batch-rounded one-pass
-landmark, and ends exactly at the end of the second pass. The recorded warm coverage
-shows how much early checkpoints are still affected by unseen identities. The shared
-per-checkpoint validation-selection contract applies. For example, start a sharded full
-run with `linear`, then append `fm` to the same file:
+The `small` profile is the inexpensive capacity pilot. The `full` profile evaluates its
+explicit power-of-two grid through `2**24` and stops there. If that budget exceeds the
+training-pool size, the stream automatically continues into a fresh permutation. The
+recorded warm coverage shows how much early checkpoints are still affected by unseen
+identities. The shared per-checkpoint validation-selection contract applies. For
+example, start a sharded full run with `linear`, then append `fm` to the same file:
 
 ```bash
 uv run python -m paper.experiments.movielens_scaling \
@@ -107,8 +108,10 @@ default this roughly 1.25 GB base cache lives in `.HIGGS.csv.cache-v1` beside th
 Use `--cache-dir` to place it elsewhere. Existing base caches remain valid; repeated
 shuffling adds versioned order caches separately.
 
-The shared per-checkpoint validation-selection contract applies. The full profile ends
-at 20 million examples seen, exactly two passes over the 10-million-row training pool.
+The shared per-checkpoint validation-selection contract applies. The full profile
+evaluates its explicit power-of-two grid through `2**24` and stops there. Because that
+budget exceeds the 10-million-row training pool, the stream automatically draws its
+remaining examples from a second deterministic shuffle.
 
 The comparison contains linear and spectral models plus one-, two-, and three-hidden-
 layer ReLU MLP families. Hidden layers within an MLP have constant width. Widths are
@@ -160,12 +163,13 @@ need to be rebuilt or deleted.
 
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
 training split. Each model then consumes the repeated-shuffle stream using Adam, with
-validation measurements taken at every resolved examples-seen checkpoint. Dense
+validation measurements taken at every requested examples-seen checkpoint. Dense
 parameters use Adam and sparse embedding tables use SparseAdam.
-The full profile includes the batch-rounded one-pass landmark and ends exactly after
-two complete passes over the 80% training pool. Its four evaluation data-order seeds
-are held out from tuning. Evaluation initialization seeds are 3 through 8: seeds 3
-through 7 overlap tuning, while only seed 8 is new.
+The full profile evaluates its explicit power-of-two grid through `2**26` and stops
+there; the stream automatically creates however many training-pool permutations that
+budget requires. Its four evaluation data-order seeds are held out from tuning.
+Evaluation initialization seeds are 3 through 8: seeds 3 through 7 overlap tuning,
+while only seed 8 is new.
 The default run compares five variants: linear, FM, and spectral models with bucketed
 numerics, plus linear and spectral models with hybrid numerical preprocessing. In the
 hybrid representation, missing, zero, and negative values are indicators while positive

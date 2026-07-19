@@ -38,13 +38,12 @@ def _write_ratings(path: Path, users: int = 6, movies: int = 10) -> None:
 
 def _tiny_profile() -> Profile:
     return Profile(
-        train_sizes=(8, 16),
+        train_sizes=(8, 16, 56),
         dims=(3,),
         lrs=(1e-2, 1e-1),
         tuning_seeds=SeedGrid(init_seeds=range(2)),
         evaluation_seeds=SeedGrid(data_seeds=range(1, 2), init_seeds=range(1, 2)),
         batch_size=8,
-        passes=2,
     )
 
 
@@ -129,7 +128,7 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
 
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
-    assert set(tuning["train_size"]) == {8, 16, 48, 96}
+    assert set(tuning["train_size"]) == {8, 16, 56}
     assert tuning["val_rmse"].notna().all()
     assert tuning["val_warm_fraction"].between(0, 1).all()
     assert (tuning.loc[tuning["train_size"] < 48, "val_warm_fraction"] < 1).any()
@@ -163,8 +162,8 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
     )
     np.testing.assert_allclose(observed["lr"], observed["expected_lr"])
 
-    assert set(summary["train_size"]) == {8, 16, 48, 96}
-    assert len(summary) == 12
+    assert set(summary["train_size"]) == {8, 16, 56}
+    assert len(summary) == 9
 
     combined = pd.concat(
         (raw, raw.assign(train_pool_size=raw["train_pool_size"] + 8)),
@@ -173,11 +172,10 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
     assert len(summarize_raw(combined)) == 2 * len(summary)
 
 
-def test_full_profile_requests_power_of_two_grid_and_two_runtime_passes():
+def test_full_profile_uses_only_the_requested_power_of_two_grid():
     profile = PROFILES["full"]
 
     assert profile.train_sizes == tuple(2**power for power in range(20, 25))
-    assert profile.passes == 2
 
 
 def test_default_path_isolated_from_legacy_one_pass_results():

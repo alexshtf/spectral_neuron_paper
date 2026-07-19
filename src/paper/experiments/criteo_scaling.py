@@ -115,7 +115,6 @@ class Profile:
     preprocessor_seed: int = 0
     min_count: int = 10
     buckets_per_field: int = 2**15
-    passes: int | None = None
 
     def __post_init__(self) -> None:
         if not self.train_sizes or self.train_sizes != tuple(
@@ -128,8 +127,6 @@ class Profile:
             raise ValueError("batch_size must be positive")
         if not 0 < self.preprocessor_fraction <= 1:
             raise ValueError("preprocessor_fraction must be in (0, 1]")
-        if self.passes is not None and self.passes <= 0:
-            raise ValueError("passes must be positive")
 
 
 PROFILES: dict[str, Profile] = {
@@ -161,7 +158,6 @@ PROFILES: dict[str, Profile] = {
             init_seeds=range(3, 9),
         ),
         batch_size=4096,
-        passes=2,
     ),
 }
 
@@ -375,9 +371,7 @@ def run_profile(
     )
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=corpus.train_stop,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
 
     sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
@@ -543,9 +537,7 @@ def validate_raw(
 
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=train_pool_size,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
     experiment = (
         PROTOCOL,

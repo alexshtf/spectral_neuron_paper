@@ -87,7 +87,6 @@ class Profile:
     evaluation_seeds: SeedGrid
     batch_size: int = 4096
     split_seed: int = 0
-    passes: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -113,8 +112,6 @@ class Profile:
             raise ValueError("tuning and evaluation seed grids must be non-empty")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.passes is not None and self.passes <= 0:
-            raise ValueError("passes must be positive when specified")
 
 
 PROFILES: dict[str, Profile] = {
@@ -143,7 +140,6 @@ PROFILES: dict[str, Profile] = {
         evaluation_seeds=SeedGrid(
             data_seeds=range(1, 3), init_seeds=range(4, 8)
         ),
-        passes=2,
     ),
 }
 
@@ -388,9 +384,7 @@ def run_profile(
     )
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=corpus.train_rows,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
 
     variants = (variant,) if variant is not None else VARIANTS
@@ -400,9 +394,9 @@ def run_profile(
         *profile.tuning_seeds.data_seeds,
         *profile.evaluation_seeds.data_seeds,
     }
-    passes = (train_sizes[-1] + corpus.train_rows - 1) // corpus.train_rows
+    required_passes = (train_sizes[-1] + corpus.train_rows - 1) // corpus.train_rows
     for data_seed in data_seeds:
-        corpus.shuffled_epochs(data_seed).prepare(passes)
+        corpus.shuffled_epochs(data_seed).prepare(required_passes)
     warm_coverage = {
         data_seed: MovieLensTask(corpus, data_seed, profile.batch_size).warm_coverage(
             train_sizes
@@ -527,9 +521,7 @@ def validate_raw(
 
     train_sizes = resolve_train_sizes(
         profile.train_sizes,
-        train_pool_size=train_pool_size,
         batch_size=profile.batch_size,
-        passes=profile.passes,
     )
 
     variants = (variant,) if variant is not None else VARIANTS

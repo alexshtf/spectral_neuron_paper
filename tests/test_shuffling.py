@@ -70,12 +70,12 @@ def test_invalid_cached_order_is_replaced_atomically(tmp_path: Path):
 
 def test_batches_are_global_across_pass_boundaries(tmp_path: Path):
     shuffled = ShuffledEpochs(tmp_path, size=5, seed=4)
-    stream = np.concatenate(_successive_orders(5, seed=4, passes=2))
+    stream = np.concatenate(_successive_orders(5, seed=4, passes=3))
 
-    batches = list(shuffled.batches(stop=10, batch_size=4))
+    batches = list(shuffled.batches(stop=12, batch_size=4))
 
-    assert list(map(len, batches)) == [4, 4, 2]
-    for start, actual in zip(range(0, 10, 4), batches, strict=True):
+    assert list(map(len, batches)) == [4, 4, 4]
+    for start, actual in zip(range(0, 12, 4), batches, strict=True):
         np.testing.assert_array_equal(actual, np.sort(stream[start : start + 4]))
     assert stream[4] in batches[1]
     for row in stream[5:8]:
@@ -86,24 +86,14 @@ def test_batches_are_global_across_pass_boundaries(tmp_path: Path):
         np.testing.assert_array_equal(actual, expected)
 
 
-def test_resolve_train_sizes_rounds_dedupes_and_keeps_terminal_exact():
-    assert resolve_train_sizes(
-        (1, 2, 4, 5, 6, 9, 10, 11),
-        train_pool_size=5,
-        batch_size=4,
-        passes=2,
-    ) == (4, 8, 10)
-    assert resolve_train_sizes(
-        (3, 5, 7),
-        train_pool_size=100,
-        batch_size=4,
-    ) == (4, 7)
-    assert resolve_train_sizes(
-        (1,),
-        train_pool_size=3,
-        batch_size=8,
-        passes=2,
-    ) == (6,)
+def test_resolve_train_sizes_preserves_explicit_batch_aligned_checkpoints():
+    assert resolve_train_sizes((4, 8, 11), batch_size=4) == (4, 8, 11)
+    assert resolve_train_sizes((1,), batch_size=8) == (1,)
+
+
+def test_resolve_train_sizes_rejects_unaligned_nonterminal_checkpoints():
+    with pytest.raises(ValueError, match="nonterminal train sizes"):
+        resolve_train_sizes((1, 2, 5), batch_size=4)
 
 
 @pytest.mark.parametrize(
@@ -113,7 +103,7 @@ def test_resolve_train_sizes_rounds_dedupes_and_keeps_terminal_exact():
         (lambda path: ShuffledEpochs(path, 3, True), "seed"),
         (lambda path: list(ShuffledEpochs(path, 3, 0).batches(True, 1)), "stop"),
         (
-            lambda _: resolve_train_sizes((True,), train_pool_size=3, batch_size=1),
+            lambda _: resolve_train_sizes((True,), batch_size=1),
             "requested train size",
         ),
     ],

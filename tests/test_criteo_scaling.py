@@ -290,19 +290,19 @@ def test_encoded_cache_is_canonical_and_tasks_gather_shuffled_batches(tmp_path):
             assert (recovered.train / "complete").exists()
 
 
-def test_full_profile_runs_through_two_passes():
+def test_full_profile_ends_at_its_largest_requested_checkpoint():
     profile = PROFILES["full"]
 
+    assert profile.train_sizes == tuple(2**power for power in range(12, 27, 2))
     assert profile.train_sizes[-1] == 2**26
-    assert profile.passes == 2
 
 
-def test_two_pass_profile_ends_at_exactly_twice_the_training_pool(tmp_path):
+def test_profile_evaluates_only_its_requested_train_sizes(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
     profile = Profile(
-        train_sizes=(16,),
+        train_sizes=(16, 161),
         dims=(3,),
         lrs=(1e-3,),
         tuning_seeds=SeedGrid(),
@@ -310,7 +310,6 @@ def test_two_pass_profile_ends_at_exactly_twice_the_training_pool(tmp_path):
         batch_size=16,
         min_count=2,
         buckets_per_field=32,
-        passes=2,
     )
 
     raw = run_profile(
@@ -320,8 +319,9 @@ def test_two_pass_profile_ends_at_exactly_twice_the_training_pool(tmp_path):
         variant="linear",
     )
 
-    train_pool_size = raw["train_pool_size"].unique().item()
-    assert raw.groupby("phase")["train_size"].max().eq(2 * train_pool_size).all()
+    assert raw["train_pool_size"].unique().item() == 80
+    assert set(raw["train_size"]) == {16, 161}
+    assert raw.groupby("phase")["train_size"].nunique().eq(2).all()
 
 
 def test_tiny_profile_runs_end_to_end(tmp_path):

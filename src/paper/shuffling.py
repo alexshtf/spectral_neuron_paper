@@ -118,9 +118,7 @@ class ShuffledEpochs:
 def resolve_train_sizes(
     requested: Iterable[int],
     *,
-    train_pool_size: int,
     batch_size: int,
-    passes: int | None = None,
 ) -> tuple[int, ...]:
     requested = tuple(_positive("requested train size", size) for size in requested)
     if not requested or requested != tuple(sorted(set(requested))):
@@ -128,21 +126,7 @@ def resolve_train_sizes(
             "requested train sizes must be positive, unique, and increasing"
         )
 
-    train_pool_size = _positive("train_pool_size", train_pool_size)
     batch_size = _positive("batch_size", batch_size)
-    if passes is None:
-        terminal = requested[-1]
-        candidates = requested[:-1]
-    else:
-        passes = _positive("passes", passes)
-        terminal = passes * train_pool_size
-        candidates = (
-            *(size for size in requested if size < terminal),
-            *(epoch * train_pool_size for epoch in range(1, passes)),
-        )
-
-    rounded = {
-        min(terminal, ((size + batch_size - 1) // batch_size) * batch_size)
-        for size in candidates
-    }
-    return (*sorted(size for size in rounded if size < terminal), terminal)
+    if any(size % batch_size for size in requested[:-1]):
+        raise ValueError("nonterminal train sizes must be divisible by batch_size")
+    return requested
