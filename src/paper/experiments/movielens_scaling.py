@@ -138,8 +138,8 @@ PROFILES: dict[str, Profile] = {
     "full": Profile(
         train_sizes=(2**20, 2**21, 2**22, 2**23, 2**24),
         dims=(3, 7, 11),
-        lrs=tuple(np.geomspace(1e-3, 1e-1, 6).tolist()),
-        tuning_seeds=SeedGrid(init_seeds=range(4)),
+        lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
+        tuning_seeds=SeedGrid(init_seeds=range(8)),
         evaluation_seeds=SeedGrid(
             data_seeds=range(1, 3), init_seeds=range(4, 8)
         ),
