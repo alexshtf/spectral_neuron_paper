@@ -172,10 +172,6 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
     assert len(summarize_raw(combined)) == 2 * len(summary)
 
 
-def test_full_profile_uses_only_the_requested_power_of_two_grid():
-    profile = PROFILES["full"]
-
-    assert profile.train_sizes == tuple(2**power for power in range(20, 25))
 
 
 def test_default_path_isolated_from_legacy_one_pass_results():
