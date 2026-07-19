@@ -462,7 +462,7 @@ def _movielens_results() -> pd.DataFrame:
             }
         )
         for dim, (rank, parameters) in capacities.items():
-            for model in ("fm", "spectral"):
+            for model in ("fm", "spectral", "spectral-max"):
                 rows.append(
                     common
                     | {
@@ -488,26 +488,84 @@ def test_plot_movielens_models_facets_matched_capacity():
         "dim=3 · 6 parameters/identity\nFM rank=5",
         "dim=5 · 15 parameters/identity\nFM rank=14",
     ]
-    assert _legend_labels(figure) == ["Linear", "FM", "Spectral"]
+    assert _legend_labels(figure) == [
+        "Linear",
+        "FM",
+        "Spectral",
+        "Spectral max",
+    ]
     assert all(
-        sum(line.get_label().startswith("_child") for line in ax.lines) == 3
+        sum(line.get_label().startswith("_child") for line in ax.lines) == 4
         for ax in figure.axes
     )
-    assert all(len(ax.collections) == 3 for ax in figure.axes)
+    assert all(len(ax.collections) == 4 for ax in figure.axes)
+    lines = [
+        line
+        for line in figure.axes[0].lines
+        if line.get_label().startswith("_child")
+    ]
+    assert [line.get_marker() for line in lines] == [
+        "o",
+        "s",
+        "^",
+        "D",
+    ]
+    assert len({line.get_color() for line in lines}) == 4
     assert figure.axes[0].get_ylabel() == "test RMSE ↓"
 
 
 @pytest.mark.parametrize(
-    ("model", "legend_title", "labels"),
-    [("spectral", "dimension", ["3", "5"]), ("fm", "rank", ["5", "14"])],
+    ("model", "legend_title", "labels", "title"),
+    [
+        (
+            "spectral",
+            "dimension",
+            ["3", "5"],
+            "MovieLens test RMSE: spectral neurons across dimensions",
+        ),
+        (
+            "spectral-max",
+            "dimension",
+            ["3", "5"],
+            (
+                "MovieLens test RMSE: maximum-eigenvalue spectral neurons "
+                "across dimensions"
+            ),
+        ),
+        (
+            "fm",
+            "rank",
+            ["5", "14"],
+            "MovieLens test RMSE: FM across embedding ranks",
+        ),
+    ],
 )
-def test_plot_movielens_dimensions_uses_one_axis(model, legend_title, labels):
+def test_plot_movielens_dimensions_uses_one_axis(
+    model, legend_title, labels, title
+):
     figure = plot_movielens_dimensions(_movielens_results(), model)
 
     assert len(figure.axes) == 1
     assert _legend_labels(figure) == labels
     assert figure.legends[0].get_title().get_text() == legend_title
     assert len(figure.axes[0].collections) == 2
+    assert figure._suptitle.get_text() == title
+
+
+def test_plot_movielens_models_supports_spectral_max_without_middle_family():
+    results = _movielens_results().loc[lambda df: df["model"] != "spectral"]
+
+    figure = plot_movielens_models_by_dimension(results)
+
+    assert [ax.get_title() for ax in figure.axes] == [
+        "dim=3 · 6 parameters/identity\nFM rank=5",
+        "dim=5 · 15 parameters/identity\nFM rank=14",
+    ]
+    assert _legend_labels(figure) == ["Linear", "FM", "Spectral max"]
+    assert all(
+        sum(line.get_label().startswith("_child") for line in ax.lines) == 3
+        for ax in figure.axes
+    )
 
 
 def test_plot_movielens_warm_coverage_deduplicates_model_runs():

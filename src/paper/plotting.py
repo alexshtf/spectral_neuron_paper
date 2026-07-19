@@ -69,28 +69,35 @@ MOVIELENS_MODEL_LABELS = {
     "linear": "Linear",
     "fm": "FM",
     "spectral": "Spectral",
+    "spectral-max": "Spectral max",
 }
 
 MOVIELENS_MODEL_COLORS = {
     "Linear": "#555555",
     "FM": "#0173B2",
     "Spectral": "#029E73",
+    "Spectral max": "#DE8F05",
 }
 
 MOVIELENS_MODEL_MARKERS = {
     "Linear": "o",
     "FM": "s",
     "Spectral": "^",
+    "Spectral max": "D",
 }
 
 MOVIELENS_MODEL_DASHES = {
     "Linear": "",
     "FM": (4, 2),
     "Spectral": "",
+    "Spectral max": (2, 2),
 }
 
+MOVIELENS_SPECTRAL_MODELS = ("spectral", "spectral-max")
+MOVIELENS_NONLINEAR_MODELS = ("fm", *MOVIELENS_SPECTRAL_MODELS)
+
 type FigureContainer = Figure | SubFigure
-type MovieLensNonlinearModel = Literal["fm", "spectral"]
+type MovieLensNonlinearModel = Literal["fm", "spectral", "spectral-max"]
 
 
 def _subplot_matrix(
@@ -963,7 +970,12 @@ def _check_movielens_results(results: pd.DataFrame) -> None:
 def _movielens_dimensions(results: pd.DataFrame) -> list[int]:
     _check_movielens_results(results)
     dimensions = sorted(
-        map(int, results.loc[results["model"] == "spectral", "dim"].unique())
+        map(
+            int,
+            results.loc[
+                results["model"].isin(MOVIELENS_SPECTRAL_MODELS), "dim"
+            ].unique(),
+        )
     )
     if not dimensions:
         raise ValueError("results contain no spectral models")
@@ -972,26 +984,39 @@ def _movielens_dimensions(results: pd.DataFrame) -> list[int]:
 
 def _movielens_capacity_title(results: pd.DataFrame, dim: int) -> str:
     parameters = results.loc[
-        (results["model"] == "spectral") & (results["dim"] == dim),
+        results["model"].isin(MOVIELENS_SPECTRAL_MODELS)
+        & (results["dim"] == dim),
         "parameters_per_identity",
-    ].iat[0]
-    rank = results.loc[
+    ].unique()
+    ranks = results.loc[
         (results["model"] == "fm") & (results["dim"] == dim), "rank"
-    ].iat[0]
-    return f"dim={dim} · {int(parameters)} parameters/identity\nFM rank={int(rank)}"
+    ].unique()
+    if len(parameters) != 1 or len(ranks) != 1:
+        raise ValueError(f"dimension {dim} does not have one matched capacity")
+    return (
+        f"dim={dim} · {int(parameters[0])} parameters/identity\n"
+        f"FM rank={int(ranks[0])}"
+    )
 
 
 def plot_movielens_models_by_dimension(results: pd.DataFrame) -> Figure:
     """Compare linear, FM, and spectral rating models at matched capacity."""
     dimensions = _movielens_dimensions(results)
-    nonlinear = results.loc[results["model"].isin(("fm", "spectral"))].copy()
+    nonlinear = results.loc[
+        results["model"].isin(MOVIELENS_NONLINEAR_MODELS)
+    ].copy()
     nonlinear["dimension"] = nonlinear["dim"].astype(int)
     linears = results.loc[results["model"] == "linear"].merge(
         pd.DataFrame({"dimension": dimensions}), how="cross"
     )
     faceted = pd.concat((linears, nonlinear), ignore_index=True)
     faceted["model_label"] = faceted["model"].map(MOVIELENS_MODEL_LABELS)
-    model_order = list(MOVIELENS_MODEL_LABELS.values())
+    present_models = set(faceted["model"])
+    model_order = [
+        label
+        for model, label in MOVIELENS_MODEL_LABELS.items()
+        if model in present_models
+    ]
 
     figure = _scaling_relplot(
         faceted,
@@ -1018,9 +1043,9 @@ def plot_movielens_dimensions(
     *,
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
-    """Compare spectral dimensions or their parameter-matched FM ranks."""
+    """Compare capacities within one nonlinear MovieLens model family."""
     _check_movielens_results(results)
-    if model not in ("fm", "spectral"):
+    if model not in MOVIELENS_NONLINEAR_MODELS:
         raise ValueError(f"unknown nonlinear MovieLens model {model!r}")
 
     subset = results.loc[results["model"] == model]
@@ -1029,11 +1054,11 @@ def plot_movielens_dimensions(
     capacity = "rank" if model == "fm" else "dim"
     values = sorted(map(int, subset[capacity].unique()))
     palette, markers = _dimension_styles(values)
-    family = (
-        "FM across embedding ranks"
-        if model == "fm"
-        else "spectral neurons across dimensions"
-    )
+    family = {
+        "fm": "FM across embedding ranks",
+        "spectral": "spectral neurons across dimensions",
+        "spectral-max": "maximum-eigenvalue spectral neurons across dimensions",
+    }[model]
     legend = "rank" if model == "fm" else "dimension"
     return _scaling_relplot(
         subset,

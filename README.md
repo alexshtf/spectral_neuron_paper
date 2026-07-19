@@ -58,8 +58,9 @@ Users and movies are mapped to compact, disjoint ID ranges. There is no hashing 
 fitted feature preprocessing. Ratings are shifted by the fixed midpoint of the official
 0.5--5 scale for optimization; RMSE is unchanged and remains in rating units.
 For a spectral dimension `d`, each identity has `d * (d + 1) // 2` matrix coordinates.
-The matched FM rank is one less, because its per-identity linear bias consumes the
-remaining parameter.
+The `spectral` variant selects the middle eigenvalue, while `spectral-max` selects the
+largest eigenvalue of the same matrix pencil. The matched FM rank is one less, because
+its per-identity linear bias consumes the remaining parameter.
 
 The runner accepts `ratings.csv`, its containing directory, or the official MovieLens
 ZIP. The first invocation writes compact NumPy memory maps to a reusable base cache.
@@ -91,7 +92,18 @@ uv run python -m paper.experiments.movielens_scaling \
   --write-mode append
 ```
 
-Append the `spectral` shard in the same way.
+Append the `spectral` shard in the same way, followed by the largest-eigenvalue shard:
+
+```bash
+uv run python -m paper.experiments.movielens_scaling \
+  --data ~/datasets/ml-20m.zip --profile full --variant spectral-max \
+  --out notebooks/runs/movielens_scaling_full_repeated_shuffle.csv \
+  --write-mode append
+```
+
+The merged full-profile result is complete only after it contains `linear`, `fm`,
+`spectral`, and `spectral-max` rows. Append each shard once and sequentially; the result
+validator rejects duplicate trajectory checkpoints.
 
 ## HIGGS scaling experiment
 

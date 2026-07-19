@@ -36,9 +36,14 @@ from paper.training import (
 )
 
 
-type Variant = Literal["linear", "fm", "spectral"]
+type Variant = Literal["linear", "fm", "spectral", "spectral-max"]
 
-VARIANTS: tuple[Variant, ...] = ("linear", "fm", "spectral")
+VARIANTS: tuple[Variant, ...] = (
+    "linear",
+    "fm",
+    "spectral",
+    "spectral-max",
+)
 NUM_FIELDS = 2
 OPTIMIZER = "adam+sparseadam"
 
@@ -183,7 +188,8 @@ def _model_specs(
     specs.extend(
         MovieLensModelSpec(variant, dim)
         for dim in profile.dims
-        for variant in ("fm", "spectral")
+        for variant in VARIANTS
+        if variant != "linear"
     )
     return tuple(spec for spec in specs if spec.variant in variants)
 
@@ -202,6 +208,13 @@ def make_model(spec: MovieLensModelSpec, num_features: int) -> nn.Module:
             return FactorizationMachine(num_features, NUM_FIELDS, spec.rank)
         case "spectral":
             return SparseKthEigval(num_features, NUM_FIELDS, spec.dim)
+        case "spectral-max":
+            return SparseKthEigval(
+                num_features,
+                NUM_FIELDS,
+                spec.dim,
+                eig_idx=spec.dim - 1,
+            )
         case _:
             raise ValueError(spec.variant)
 

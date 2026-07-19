@@ -9,16 +9,19 @@ from paper.experiments.movielens_scaling import (
     CURVE_COLUMNS,
     PROFILES,
     RAW_COLUMNS,
+    VARIANTS,
     MovieLensModelSpec,
     Profile,
     SeedGrid,
     _make_seeded_model,
+    build_arg_parser,
     default_raw_path,
     make_model,
     run_profile,
     summarize_raw,
     validate_raw,
 )
+from paper.experiments.synthetic import write_csv
 from paper.models import FactorizationMachine
 
 
@@ -83,16 +86,41 @@ def test_two_field_fm_is_biased_matrix_factorization():
 def test_parameter_matching_is_per_identity():
     fm_spec = MovieLensModelSpec("fm", 3)
     spectral_spec = MovieLensModelSpec("spectral", 3)
+    spectral_max_spec = MovieLensModelSpec("spectral-max", 3)
     num_features = 17
 
     fm = make_model(fm_spec, num_features)
     spectral = make_model(spectral_spec, num_features)
+    spectral_max = make_model(spectral_max_spec, num_features)
 
     assert fm_spec.rank == 5
-    assert fm_spec.parameters_per_identity == spectral_spec.parameters_per_identity == 6
+    assert {
+        fm_spec.parameters_per_identity,
+        spectral_spec.parameters_per_identity,
+        spectral_max_spec.parameters_per_identity,
+    } == {6}
     assert sum(p.numel() for p in spectral.parameters()) - sum(
         p.numel() for p in fm.parameters()
     ) == 5
+    assert sum(p.numel() for p in spectral_max.parameters()) == sum(
+        p.numel() for p in spectral.parameters()
+    )
+
+
+def test_spectral_variants_select_middle_and_max_eigenvalues():
+    ids = torch.tensor([[0, 1]])
+    base_tril = torch.tensor([-2.0, 0.0, 1.0, 0.0, 0.0, 4.0])
+
+    outputs = {}
+    for variant in ("spectral", "spectral-max"):
+        model = make_model(MovieLensModelSpec(variant, 3), num_features=2)
+        with torch.no_grad():
+            model.feature_tril.weight.zero_()
+            model.base_tril.copy_(base_tril)
+        outputs[variant] = model(ids)
+
+    torch.testing.assert_close(outputs["spectral"], torch.tensor([1.0]))
+    torch.testing.assert_close(outputs["spectral-max"], torch.tensor([4.0]))
 
 
 def test_seeded_construction_preserves_global_rng():
@@ -105,12 +133,19 @@ def test_seeded_construction_preserves_global_rng():
     second = _make_seeded_model(
         MovieLensModelSpec("spectral", 3), num_features=17, init_seed=5
     )
+    maximum = _make_seeded_model(
+        MovieLensModelSpec("spectral-max", 3), num_features=17, init_seed=5
+    )
 
     assert torch.equal(torch.random.get_rng_state(), state)
     for first_parameter, second_parameter in zip(
         first.parameters(), second.parameters(), strict=True
     ):
         torch.testing.assert_close(first_parameter, second_parameter)
+    for middle_parameter, maximum_parameter in zip(
+        first.parameters(), maximum.parameters(), strict=True
+    ):
+        torch.testing.assert_close(middle_parameter, maximum_parameter)
 
 
 def test_tiny_profile_runs_end_to_end(complete_raw):
@@ -120,7 +155,7 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
     summary = summarize_raw(raw)
 
     assert list(raw.columns) == RAW_COLUMNS
-    assert set(raw["model"]) == {"linear", "fm", "spectral"}
+    assert set(raw["model"]) == set(VARIANTS)
     assert set(raw["protocol"]) == {"repeated_shuffle"}
     assert set(raw["optimizer"]) == {"adam+sparseadam"}
     assert set(raw["phase"]) == {"tuning", "evaluation"}
@@ -163,15 +198,13 @@ def test_tiny_profile_runs_end_to_end(complete_raw):
     np.testing.assert_allclose(observed["lr"], observed["expected_lr"])
 
     assert set(summary["train_size"]) == {8, 16, 56}
-    assert len(summary) == 9
+    assert len(summary) == len(VARIANTS) * len(profile.train_sizes)
 
     combined = pd.concat(
         (raw, raw.assign(train_pool_size=raw["train_pool_size"] + 8)),
         ignore_index=True,
     )
     assert len(summarize_raw(combined)) == 2 * len(summary)
-
-
 
 
 def test_default_path_isolated_from_legacy_one_pass_results():
@@ -183,12 +216,58 @@ def test_default_path_isolated_from_legacy_one_pass_results():
         default_raw_path("full", "fm").name
         == "movielens_scaling_full_repeated_shuffle_fm.csv"
     )
+    assert default_raw_path("full", "spectral-max").name == (
+        "movielens_scaling_full_repeated_shuffle_spectral-max.csv"
+    )
+
+
+def test_cli_accepts_spectral_max_append_shard():
+    args = build_arg_parser().parse_args(
+        [
+            "--data",
+            "ratings.csv",
+            "--variant",
+            "spectral-max",
+            "--write-mode",
+            "append",
+        ]
+    )
+
+    assert args.variant == "spectral-max"
+    assert args.write_mode == "append"
 
 
 def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw):
     validate_raw(complete_raw, _tiny_profile())
     linear = complete_raw.loc[complete_raw["model"] == "linear"].copy()
     validate_raw(linear, _tiny_profile(), variant="linear")
+    spectral_max = complete_raw.loc[
+        complete_raw["model"] == "spectral-max"
+    ].copy()
+    validate_raw(spectral_max, _tiny_profile(), variant="spectral-max")
+
+
+def test_spectral_max_shard_appends_to_complete_result(complete_raw, tmp_path):
+    path = tmp_path / "movielens.csv"
+    ratings = tmp_path / "ratings.csv"
+    _write_ratings(ratings)
+    existing = complete_raw.loc[complete_raw["model"] != "spectral-max"]
+    spectral_max = run_profile(
+        _tiny_profile(),
+        raw_path=ratings,
+        cache_dir=tmp_path / "cache",
+        variant="spectral-max",
+    )
+
+    assert set(spectral_max["model"]) == {"spectral-max"}
+    validate_raw(spectral_max, _tiny_profile(), variant="spectral-max")
+
+    write_csv(existing, path)
+    write_csv(spectral_max, path, write_mode="append")
+
+    combined = pd.read_csv(path)
+    validate_raw(combined, _tiny_profile())
+    assert set(combined["model"]) == set(VARIANTS)
 
 
 @pytest.mark.parametrize(
