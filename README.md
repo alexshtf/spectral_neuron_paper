@@ -73,11 +73,12 @@ uv run python -m paper.experiments.movielens_scaling \
 ```
 
 The `small` profile is the inexpensive capacity pilot. The `full` profile evaluates its
-explicit power-of-two grid through `2**24` and stops there. If that budget exceeds the
-training-pool size, the stream automatically continues into a fresh permutation. The
-recorded warm coverage shows how much early checkpoints are still affected by unseen
-identities. The shared per-checkpoint validation-selection contract applies. For
-example, start a sharded full run with `linear`, then append `fm` to the same file:
+explicit power-of-two grid from `2**18` through `2**26` and stops there. If that budget
+exceeds the training-pool size, the stream automatically continues into fresh
+permutations. The recorded warm coverage shows how much early checkpoints are still
+affected by unseen identities. The shared per-checkpoint validation-selection contract
+applies. For example, start a sharded full run with `linear`, then append `fm` to the
+same file:
 
 ```bash
 uv run python -m paper.experiments.movielens_scaling \
