@@ -90,6 +90,12 @@ def _assert_arrays(actual, expected):
             np.testing.assert_array_equal(actual_array, expected_array)
 
 
+def _global_ids(local_ids, field_offsets):
+    return np.asarray(local_ids, dtype=np.int32) + np.asarray(
+        field_offsets, dtype=np.int32
+    )
+
+
 def test_cli_accepts_append_mode():
     args = build_arg_parser().parse_args(
         ["--data", "train.txt", "--write-mode", "append"]
@@ -127,6 +133,7 @@ def test_bucket_preprocessor_uses_field_disjoint_hash_ranges():
     assert np.all(feature_ids < offsets + 16)
     assert feature_ids[0, NUM_NUMERIC_FIELDS] == NUM_NUMERIC_FIELDS * 16 + 1
     assert feature_ids[1, NUM_NUMERIC_FIELDS + 1] == (NUM_NUMERIC_FIELDS + 1) * 16
+    assert preprocessor.field_offsets.dtype == np.int32
     assert feature_values is None
 
 
@@ -151,6 +158,7 @@ def test_hybrid_preprocessor_separates_special_and_positive_values():
     assert feature_values[:5, 0].tolist() == [1.0] * 5
     assert feature_values[5, 0] == np.float32(np.log1p(1_000_000))
     assert preprocessor.num_numeric_features == 6 + 4 * (NUM_NUMERIC_FIELDS - 1)
+    assert preprocessor.field_offsets.dtype == np.int32
 
 
 def test_preprocessing_reports_progress(tmp_path):
@@ -195,7 +203,7 @@ def test_preprocessing_reports_progress(tmp_path):
     np.testing.assert_allclose(hybrid.positive_scale[0], scale if scale > 0 else 1.0)
 
 
-def test_encoded_cache_is_canonical_and_tasks_gather_shuffled_batches(tmp_path):
+def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path, rows=103)
@@ -224,8 +232,14 @@ def test_encoded_cache_is_canonical_and_tasks_gather_shuffled_batches(tmp_path):
             (data.holdout, slice(corpus.train_stop, corpus.rows)),
         )
         for split, rows in sources:
+            local_ids, feature_values, labels = load_encoded(split)
+            assert local_ids.dtype == np.uint16
             _assert_arrays(
-                load_encoded(split),
+                (
+                    _global_ids(local_ids, data.field_offsets),
+                    feature_values,
+                    labels,
+                ),
                 (
                     *preprocessor.encode(
                         np.asarray(corpus.numerics()[rows]),
@@ -249,12 +263,13 @@ def test_encoded_cache_is_canonical_and_tasks_gather_shuffled_batches(tmp_path):
             )
         )
         actual_labels = np.concatenate([labels.numpy() for _, labels in batches])
+        assert actual_ids.dtype == np.int32
         expected_rows = np.concatenate(list(order.batches(train_size, batch_size)))
         expected_ids, expected_values, expected_labels = load_encoded(data.train)
         _assert_arrays(
             (actual_ids, actual_values, actual_labels),
             (
-                expected_ids[expected_rows],
+                _global_ids(expected_ids[expected_rows], data.field_offsets),
                 None if expected_values is None else expected_values[expected_rows],
                 expected_labels[expected_rows],
             ),
@@ -381,7 +396,7 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
-    legacy = cache_dir / "encoded-v2" / "legacy"
+    legacy = cache_dir / "encoded-v3" / "legacy"
     legacy.mkdir(parents=True)
 
     raw = run_profile(
@@ -394,7 +409,7 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     assert set(raw["model"]) == {"linear-new"}
     assert len(list(cache_dir.glob("preprocessor-v1_*.pkl"))) == 1
     assert legacy.exists()
-    assert len(list((cache_dir / "encoded-v3").iterdir())) == 1
+    assert len(list((cache_dir / "encoded-v4").iterdir())) == 1
 
 
 def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw):

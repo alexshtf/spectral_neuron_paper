@@ -133,19 +133,12 @@ def test_seeded_construction_preserves_global_rng():
     second = _make_seeded_model(
         MovieLensModelSpec("spectral", 3), num_features=17, init_seed=5
     )
-    maximum = _make_seeded_model(
-        MovieLensModelSpec("spectral-max", 3), num_features=17, init_seed=5
-    )
 
     assert torch.equal(torch.random.get_rng_state(), state)
     for first_parameter, second_parameter in zip(
         first.parameters(), second.parameters(), strict=True
     ):
         torch.testing.assert_close(first_parameter, second_parameter)
-    for middle_parameter, maximum_parameter in zip(
-        first.parameters(), maximum.parameters(), strict=True
-    ):
-        torch.testing.assert_close(middle_parameter, maximum_parameter)
 
 
 def test_tiny_profile_runs_end_to_end(complete_raw):

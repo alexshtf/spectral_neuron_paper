@@ -3,7 +3,7 @@ name = "spectral-neuron-paper"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "fitstream>=0.3.1,<0.4.0",
     "jupyterlab>=4.6.0,<5.0.0",

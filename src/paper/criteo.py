@@ -32,8 +32,9 @@ COLUMNS = (LABEL, *NUMERIC_COLUMNS, *CATEGORICAL_COLUMNS)
 CACHE_VERSION = 2
 # Bump when the corresponding fitted or encoded artifact changes meaning.
 PREPROCESSOR_CACHE_VERSION = 1
-ENCODED_CACHE_VERSION = 3
+ENCODED_CACHE_VERSION = 4
 ENCODED_CHUNK_SIZE = 2**18
+FEATURE_ID_DTYPE = np.dtype(np.uint16)
 NUMERICS_FILE = "numerics.dat"
 CATEGORICALS_FILE = "categoricals.dat"
 LABELS_FILE = "labels.dat"
@@ -148,6 +149,7 @@ def prepare_corpus(
                     unit_scale=True,
                     disable=not progress,
                     file=progress_file,
+                    dynamic_ncols=True,
                 )
                 with progress_bar:
                     for chunk in chunks:
@@ -279,6 +281,10 @@ class BucketPreprocessor:
     def num_features(self) -> int:
         return NUM_FIELDS * self.buckets_per_field
 
+    @property
+    def field_offsets(self) -> np.ndarray:
+        return np.arange(NUM_FIELDS, dtype=np.int32) * self.buckets_per_field
+
     def encode(
         self,
         numerics: np.ndarray,
@@ -336,6 +342,15 @@ class HybridPreprocessor:
             self.num_numeric_features
             + NUM_CATEGORICAL_FIELDS * self.buckets_per_categorical_field
         )
+
+    @property
+    def field_offsets(self) -> np.ndarray:
+        categorical = (
+            self.num_numeric_features
+            + np.arange(NUM_CATEGORICAL_FIELDS, dtype=np.int32)
+            * self.buckets_per_categorical_field
+        )
+        return np.concatenate((self.numeric_offsets.astype(np.int32), categorical))
 
     def encode(
         self,
@@ -493,6 +508,7 @@ def fit_preprocessors(
         unit="field",
         disable=not progress,
         file=progress_file,
+        dynamic_ncols=True,
     )
     frequent = []
     for field in fields:
@@ -517,6 +533,7 @@ def fit_preprocessors(
             unit="field",
             disable=not progress,
             file=progress_file,
+            dynamic_ncols=True,
         )
         for field in fields:
             values = numerics[rows, field]
@@ -562,6 +579,7 @@ def load_encoded(path: Path) -> EncodedArrays:
 @dataclass(frozen=True)
 class EncodedData:
     num_features: int
+    field_offsets: tuple[int, ...]
     train: Path
     holdout: Path
     validation_rows: int
@@ -598,7 +616,7 @@ def _valid_encoded_split(
             and feature_values.shape == shape
         )
     return (
-        feature_ids.dtype == np.int32
+        feature_ids.dtype == FEATURE_ID_DTYPE
         and feature_ids.shape == shape
         and labels.dtype == np.uint8
         and labels.shape == (row_count,)
@@ -609,6 +627,7 @@ def _valid_encoded_split(
 def _write_encoded_split(
     corpus: CriteoCorpus,
     preprocessor: FittedPreprocessor,
+    field_offsets: np.ndarray,
     rows: range,
     path: Path,
     *,
@@ -620,7 +639,7 @@ def _write_encoded_split(
     row_count = len(rows)
     shape = (row_count, NUM_FIELDS)
     feature_ids = np.lib.format.open_memmap(
-        path / "feature_ids.npy", mode="w+", dtype=np.int32, shape=shape
+        path / "feature_ids.npy", mode="w+", dtype=FEATURE_ID_DTYPE, shape=shape
     )
     feature_values = (
         np.lib.format.open_memmap(
@@ -645,6 +664,7 @@ def _write_encoded_split(
         unit_scale=True,
         disable=not progress,
         file=progress_file,
+        dynamic_ncols=True,
     )
     with progress_bar:
         for start in range(0, row_count, chunk_size):
@@ -655,7 +675,7 @@ def _write_encoded_split(
                 np.asarray(categoricals[source.start : source.stop]),
             )
 
-            feature_ids[start:stop] = batch_ids
+            feature_ids[start:stop] = batch_ids - field_offsets
             if batch_values is not None:
                 feature_values[start:stop] = batch_values
             encoded_labels[start:stop] = labels[source.start : source.stop]
@@ -670,6 +690,7 @@ def _write_encoded_split(
 def _prepare_encoded_split(
     corpus: CriteoCorpus,
     preprocessor: FittedPreprocessor,
+    field_offsets: np.ndarray,
     rows: range,
     path: Path,
     *,
@@ -705,6 +726,7 @@ def _prepare_encoded_split(
             _write_encoded_split(
                 corpus,
                 preprocessor,
+                field_offsets,
                 rows,
                 temporary,
                 description=description,
@@ -732,6 +754,10 @@ def prepare_encoded_data(
     preprocessor = load_preprocessor(preprocessor_path)
     if preprocessor.num_features > np.iinfo(np.int32).max:
         raise ValueError("encoded feature ids do not fit in int32")
+    field_offsets = preprocessor.field_offsets
+    field_sizes = np.diff(np.append(field_offsets, preprocessor.num_features))
+    if np.any(field_sizes > np.iinfo(FEATURE_ID_DTYPE).max + 1):
+        raise ValueError("per-field feature ids do not fit in uint16")
 
     with preprocessor_path.open("rb") as file:
         digest = file_digest(file, "sha256").hexdigest()[:16]
@@ -745,6 +771,7 @@ def prepare_encoded_data(
         return _prepare_encoded_split(
             corpus,
             preprocessor,
+            field_offsets,
             rows,
             root / f"{name}_n{len(rows)}",
             description=f"Encoding {preprocessor.kind} {name}",
@@ -758,6 +785,7 @@ def prepare_encoded_data(
 
     return EncodedData(
         num_features=preprocessor.num_features,
+        field_offsets=tuple(map(int, field_offsets)),
         train=train,
         holdout=holdout,
         validation_rows=corpus.val_stop - corpus.train_stop,
@@ -771,10 +799,12 @@ class CriteoTask:
     batch_size: int
     _train_arrays: EncodedArrays = dataclass_field(init=False, repr=False)
     _holdout_arrays: EncodedArrays = dataclass_field(init=False, repr=False)
+    _field_offsets: np.ndarray = dataclass_field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._train_arrays = load_encoded(self.data.train)
         self._holdout_arrays = load_encoded(self.data.holdout)
+        self._field_offsets = np.asarray(self.data.field_offsets, dtype=np.int32)
         if self.order.size != len(self._train_arrays[0]):
             raise ValueError("shuffle size must match the encoded training split")
         if not 0 < self.data.validation_rows < len(self._holdout_arrays[0]):
@@ -804,8 +834,8 @@ class CriteoTask:
             batch_stop = min(batch_start + self.batch_size, stop)
             yield self._batch(arrays, slice(batch_start, batch_stop))
 
-    @staticmethod
     def _batch(
+        self,
         arrays: EncodedArrays,
         rows: slice | np.ndarray,
     ) -> BinaryBatch:
@@ -813,7 +843,9 @@ class CriteoTask:
         batch_values = (
             None if feature_values is None else np.asarray(feature_values[rows])
         )
-        batch_ids = torch.from_numpy(np.asarray(feature_ids[rows]))
+        batch_ids_array = np.asarray(feature_ids[rows], dtype=np.int32)
+        batch_ids_array += self._field_offsets
+        batch_ids = torch.from_numpy(batch_ids_array)
         model_inputs = (
             (batch_ids,)
             if batch_values is None

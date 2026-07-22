@@ -1,6 +1,7 @@
 import pandas as pd
+import pytest
 
-from paper.tuning import best_checkpoints, select_lr
+from paper.tuning import best_checkpoints, select_lr, summarize_raw
 
 
 def _row(
@@ -85,3 +86,35 @@ def test_seed_aggregation_is_median_not_minimum():
     selected = select_lr(best)
 
     assert selected["selected_lr"].unique().tolist() == [0.1]
+
+
+def test_summary_uses_the_checkpoint_grid_in_the_raw_results():
+    raw = pd.DataFrame(
+        [
+            _row(step=1, train_size=4, val_rmse=0.5, test_rmse=0.5),
+            _row(step=2, train_size=8, val_rmse=0.4, test_rmse=0.4),
+        ]
+    )
+
+    summary = summarize_raw(raw)
+
+    assert summary["train_size"].tolist() == [4, 8]
+
+
+def test_summary_rejects_inconsistent_checkpoint_grids():
+    raw = pd.DataFrame(
+        [
+            _row(step=1, train_size=4, val_rmse=0.5, test_rmse=0.5),
+            _row(step=2, train_size=8, val_rmse=0.4, test_rmse=0.4),
+            _row(
+                step=1,
+                train_size=4,
+                target_seed=1,
+                val_rmse=0.5,
+                test_rmse=0.5,
+            ),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="inconsistent train_size checkpoints"):
+        summarize_raw(raw)

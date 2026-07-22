@@ -3,10 +3,12 @@ import torch
 
 from paper.models import (
     FactorizationMachine,
+    KthEigval,
     KthEigvalLastMonotone,
     SparseKthEigval,
     SparseLinear,
     TrilEmbed,
+    square_plus,
 )
 
 
@@ -18,6 +20,95 @@ def test_tril_embed_outputs_symmetric():
 
     assert mat.shape == (3, 4, 4)
     assert torch.allclose(mat, mat.transpose(-1, -2))
+
+
+def _assert_centered_gapped_identity_initialization(
+    base_tril: torch.Tensor,
+    feature_tril: torch.Tensor,
+    *,
+    dim: int,
+    eig_idx: int,
+    fan_in: int,
+) -> torch.Tensor:
+    embed = TrilEmbed(dim)
+    base = embed(base_tril)
+    features = embed(feature_tril)
+
+    expected_spectrum = torch.arange(dim).sub(eig_idx).sign().to(base)
+    torch.testing.assert_close(torch.linalg.eigvalsh(base), expected_spectrum)
+    assert torch.count_nonzero(base - torch.diag_embed(base.diagonal())) > 0
+
+    coefficients = features[..., 0, 0]
+    identity = torch.eye(dim, device=features.device, dtype=features.dtype)
+    expected_features = coefficients[..., None, None] * identity
+    torch.testing.assert_close(features, expected_features)
+    assert torch.all(coefficients.abs() <= fan_in**-0.5)
+    return coefficients
+
+
+@pytest.mark.parametrize("eig_idx", [2, 4])
+def test_dense_spectral_initialization_is_centered_gapped_and_linear(eig_idx):
+    torch.manual_seed(0)
+    model = KthEigval(num_features=3, dim=5, eig_idx=eig_idx)
+    coefficients = _assert_centered_gapped_identity_initialization(
+        model.lin.bias,
+        model.lin.weight.mT,
+        dim=model.dim,
+        eig_idx=model.eig_idx,
+        fan_in=model.lin.in_features,
+    )
+
+    x = torch.randn(7, 3)
+    torch.testing.assert_close(model(x), x @ coefficients, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("eig_idx", [2, 4])
+def test_sparse_spectral_initialization_is_centered_gapped_and_additive(eig_idx):
+    torch.manual_seed(0)
+    model = SparseKthEigval(
+        num_features=7,
+        num_fields=2,
+        dim=5,
+        eig_idx=eig_idx,
+    )
+    coefficients = _assert_centered_gapped_identity_initialization(
+        model.base_tril,
+        model.feature_tril.weight,
+        dim=model.dim,
+        eig_idx=model.eig_idx,
+        fan_in=model.num_fields,
+    )
+
+    ids = torch.tensor([[0, 1], [2, 3], [4, 5]])
+    values = torch.tensor([[1.0, 1.0], [0.5, 2.0], [-1.0, 0.25]])
+    expected = (coefficients[ids] * values).sum(dim=-1)
+    torch.testing.assert_close(
+        model(ids, values), expected, atol=1e-6, rtol=1e-6
+    )
+
+
+def test_monotone_spectral_initialization_uses_the_same_pencil_contract():
+    torch.manual_seed(0)
+    model = KthEigvalLastMonotone(num_features=3, dim=5, eig_idx=2)
+    coefficients = _assert_centered_gapped_identity_initialization(
+        model.dense_tril[0],
+        model.dense_tril[1:],
+        dim=model.dim,
+        eig_idx=model.eig_idx,
+        fan_in=model.num_features,
+    )
+
+    monotone_coefficients = square_plus(model.last_diag)
+    monotone_coefficient = monotone_coefficients[0]
+    torch.testing.assert_close(
+        monotone_coefficients,
+        monotone_coefficient.expand_as(model.last_diag),
+    )
+    bound = model.num_features**-0.5
+    assert bound / 2 <= monotone_coefficient <= bound
+    x = torch.randn(7, 3)
+    expected = x[..., :-1] @ coefficients + x[..., -1] * monotone_coefficient
+    torch.testing.assert_close(model(x), expected, atol=1e-6, rtol=1e-6)
 
 
 def test_last_monotone_model_matches_matrix_path():

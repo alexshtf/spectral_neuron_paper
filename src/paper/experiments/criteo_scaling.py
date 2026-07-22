@@ -149,7 +149,7 @@ PROFILES: dict[str, Profile] = {
         batch_size=4096,
     ),
     "full": Profile(
-        train_sizes=tuple(2**power for power in range(12, 27, 2)),
+        train_sizes=tuple(2**power for power in range(12, 29, 2)),
         dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-3, 1e-1, 8).tolist()),
         tuning_seeds=SeedGrid(init_seeds=range(8)),

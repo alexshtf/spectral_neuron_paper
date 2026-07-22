@@ -88,7 +88,18 @@ def summarize_selected(selected: pd.DataFrame) -> pd.DataFrame:
     return summary.reset_index()
 
 
-def summarize_raw(
-    raw: pd.DataFrame, train_sizes: list[int] | tuple[int, ...]
-) -> pd.DataFrame:
-    return summarize_selected(select_lr(best_checkpoints(raw, train_sizes)))
+def _common_train_sizes(raw: pd.DataFrame) -> tuple[int, ...]:
+    grids = raw.groupby(RUN_COLUMNS, sort=False, dropna=False)["train_size"].agg(
+        lambda values: tuple(sorted(values.unique()))
+    )
+    if grids.empty:
+        return ()
+    if grids.nunique() != 1:
+        raise ValueError("synthetic runs have inconsistent train_size checkpoints")
+    return grids.iat[0]
+
+
+def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
+    return summarize_selected(
+        select_lr(best_checkpoints(raw, _common_train_sizes(raw)))
+    )

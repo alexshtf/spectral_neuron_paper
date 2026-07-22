@@ -161,6 +161,7 @@ def prepare_corpus(
                 unit_scale=True,
                 disable=not progress,
                 file=progress_file,
+                dynamic_ncols=True,
             )
             with progress_bar:
                 for chunk in chunks:

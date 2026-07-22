@@ -14,6 +14,65 @@ def _resolve_eig_idx(dim: int, eig_idx: int | None) -> int:
     return eig_idx
 
 
+def _identity_bound(fan_in: int) -> float:
+    return fan_in**-0.5
+
+
+@torch.no_grad()
+def _identity_coefficients(
+    reference: torch.Tensor,
+    shape: torch.Size | tuple[int, ...],
+    *,
+    fan_in: int,
+    positive: bool = False,
+) -> torch.Tensor:
+    """Draw fan-in-scaled scalar coefficients for identity matrices."""
+    bound = _identity_bound(fan_in)
+    lower = bound / 2 if positive else -bound
+    return reference.new_empty(shape).uniform_(lower, bound)
+
+
+@torch.no_grad()
+def _reset_spectral_pencil_(
+    base_tril: torch.Tensor,
+    feature_tril: torch.Tensor,
+    *,
+    dim: int,
+    eig_idx: int,
+    fan_in: int,
+) -> None:
+    """Set A0 = Q diag(sign(j - k)) Q.T and Ai = alpha_i I."""
+    tril_i, tril_j = torch.tril_indices(dim, dim, device=base_tril.device)
+    diag = tril_i == tril_j
+
+    feature_tril.zero_()
+    coefficients = _identity_coefficients(
+        feature_tril,
+        feature_tril.shape[:-1],
+        fan_in=fan_in,
+    )
+    feature_tril[..., diag] = coefficients.unsqueeze(-1)
+
+    q, r = torch.linalg.qr(base_tril.new_empty(dim, dim).normal_())
+    signs = torch.where(r.diagonal() < 0, -1, 1)
+    q = q * signs
+    spectrum = torch.arange(dim, device=base_tril.device) - eig_idx
+    spectrum = spectrum.sign().to(base_tril.dtype)
+    base = (q * spectrum) @ q.mT
+    base_tril.copy_(base[tril_i, tril_j])
+
+
+@torch.no_grad()
+def _reset_positive_identity_(raw_diag: torch.Tensor, *, fan_in: int) -> None:
+    coefficient = _identity_coefficients(
+        raw_diag,
+        (),
+        fan_in=fan_in,
+        positive=True,
+    )
+    raw_diag.fill_(coefficient - 1 / (4 * coefficient))
+
+
 class TrilEmbed(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -40,6 +99,16 @@ class KthEigval(nn.Module):
 
         self.lin = nn.Linear(num_features, dim * (dim + 1) // 2)
         self.tril_emb = TrilEmbed(dim)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        _reset_spectral_pencil_(
+            self.lin.bias,
+            self.lin.weight.mT,
+            dim=self.dim,
+            eig_idx=self.eig_idx,
+            fan_in=self.lin.in_features,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mat = self.tril_emb(self.lin(x))
@@ -145,9 +214,13 @@ class SparseKthEigval(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        bound = self.num_fields**-0.5
-        nn.init.uniform_(self.feature_tril.weight, -bound, bound)
-        nn.init.uniform_(self.base_tril, -bound, bound)
+        _reset_spectral_pencil_(
+            self.base_tril,
+            self.feature_tril.weight,
+            dim=self.dim,
+            eig_idx=self.eig_idx,
+            fan_in=self.num_fields,
+        )
 
     def forward(
         self,
@@ -192,9 +265,14 @@ class KthEigvalLastMonotone(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        bound = self.dim**-0.5
-        nn.init.uniform_(self.dense_tril, -bound, bound)
-        nn.init.uniform_(self.last_diag, -bound, bound)
+        _reset_spectral_pencil_(
+            self.dense_tril[0],
+            self.dense_tril[1:],
+            dim=self.dim,
+            eig_idx=self.eig_idx,
+            fan_in=self.num_features,
+        )
+        _reset_positive_identity_(self.last_diag, fan_in=self.num_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] != (self.num_features,):

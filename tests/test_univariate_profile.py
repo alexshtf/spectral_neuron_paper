@@ -40,7 +40,7 @@ def test_tiny_profile_produces_raw_logs_and_summary():
     profile = tiny_profile()
 
     raw = run_profile(profile, val_size=16, test_size=16)
-    summary = summarize_raw(raw, profile.train_sizes)
+    summary = summarize_raw(raw)
 
     assert not raw.empty
     assert not summary.empty

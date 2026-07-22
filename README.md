@@ -170,9 +170,10 @@ Display Advertising Challenge. The first run builds memory-mapped raw and encode
 caches beside the data; later trajectories reuse the encoded features directly. Raw
 corpus caches and fitted preprocessors from the earlier implementation remain reusable.
 The canonical train encoding for repeated shuffling is the seed- and pass-independent
-`encoded-v3` cache. Older `encoded-v2` directories may coexist with it and can be
-removed later if their disk space is needed; the raw and preprocessor caches do not
-need to be rebuilt or deleted.
+`encoded-v4` cache. It stores field-local feature IDs as uint16 values and restores
+their fixed global field offsets in each int32 training batch. Older encoded-cache
+directories may coexist with it and can be removed later if their disk space is
+needed; the raw and preprocessor caches do not need to be rebuilt.
 
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
 training split. Each model then consumes the repeated-shuffle stream using Adam, with

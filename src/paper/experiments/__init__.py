@@ -26,6 +26,7 @@ def run_many[T, R](
         "total": len(items) if isinstance(items, Sized) else None,
         "disable": not progress,
         "file": progress_file,
+        "dynamic_ncols": True,
     }
     if workers == 1:
         return [function(item) for item in tqdm(items, **progress_options)]
