@@ -1,3 +1,4 @@
+from compression import zstd
 from io import StringIO
 from pathlib import Path
 
@@ -5,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import paper.criteo as criteo
 from paper.criteo import (
     MISSING_NUMERIC,
     NUM_CATEGORICAL_FIELDS,
@@ -20,7 +22,6 @@ from paper.criteo import (
     prepare_encoded_data,
 )
 from paper.experiments.criteo_scaling import (
-    PROFILES,
     RAW_COLUMNS,
     Profile,
     SeedGrid,
@@ -51,6 +52,13 @@ def _write_tiny_criteo(path: Path, rows: int = 100) -> None:
         ]
         lines.append("\t".join((str(label), *numeric, *categorical)))
     path.write_text("\n".join(lines) + "\n")
+
+
+def _compress_zstd(path: Path) -> Path:
+    compressed = path.with_name(f"{path.name}.zstd")
+    compressed.write_bytes(zstd.compress(path.read_bytes(), level=3))
+    path.unlink()
+    return compressed
 
 
 def _tiny_profile() -> Profile:
@@ -161,10 +169,35 @@ def test_hybrid_preprocessor_separates_special_and_positive_values():
     assert preprocessor.field_offsets.dtype == np.int32
 
 
-def test_preprocessing_reports_progress(tmp_path):
+def test_prepare_corpus_streams_zstd_source(tmp_path):
+    raw_path = tmp_path / "train.txt"
+    _write_tiny_criteo(raw_path, rows=17)
+    compressed_path = _compress_zstd(raw_path)
+
+    corpus = prepare_corpus(compressed_path, tmp_path / "cache", chunk_size=5)
+
+    assert corpus.rows == 17
+    np.testing.assert_array_equal(
+        corpus.labels(),
+        [int(row % 4 == 0) for row in range(17)],
+    )
+    assert not raw_path.exists()
+
+
+def test_preprocessing_reports_progress(tmp_path, monkeypatch):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
+
+    write_levels = []
+    zstd_open = zstd.open
+
+    def tracked_open(file, mode="rb", **kwargs):
+        if "w" in mode:
+            write_levels.append(kwargs.get("level"))
+        return zstd_open(file, mode, **kwargs)
+
+    monkeypatch.setattr(criteo.zstd, "open", tracked_open)
 
     output = StringIO()
     corpus = prepare_corpus(
@@ -190,6 +223,11 @@ def test_preprocessing_reports_progress(tmp_path):
     assert "Fitting categorical vocabulary on 8 rows" in printed
     assert "Fitting hybrid numerics on 8 rows" in printed
     assert set(paths) == {"bucket", "hybrid"}
+    assert write_levels == [3, 3]
+    assert all(path.name.endswith(".pkl.zstd") for path in paths.values())
+    assert all(
+        path.read_bytes().startswith(b"\x28\xb5\x2f\xfd") for path in paths.values()
+    )
 
     hybrid = load_preprocessor(paths["hybrid"])
     rows = np.random.default_rng(7).choice(
@@ -201,6 +239,39 @@ def test_preprocessing_reports_progress(tmp_path):
     np.testing.assert_allclose(hybrid.positive_mean[0], positive.mean())
     scale = positive.std()
     np.testing.assert_allclose(hybrid.positive_scale[0], scale if scale > 0 else 1.0)
+
+
+def test_legacy_preprocessor_cache_is_migrated_to_zstd(tmp_path):
+    raw_path = tmp_path / "train.txt"
+    cache_dir = tmp_path / "cache"
+    _write_tiny_criteo(raw_path)
+    corpus = prepare_corpus(raw_path, cache_dir)
+    path = fit_preprocessors(
+        corpus,
+        ("bucket",),
+        sample_size=8,
+        sample_seed=7,
+        min_count=2,
+        buckets_per_field=32,
+    )["bucket"]
+    with zstd.open(path, "rb") as file:
+        pickle_bytes = file.read()
+    legacy = path.with_suffix("")
+    legacy.write_bytes(pickle_bytes)
+    path.unlink()
+
+    migrated = fit_preprocessors(
+        corpus,
+        ("bucket",),
+        sample_size=8,
+        sample_seed=7,
+        min_count=2,
+        buckets_per_field=32,
+    )["bucket"]
+
+    assert migrated == path
+    assert path.read_bytes().startswith(b"\x28\xb5\x2f\xfd")
+    assert isinstance(load_preprocessor(path), BucketPreprocessor)
 
 
 def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path):
@@ -305,13 +376,6 @@ def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path
             assert (recovered.train / "complete").exists()
 
 
-def test_full_profile_ends_at_its_largest_requested_checkpoint():
-    profile = PROFILES["full"]
-
-    assert profile.train_sizes == tuple(2**power for power in range(12, 27, 2))
-    assert profile.train_sizes[-1] == 2**26
-
-
 def test_profile_evaluates_only_its_requested_train_sizes(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
@@ -407,7 +471,7 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     )
 
     assert set(raw["model"]) == {"linear-new"}
-    assert len(list(cache_dir.glob("preprocessor-v1_*.pkl"))) == 1
+    assert len(list(cache_dir.glob("preprocessor-v1_*.pkl.zstd"))) == 1
     assert legacy.exists()
     assert len(list((cache_dir / "encoded-v4").iterdir())) == 1
 

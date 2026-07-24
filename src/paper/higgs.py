@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from paper.compression import open_dataset_file
 from paper.shuffling import ShuffledEpochs
 
 
@@ -152,53 +153,54 @@ def prepare_corpus(
             dtype=np.uint8,
             shape=(layout.rows,),
         )
-        chunks = pd.read_csv(
-            raw_path,
-            header=None,
-            dtype=np.float32,
-            chunksize=chunk_size,
-        )
-        progress_bar = tqdm(
-            total=layout.rows,
-            desc="Preparing HIGGS corpus",
-            unit="rows",
-            unit_scale=True,
-            disable=not progress,
-            file=progress_file,
-            dynamic_ncols=True,
-        )
-        with progress_bar:
-            for chunk in chunks:
-                if chunk.shape[1] != NUM_FEATURES + 1:
-                    raise ValueError(
-                        f"expected {NUM_FEATURES + 1} columns; got {chunk.shape[1]}"
-                    )
-                stop = rows + len(chunk)
-                if stop > layout.rows:
-                    raise ValueError(
-                        f"expected {layout.rows:,} rows; input has more"
-                    )
+        with open_dataset_file(raw_path) as raw_file:
+            chunks = pd.read_csv(
+                raw_file,
+                header=None,
+                dtype=np.float32,
+                chunksize=chunk_size,
+            )
+            progress_bar = tqdm(
+                total=layout.rows,
+                desc="Preparing HIGGS corpus",
+                unit="rows",
+                unit_scale=True,
+                disable=not progress,
+                file=progress_file,
+                dynamic_ncols=True,
+            )
+            with progress_bar:
+                for chunk in chunks:
+                    if chunk.shape[1] != NUM_FEATURES + 1:
+                        raise ValueError(
+                            f"expected {NUM_FEATURES + 1} columns; got {chunk.shape[1]}"
+                        )
+                    stop = rows + len(chunk)
+                    if stop > layout.rows:
+                        raise ValueError(
+                            f"expected {layout.rows:,} rows; input has more"
+                        )
 
-                values = chunk.to_numpy(dtype=np.float32, copy=False)
-                batch_labels = values[:, 0]
-                batch_features = values[:, 1:]
-                if not np.isfinite(batch_features).all():
-                    raise ValueError("HIGGS features must all be finite")
-                if not ((batch_labels == 0.0) | (batch_labels == 1.0)).all():
-                    raise ValueError("HIGGS labels must be binary")
+                    values = chunk.to_numpy(dtype=np.float32, copy=False)
+                    batch_labels = values[:, 0]
+                    batch_features = values[:, 1:]
+                    if not np.isfinite(batch_features).all():
+                        raise ValueError("HIGGS features must all be finite")
+                    if not ((batch_labels == 0.0) | (batch_labels == 1.0)).all():
+                        raise ValueError("HIGGS labels must be binary")
 
-                features[rows:stop] = batch_features
-                labels[rows:stop] = batch_labels.astype(np.uint8, copy=False)
-                training_rows = max(0, min(stop, layout.train_stop) - rows)
-                if training_rows > 0:
-                    count, mean, squared_deviations = _combine_moments(
-                        count,
-                        mean,
-                        squared_deviations,
-                        batch_features[:training_rows],
-                    )
-                rows = stop
-                progress_bar.update(len(chunk))
+                    features[rows:stop] = batch_features
+                    labels[rows:stop] = batch_labels.astype(np.uint8, copy=False)
+                    training_rows = max(0, min(stop, layout.train_stop) - rows)
+                    if training_rows > 0:
+                        count, mean, squared_deviations = _combine_moments(
+                            count,
+                            mean,
+                            squared_deviations,
+                            batch_features[:training_rows],
+                        )
+                    rows = stop
+                    progress_bar.update(len(chunk))
 
         if rows != layout.rows:
             raise ValueError(f"expected {layout.rows:,} rows; got {rows:,}")

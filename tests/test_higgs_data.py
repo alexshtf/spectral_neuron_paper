@@ -1,5 +1,6 @@
 import json
 import pickle
+from compression import zstd
 from io import StringIO
 from pathlib import Path
 
@@ -33,6 +34,13 @@ def _tiny_data(rows: int = TINY_LAYOUT.rows) -> np.ndarray:
 
 def _write_csv(path: Path, values: np.ndarray) -> None:
     np.savetxt(path, values, delimiter=",", fmt="%.9g")
+
+
+def _compress_zstd(path: Path) -> Path:
+    compressed = path.with_name(f"{path.name}.zstd")
+    compressed.write_bytes(zstd.compress(path.read_bytes(), level=3))
+    path.unlink()
+    return compressed
 
 
 def _prepare(tmp_path: Path, values: np.ndarray | None = None):
@@ -88,6 +96,24 @@ def test_prepare_corpus_preserves_data_and_training_statistics(tmp_path):
         source_size=raw_path.stat().st_size,
     )
     assert reopened == corpus
+
+
+def test_prepare_corpus_streams_zstd_source(tmp_path):
+    raw_path = tmp_path / "HIGGS.csv"
+    values = _tiny_data()
+    _write_csv(raw_path, values)
+    compressed_path = _compress_zstd(raw_path)
+
+    corpus = prepare_corpus(
+        compressed_path,
+        tmp_path / "cache",
+        layout=TINY_LAYOUT,
+        chunk_size=3,
+    )
+
+    np.testing.assert_array_equal(corpus.features(), values[:, 1:])
+    np.testing.assert_array_equal(corpus.labels(), values[:, 0])
+    assert not raw_path.exists()
 
 
 def test_prepare_corpus_reuses_a_valid_cache_and_reports_progress(tmp_path):

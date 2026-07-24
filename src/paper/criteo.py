@@ -4,6 +4,7 @@ import pickle
 import shutil
 import sys
 import tempfile
+from compression import zstd
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
@@ -17,6 +18,7 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from paper.compression import ZSTD_LEVEL, open_dataset_file
 from paper.shuffling import ShuffledEpochs
 
 
@@ -131,12 +133,13 @@ def prepare_corpus(
             }
 
             with (
+                open_dataset_file(raw_path) as raw_file,
                 numeric_tmp.open("wb") as numeric_file,
                 categorical_tmp.open("wb") as categorical_file,
                 label_tmp.open("wb") as label_file,
             ):
                 chunks = pd.read_csv(
-                    raw_path,
+                    raw_file,
                     sep="\t",
                     header=None,
                     names=COLUMNS,
@@ -420,7 +423,7 @@ def _preprocessor_path(
     return corpus.cache_dir / (
         f"preprocessor-v{PREPROCESSOR_CACHE_VERSION}_{kind}_"
         f"sample{sample_size}_seed{sample_seed}_min{min_count}_"
-        f"b{buckets_per_field}.pkl"
+        f"b{buckets_per_field}.pkl.zstd"
     )
 
 
@@ -430,8 +433,24 @@ def _save_preprocessor(preprocessor: FittedPreprocessor, path: Path) -> None:
         if path.exists():
             return
         try:
-            with temporary.open("xb") as file:
+            with zstd.open(temporary, "wb", level=ZSTD_LEVEL) as file:
                 pickle.dump(preprocessor, file, protocol=pickle.HIGHEST_PROTOCOL)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _compress_preprocessor(source: Path, path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    with _exclusive_lock(path.with_name(f".{path.name}.lock")):
+        if path.exists():
+            return
+        try:
+            with (
+                source.open("rb") as source_file,
+                zstd.open(temporary, "wb", level=ZSTD_LEVEL) as compressed_file,
+            ):
+                shutil.copyfileobj(source_file, compressed_file)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -439,7 +458,7 @@ def _save_preprocessor(preprocessor: FittedPreprocessor, path: Path) -> None:
 
 def load_preprocessor(path: Path) -> FittedPreprocessor:
     # These files are trusted, local artifacts created by this module.
-    with path.open("rb") as file:
+    with zstd.open(path, "rb") as file:
         preprocessor = pickle.load(file)
     if not isinstance(preprocessor, BucketPreprocessor | HybridPreprocessor):
         raise TypeError(f"{path} does not contain a fitted Criteo preprocessor")
@@ -482,6 +501,10 @@ def fit_preprocessors(
         )
         for kind in kinds
     }
+    for path in paths.values():
+        legacy = path.with_suffix("")
+        if not path.exists() and legacy.exists():
+            _compress_preprocessor(legacy, path)
     missing = [kind for kind, path in paths.items() if not path.exists()]
     if progress:
         output = sys.stderr if progress_file is None else progress_file
@@ -759,12 +782,13 @@ def prepare_encoded_data(
     if np.any(field_sizes > np.iinfo(FEATURE_ID_DTYPE).max + 1):
         raise ValueError("per-field feature ids do not fit in uint16")
 
-    with preprocessor_path.open("rb") as file:
+    with zstd.open(preprocessor_path, "rb") as file:
         digest = file_digest(file, "sha256").hexdigest()[:16]
+    cache_key = preprocessor_path.name.removesuffix(".pkl.zstd")
     root = (
         corpus.cache_dir
         / f"encoded-v{ENCODED_CACHE_VERSION}"
-        / f"{preprocessor_path.stem}-{digest}"
+        / f"{cache_key}-{digest}"
     )
 
     def prepare(name: str, rows: range) -> Path:

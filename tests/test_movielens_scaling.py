@@ -7,7 +7,6 @@ import torch
 
 from paper.experiments.movielens_scaling import (
     CURVE_COLUMNS,
-    PROFILES,
     RAW_COLUMNS,
     VARIANTS,
     MovieLensModelSpec,

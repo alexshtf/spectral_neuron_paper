@@ -107,11 +107,13 @@ validator rejects duplicate trajectory checkpoints.
 
 ## HIGGS scaling experiment
 
-The HIGGS experiment consumes the headerless 11-million-row CSV. It preserves the
-published convention of reserving the final 500,000 rows for test. This repo defines
-its own validation slice as the preceding 500,000 rows and uses the first 10 million
-for training; the published convention does not define that validation boundary. This
-is a row-order split, not a chronological split.
+The HIGGS experiment consumes the headerless 11-million-row CSV, either directly or
+Zstandard-compressed with a `.zstd` suffix. Compressed input is decompressed as the CSV
+stream is read; no expanded source file is written. It preserves the published
+convention of reserving the final 500,000 rows for test. This repo defines its own
+validation slice as the preceding 500,000 rows and uses the first 10 million for
+training; the published convention does not define that validation boundary. This is a
+row-order split, not a chronological split.
 
 The first run converts the CSV into float32 feature and uint8 label memory maps and
 stores training-only means and standard deviations. The fixed standardizer is then
@@ -166,9 +168,14 @@ than leaderboard-oriented AUC reporting.
 ## Criteo scaling experiment
 
 The experiment expects the headerless, tab-separated training file from the Criteo
-Display Advertising Challenge. The first run builds memory-mapped raw and encoded
-caches beside the data; later trajectories reuse the encoded features directly. Raw
-corpus caches and fitted preprocessors from the earlier implementation remain reusable.
+Display Advertising Challenge, either directly or Zstandard-compressed with a `.zstd`
+suffix. Compressed input is decompressed as the TSV stream is read; no expanded source
+file is written. The first run builds memory-mapped raw and encoded caches beside the
+data; later trajectories reuse the encoded features directly. Fitted preprocessors are
+stored as `.pkl.zstd` at Zstandard level 3 because they are loaded wholly into memory.
+Legacy `.pkl` preprocessors are migrated by streaming them into the compressed format.
+Memory-mapped data caches remain uncompressed, and existing cache identities remain
+reusable.
 The canonical train encoding for repeated shuffling is the seed- and pass-independent
 `encoded-v4` cache. It stores field-local feature IDs as uint16 values and restores
 their fixed global field offsets in each int32 training batch. Older encoded-cache
@@ -179,7 +186,7 @@ Feature preprocessing is fitted once on a reproducible 10% sample of the chronol
 training split. Each model then consumes the repeated-shuffle stream using Adam, with
 validation measurements taken at every requested examples-seen checkpoint. Dense
 parameters use Adam and sparse embedding tables use SparseAdam.
-The full profile evaluates its explicit power-of-two grid through `2**26` and stops
+The full profile evaluates its explicit power-of-two grid through `2**28` and stops
 there; the stream automatically creates however many training-pool permutations that
 budget requires. Its four evaluation data-order seeds are held out from tuning.
 Evaluation initialization seeds are 3 through 8: seeds 3 through 7 overlap tuning,

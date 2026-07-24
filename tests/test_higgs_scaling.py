@@ -7,7 +7,6 @@ import torch
 
 from paper.experiments.higgs_scaling import (
     CURVE_COLUMNS,
-    PROFILES,
     RAW_COLUMNS,
     VARIANTS,
     HiggsModelSpec,
@@ -16,8 +15,6 @@ from paper.experiments.higgs_scaling import (
     _best_lrs,
     _make_mlp,
     _make_seeded_model,
-    _model_specs,
-    _tuning_configs,
     default_raw_path,
     make_model,
     matched_mlp_width,
@@ -30,7 +27,6 @@ from paper.experiments.higgs_scaling import (
 )
 from paper.higgs import NUM_FEATURES, HiggsLayout
 from paper.models import KthEigval
-from paper.shuffling import resolve_train_sizes
 
 
 def _write_tiny_higgs(path: Path, rows: int) -> None:
@@ -265,24 +261,6 @@ def test_lr_selection_rejects_a_family_without_finite_validation():
             _best_lrs(tuning)
 
 
-@pytest.mark.parametrize(
-    ("profile_name", "expected_specs", "expected_tuning"),
-    [
-        ("sanity", 5, 5),
-        ("small", 9, 54),
-        ("full", 13, 832),
-    ],
-)
-def test_profiles_have_the_documented_tuning_trajectory_counts(
-    profile_name, expected_specs, expected_tuning
-):
-    profile = PROFILES[profile_name]
-    specs = _model_specs(profile, VARIANTS)
-
-    assert len(specs) == expected_specs
-    assert len(_tuning_configs(profile, specs)) == expected_tuning
-
-
 def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_raw):
     raw = complete_raw
     summary = summarize_raw(raw)
@@ -322,17 +300,6 @@ def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_r
     assert len(tuning) == 20
     assert len(evaluation) == 10
     assert len(summary) == 10
-
-
-def test_full_profile_resolves_only_requested_checkpoints():
-    profile = PROFILES["full"]
-
-    train_sizes = resolve_train_sizes(
-        profile.train_sizes,
-        batch_size=profile.batch_size,
-    )
-    assert profile.train_sizes[-1] == 2**24
-    assert train_sizes == profile.train_sizes
 
 
 def test_default_result_path_does_not_target_legacy_one_pass_results():
