@@ -225,7 +225,8 @@ PROFILES: dict[str, Profile] = {
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
         tuning_seeds=SeedGrid(init_seeds=range(8)),
         evaluation_seeds=SeedGrid(
-            data_seeds=range(1, 3), init_seeds=range(2, 5)
+            data_seeds=range(1, 5),
+            init_seeds=range(3, 9),
         ),
         batch_size=4096,
     ),
