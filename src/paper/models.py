@@ -24,12 +24,23 @@ def _identity_coefficients(
     shape: torch.Size | tuple[int, ...],
     *,
     fan_in: int,
-    positive: bool = False,
 ) -> torch.Tensor:
-    """Draw fan-in-scaled scalar coefficients for identity matrices."""
+    """Draw centered, fan-in-scaled coefficients for identity matrices."""
     bound = _identity_bound(fan_in)
-    lower = bound / 2 if positive else -bound
-    return reference.new_empty(shape).uniform_(lower, bound)
+    return reference.new_empty(shape).uniform_(-bound, bound)
+
+
+@torch.no_grad()
+def _squareplus_identity_coefficient(
+    reference: torch.Tensor, *, fan_in: int
+) -> torch.Tensor:
+    """Draw a positive coefficient that is safe to invert through squareplus.
+
+    The lower cutoff keeps the inverse c - 1 / (4c) away from its singularity
+    at zero while keeping c within a factor of two of the fan-in scale.
+    """
+    bound = _identity_bound(fan_in)
+    return reference.new_empty(()).uniform_(bound / 2, bound)
 
 
 @torch.no_grad()
@@ -64,12 +75,7 @@ def _reset_spectral_pencil_(
 
 @torch.no_grad()
 def _reset_positive_identity_(raw_diag: torch.Tensor, *, fan_in: int) -> None:
-    coefficient = _identity_coefficients(
-        raw_diag,
-        (),
-        fan_in=fan_in,
-        positive=True,
-    )
+    coefficient = _squareplus_identity_coefficient(raw_diag, fan_in=fan_in)
     raw_diag.fill_(coefficient - 1 / (4 * coefficient))
 
 
