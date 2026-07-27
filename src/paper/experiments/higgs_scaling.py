@@ -220,6 +220,8 @@ PROFILES: dict[str, Profile] = {
             2**22,
             2**23,
             2**24,
+            2**25,
+            2**26,
         ),
         dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
