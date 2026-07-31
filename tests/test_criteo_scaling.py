@@ -70,7 +70,6 @@ def _tiny_profile() -> Profile:
         evaluation_seeds=SeedGrid(),
         batch_size=16,
         min_count=2,
-        buckets_per_field=32,
     )
 
 
@@ -86,8 +85,10 @@ def complete_raw(tmp_path_factory):
     )
 
 
-def _frequent_categories() -> tuple[np.ndarray, ...]:
-    return tuple(np.array([7], dtype=np.uint32) for _ in range(NUM_CATEGORICAL_FIELDS))
+def _categorical_vocabularies() -> tuple[np.ndarray, ...]:
+    return tuple(
+        np.array([7, 9], dtype=np.uint32) for _ in range(NUM_CATEGORICAL_FIELDS)
+    )
 
 
 def _assert_arrays(actual, expected):
@@ -123,24 +124,39 @@ def test_winner_style_numeric_buckets():
     values = np.array([np.nan, -1, 0, 1, 2, 3, np.e**3])
     buckets = _bucket_numeric(values)
 
-    assert buckets[:6].tolist() == [0, 2, 1, 3, 5, (1 << 31) | 1]
-    assert buckets[6] == (1 << 31) | 9
+    assert buckets.tolist() == [0, -1, 0, 1, 2, 3, 11]
 
 
-def test_bucket_preprocessor_uses_field_disjoint_hash_ranges():
-    preprocessor = BucketPreprocessor(16, _frequent_categories())
-    numerics = np.full((2, NUM_NUMERIC_FIELDS), 7, dtype=np.int32)
-    categoricals = np.full((2, NUM_CATEGORICAL_FIELDS), 7, dtype=np.uint32)
-    categoricals[0, 0] = 8
-    categoricals[1, 1] = 0
+def test_bucket_preprocessor_uses_exact_field_disjoint_ids():
+    minimums = np.zeros(NUM_NUMERIC_FIELDS, dtype=np.int32)
+    maximums = np.full(NUM_NUMERIC_FIELDS, 5, dtype=np.int32)
+    preprocessor = BucketPreprocessor(
+        minimums,
+        maximums,
+        _categorical_vocabularies(),
+    )
+    numerics = np.full((4, NUM_NUMERIC_FIELDS), 7, dtype=np.int32)
+    numerics[:, 0] = [MISSING_NUMERIC, -1, 3, 7]
+    categoricals = np.full((4, NUM_CATEGORICAL_FIELDS), 7, dtype=np.uint32)
+    categoricals[:, 0] = [0, 8, 7, 9]
 
     feature_ids, feature_values = preprocessor.encode(numerics, categoricals)
 
-    offsets = np.arange(NUM_NUMERIC_FIELDS + NUM_CATEGORICAL_FIELDS) * 16
+    offsets = np.concatenate(
+        (
+            np.arange(NUM_NUMERIC_FIELDS) * 8,
+            NUM_NUMERIC_FIELDS * 8 + np.arange(NUM_CATEGORICAL_FIELDS) * 4,
+        )
+    )
     assert np.all(feature_ids >= offsets)
-    assert np.all(feature_ids < offsets + 16)
-    assert feature_ids[0, NUM_NUMERIC_FIELDS] == NUM_NUMERIC_FIELDS * 16 + 1
-    assert feature_ids[1, NUM_NUMERIC_FIELDS + 1] == (NUM_NUMERIC_FIELDS + 1) * 16
+    assert np.all(feature_ids < offsets + preprocessor.field_sizes)
+    assert feature_ids[:, 0].tolist() == [0, 1, 5, 7]
+    assert feature_ids[:, NUM_NUMERIC_FIELDS].tolist() == [
+        offsets[NUM_NUMERIC_FIELDS],
+        offsets[NUM_NUMERIC_FIELDS] + 1,
+        offsets[NUM_NUMERIC_FIELDS] + 2,
+        offsets[NUM_NUMERIC_FIELDS] + 3,
+    ]
     assert preprocessor.field_offsets.dtype == np.int32
     assert feature_values is None
 
@@ -150,8 +166,7 @@ def test_hybrid_preprocessor_separates_special_and_positive_values():
         np.array([], dtype=np.int32) for _ in range(NUM_NUMERIC_FIELDS - 1)
     )
     preprocessor = HybridPreprocessor(
-        16,
-        _frequent_categories(),
+        _categorical_vocabularies(),
         negatives,
         positive_mean=np.zeros(NUM_NUMERIC_FIELDS),
         positive_scale=np.ones(NUM_NUMERIC_FIELDS),
@@ -213,7 +228,6 @@ def test_preprocessing_reports_progress(tmp_path, monkeypatch):
         sample_size=8,
         sample_seed=7,
         min_count=2,
-        buckets_per_field=32,
         progress=True,
         progress_file=output,
     )
@@ -221,7 +235,7 @@ def test_preprocessing_reports_progress(tmp_path, monkeypatch):
     printed = output.getvalue()
     assert "Preparing Criteo corpus" in printed
     assert "Fitting categorical vocabulary on 8 rows" in printed
-    assert "Fitting hybrid numerics on 8 rows" in printed
+    assert "Fitting numeric preprocessing on 8 rows" in printed
     assert set(paths) == {"bucket", "hybrid"}
     assert write_levels == [3, 3]
     assert all(path.name.endswith(".pkl.zstd") for path in paths.values())
@@ -252,7 +266,6 @@ def test_legacy_preprocessor_cache_is_migrated_to_zstd(tmp_path):
         sample_size=8,
         sample_seed=7,
         min_count=2,
-        buckets_per_field=32,
     )["bucket"]
     with zstd.open(path, "rb") as file:
         pickle_bytes = file.read()
@@ -266,7 +279,6 @@ def test_legacy_preprocessor_cache_is_migrated_to_zstd(tmp_path):
         sample_size=8,
         sample_seed=7,
         min_count=2,
-        buckets_per_field=32,
     )["bucket"]
 
     assert migrated == path
@@ -285,7 +297,6 @@ def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path
         sample_size=8,
         sample_seed=0,
         min_count=2,
-        buckets_per_field=32,
     )
     batch_size = 4
     order = corpus.shuffled_epochs(7)
@@ -388,7 +399,6 @@ def test_profile_evaluates_only_its_requested_train_sizes(tmp_path):
         evaluation_seeds=SeedGrid(),
         batch_size=16,
         min_count=2,
-        buckets_per_field=32,
     )
 
     raw = run_profile(
@@ -471,7 +481,7 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     )
 
     assert set(raw["model"]) == {"linear-new"}
-    assert len(list(cache_dir.glob("preprocessor-v1_*.pkl.zstd"))) == 1
+    assert len(list(cache_dir.glob("preprocessor-v*_*.pkl.zstd"))) == 1
     assert legacy.exists()
     assert len(list((cache_dir / "encoded-v4").iterdir())) == 1
 

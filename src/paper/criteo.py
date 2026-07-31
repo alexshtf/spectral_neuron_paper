@@ -33,7 +33,7 @@ COLUMNS = (LABEL, *NUMERIC_COLUMNS, *CATEGORICAL_COLUMNS)
 
 CACHE_VERSION = 2
 # Bump when the corresponding fitted or encoded artifact changes meaning.
-PREPROCESSOR_CACHE_VERSION = 1
+PREPROCESSOR_CACHE_VERSION = 2
 ENCODED_CACHE_VERSION = 4
 ENCODED_CHUNK_SIZE = 2**18
 FEATURE_ID_DTYPE = np.dtype(np.uint16)
@@ -65,14 +65,10 @@ def _bucket_numeric(values: np.ndarray) -> np.ndarray:
     small = present & (numeric <= 2)
     large = present & ~small
 
-    tokens = np.zeros(values.shape, dtype=np.uint32)
-    integers = numeric[small].astype(np.int64)
-    zigzag = (integers << 1) ^ (integers >> 63)
-    tokens[small] = zigzag.astype(np.uint32) + 1
-    tokens[large] = np.floor(np.square(np.log(numeric[large]))).astype(
-        np.uint32
-    ) | np.uint32(1 << 31)
-    return tokens
+    buckets = np.zeros(values.shape, dtype=np.int32)
+    buckets[small] = numeric[small].astype(np.int32)
+    buckets[large] = np.floor(np.square(np.log(numeric[large]))).astype(np.int32) + 2
+    return buckets
 
 
 _HEX_VALUE = np.zeros(256, dtype=np.uint8)
@@ -229,36 +225,35 @@ class CriteoCorpus:
         return ShuffledEpochs(self.cache_dir, self.train_stop, seed)
 
 
-def _mix32(values: np.ndarray) -> np.ndarray:
-    mixed = values.astype(np.uint64)
-    mixed ^= mixed >> 16
-    mixed *= np.uint64(0x7FEB352D)
-    mixed ^= mixed >> 15
-    mixed *= np.uint64(0x846CA68B)
-    mixed ^= mixed >> 16
-    return mixed
-
-
-def _hashed_ids(values: np.ndarray, offset: int, buckets: int) -> np.ndarray:
-    return (_mix32(values) % (buckets - 2) + offset + 2).astype(np.int32)
-
-
 def _categorical_ids(
     values: np.ndarray,
-    frequent: np.ndarray,
+    vocabulary: np.ndarray,
     *,
     offset: int,
-    buckets: int,
 ) -> np.ndarray:
-    encoded = _hashed_ids(values, offset, buckets)
+    encoded = np.full(values.shape, offset + 1, dtype=np.int32)
+    positions = np.searchsorted(vocabulary, values)
+    known = positions < len(vocabulary)
+    known[known] = vocabulary[positions[known]] == values[known]
+    encoded[known] = offset + 2 + positions[known]
     encoded[values == 0] = offset
-
-    positions = np.searchsorted(frequent, values)
-    known = np.zeros(values.shape, dtype=bool)
-    valid = positions < len(frequent)
-    known[valid] = frequent[positions[valid]] == values[valid]
-    encoded[(values != 0) & ~known] = offset + 1
     return encoded
+
+
+def _categorical_sizes(
+    vocabularies: tuple[np.ndarray, ...],
+) -> np.ndarray:
+    return np.fromiter(
+        (len(vocabulary) + 2 for vocabulary in vocabularies),
+        dtype=np.int64,
+        count=NUM_CATEGORICAL_FIELDS,
+    )
+
+
+def _field_offsets(sizes: np.ndarray) -> np.ndarray:
+    return np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes[:-1]))).astype(
+        np.int32
+    )
 
 
 def _check_inputs(numerics: np.ndarray, categoricals: np.ndarray) -> None:
@@ -276,17 +271,25 @@ def _check_inputs(numerics: np.ndarray, categoricals: np.ndarray) -> None:
 
 @dataclass(frozen=True)
 class BucketPreprocessor:
-    buckets_per_field: int
-    frequent_categories: tuple[np.ndarray, ...]
+    numeric_minimums: np.ndarray
+    numeric_maximums: np.ndarray
+    categorical_vocabularies: tuple[np.ndarray, ...]
     kind: ClassVar[PreprocessingKind] = "bucket"
 
     @property
+    def field_sizes(self) -> np.ndarray:
+        numeric = self.numeric_maximums.astype(np.int64) - self.numeric_minimums + 3
+        return np.concatenate(
+            (numeric, _categorical_sizes(self.categorical_vocabularies))
+        )
+
+    @property
     def num_features(self) -> int:
-        return NUM_FIELDS * self.buckets_per_field
+        return int(self.field_sizes.sum())
 
     @property
     def field_offsets(self) -> np.ndarray:
-        return np.arange(NUM_FIELDS, dtype=np.int32) * self.buckets_per_field
+        return _field_offsets(self.field_sizes)
 
     def encode(
         self,
@@ -294,24 +297,39 @@ class BucketPreprocessor:
         categoricals: np.ndarray,
     ) -> FeatureArrays:
         _check_inputs(numerics, categoricals)
-        tokens = np.concatenate((_bucket_numeric(numerics), categoricals), axis=-1)
-        feature_ids = np.empty(tokens.shape, dtype=np.int32)
+        shape = numerics.shape[:-1] + (NUM_FIELDS,)
+        feature_ids = np.empty(shape, dtype=np.int32)
+        buckets = _bucket_numeric(numerics)
+        offsets = self.field_offsets
 
-        for field in range(NUM_NUMERIC_FIELDS):
-            values = tokens[..., field]
-            offset = field * self.buckets_per_field
-            feature_ids[..., field] = _hashed_ids(
-                values, offset, self.buckets_per_field
+        for field, (offset, minimum, maximum) in enumerate(
+            zip(
+                offsets[:NUM_NUMERIC_FIELDS],
+                self.numeric_minimums,
+                self.numeric_maximums,
+                strict=True,
             )
-            feature_ids[..., field][values == 0] = offset
+        ):
+            raw = numerics[..., field]
+            values = buckets[..., field]
+            ids = feature_ids[..., field]
+            ids.fill(offset + 1)
+            present = raw != MISSING_NUMERIC
+            known = present & (minimum <= values) & (values <= maximum)
+            ids[known] = offset + 2 + values[known] - minimum
+            ids[~present] = offset
 
-        for category, frequent in enumerate(self.frequent_categories):
-            field = NUM_NUMERIC_FIELDS + category
-            feature_ids[..., field] = _categorical_ids(
-                tokens[..., field],
-                frequent,
-                offset=field * self.buckets_per_field,
-                buckets=self.buckets_per_field,
+        for category, (offset, vocabulary) in enumerate(
+            zip(
+                offsets[NUM_NUMERIC_FIELDS:],
+                self.categorical_vocabularies,
+                strict=True,
+            )
+        ):
+            feature_ids[..., NUM_NUMERIC_FIELDS + category] = _categorical_ids(
+                categoricals[..., category],
+                vocabulary,
+                offset=int(offset),
             )
 
         return feature_ids, None
@@ -319,21 +337,22 @@ class BucketPreprocessor:
 
 @dataclass(frozen=True)
 class HybridPreprocessor:
-    buckets_per_categorical_field: int
-    frequent_categories: tuple[np.ndarray, ...]
+    categorical_vocabularies: tuple[np.ndarray, ...]
     negative_values: tuple[np.ndarray, ...]
     positive_mean: np.ndarray
     positive_scale: np.ndarray
     kind: ClassVar[PreprocessingKind] = "hybrid"
 
     @property
-    def numeric_offsets(self) -> np.ndarray:
-        sizes = np.fromiter(
+    def field_sizes(self) -> np.ndarray:
+        numeric = np.fromiter(
             (len(values) + 4 for values in self.negative_values),
             dtype=np.int64,
             count=NUM_NUMERIC_FIELDS,
         )
-        return np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(sizes[:-1])))
+        return np.concatenate(
+            (numeric, _categorical_sizes(self.categorical_vocabularies))
+        )
 
     @property
     def num_numeric_features(self) -> int:
@@ -341,19 +360,11 @@ class HybridPreprocessor:
 
     @property
     def num_features(self) -> int:
-        return (
-            self.num_numeric_features
-            + NUM_CATEGORICAL_FIELDS * self.buckets_per_categorical_field
-        )
+        return int(self.field_sizes.sum())
 
     @property
     def field_offsets(self) -> np.ndarray:
-        categorical = (
-            self.num_numeric_features
-            + np.arange(NUM_CATEGORICAL_FIELDS, dtype=np.int32)
-            * self.buckets_per_categorical_field
-        )
-        return np.concatenate((self.numeric_offsets.astype(np.int32), categorical))
+        return _field_offsets(self.field_sizes)
 
     def encode(
         self,
@@ -364,9 +375,14 @@ class HybridPreprocessor:
         shape = numerics.shape[:-1] + (NUM_FIELDS,)
         feature_ids = np.empty(shape, dtype=np.int32)
         feature_values = np.ones(shape, dtype=np.float32)
+        offsets = self.field_offsets
 
         for field, (offset, negatives) in enumerate(
-            zip(self.numeric_offsets, self.negative_values)
+            zip(
+                offsets[:NUM_NUMERIC_FIELDS],
+                self.negative_values,
+                strict=True,
+            )
         ):
             raw = numerics[..., field]
             ids = feature_ids[..., field]
@@ -393,16 +409,18 @@ class HybridPreprocessor:
             known[valid] &= negatives[positions[valid]] == raw[valid]
             ids[known] = offset + 3 + positions[known]
 
-        categorical_offset = self.num_numeric_features
-        for category, frequent in enumerate(self.frequent_categories):
+        for category, (offset, vocabulary) in enumerate(
+            zip(
+                offsets[NUM_NUMERIC_FIELDS:],
+                self.categorical_vocabularies,
+                strict=True,
+            )
+        ):
             field = NUM_NUMERIC_FIELDS + category
             feature_ids[..., field] = _categorical_ids(
                 categoricals[..., category],
-                frequent,
-                offset=(
-                    categorical_offset + category * self.buckets_per_categorical_field
-                ),
-                buckets=self.buckets_per_categorical_field,
+                vocabulary,
+                offset=int(offset),
             )
 
         return feature_ids, feature_values
@@ -418,12 +436,10 @@ def _preprocessor_path(
     sample_size: int,
     sample_seed: int,
     min_count: int,
-    buckets_per_field: int,
 ) -> Path:
     return corpus.cache_dir / (
         f"preprocessor-v{PREPROCESSOR_CACHE_VERSION}_{kind}_"
-        f"sample{sample_size}_seed{sample_seed}_min{min_count}_"
-        f"b{buckets_per_field}.pkl.zstd"
+        f"sample{sample_size}_seed{sample_seed}_min{min_count}.pkl.zstd"
     )
 
 
@@ -472,7 +488,6 @@ def fit_preprocessors(
     sample_size: int,
     sample_seed: int,
     min_count: int,
-    buckets_per_field: int,
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> dict[PreprocessingKind, Path]:
@@ -485,11 +500,6 @@ def fit_preprocessors(
         raise ValueError(
             f"sample_size must be in [1, {corpus.train_stop}]; got {sample_size}"
         )
-    if buckets_per_field < 3:
-        raise ValueError(
-            "buckets_per_field must leave room for missing and rare values"
-        )
-
     paths = {
         kind: _preprocessor_path(
             corpus,
@@ -497,7 +507,6 @@ def fit_preprocessors(
             sample_size=sample_size,
             sample_seed=sample_seed,
             min_count=min_count,
-            buckets_per_field=buckets_per_field,
         )
         for kind in kinds
     }
@@ -533,33 +542,34 @@ def fit_preprocessors(
         file=progress_file,
         dynamic_ncols=True,
     )
-    frequent = []
+    categorical_vocabularies = []
     for field in fields:
         values, counts = np.unique(categoricals[rows, field], return_counts=True)
-        frequent.append(values[(values != 0) & (counts >= min_count)])
-    frequent_categories = tuple(frequent)
+        categorical_vocabularies.append(values[(values != 0) & (counts >= min_count)])
+    vocabularies = tuple(categorical_vocabularies)
 
-    if "bucket" in missing:
-        _save_preprocessor(
-            BucketPreprocessor(buckets_per_field, frequent_categories),
-            paths["bucket"],
-        )
-
-    if "hybrid" in missing:
-        numerics = corpus.numerics()
-        negative_values = []
-        positive_mean = np.empty(NUM_NUMERIC_FIELDS)
-        positive_scale = np.empty(NUM_NUMERIC_FIELDS)
-        fields = tqdm(
-            range(NUM_NUMERIC_FIELDS),
-            desc=f"Fitting hybrid numerics on {sample_size:,} rows",
-            unit="field",
-            disable=not progress,
-            file=progress_file,
-            dynamic_ncols=True,
-        )
-        for field in fields:
-            values = numerics[rows, field]
+    numeric_minimums = np.empty(NUM_NUMERIC_FIELDS, dtype=np.int32)
+    numeric_maximums = np.empty(NUM_NUMERIC_FIELDS, dtype=np.int32)
+    negative_values = []
+    positive_mean = np.empty(NUM_NUMERIC_FIELDS)
+    positive_scale = np.empty(NUM_NUMERIC_FIELDS)
+    numerics = corpus.numerics()
+    fields = tqdm(
+        range(NUM_NUMERIC_FIELDS),
+        desc=f"Fitting numeric preprocessing on {sample_size:,} rows",
+        unit="field",
+        disable=not progress,
+        file=progress_file,
+        dynamic_ncols=True,
+    )
+    for field in fields:
+        values = numerics[rows, field]
+        if "bucket" in missing:
+            present = values != MISSING_NUMERIC
+            buckets = _bucket_numeric(values[present])
+            numeric_minimums[field] = buckets.min()
+            numeric_maximums[field] = buckets.max()
+        if "hybrid" in missing:
             negative_values.append(
                 np.unique(values[(values < 0) & (values != MISSING_NUMERIC)])
             )
@@ -568,10 +578,20 @@ def fit_preprocessors(
             scale = logged.std() if len(logged) else 1.0
             positive_scale[field] = scale if scale > 0 else 1.0
 
+    if "bucket" in missing:
+        _save_preprocessor(
+            BucketPreprocessor(
+                numeric_minimums,
+                numeric_maximums,
+                vocabularies,
+            ),
+            paths["bucket"],
+        )
+
+    if "hybrid" in missing:
         _save_preprocessor(
             HybridPreprocessor(
-                buckets_per_field,
-                frequent_categories,
+                vocabularies,
                 tuple(negative_values),
                 positive_mean,
                 positive_scale,
@@ -627,7 +647,7 @@ def _valid_encoded_split(
             if values_path.exists()
             else None
         )
-    except (EOFError, OSError, ValueError):
+    except EOFError, OSError, ValueError:
         return False
 
     shape = (row_count, NUM_FIELDS)
@@ -786,9 +806,7 @@ def prepare_encoded_data(
         digest = file_digest(file, "sha256").hexdigest()[:16]
     cache_key = preprocessor_path.name.removesuffix(".pkl.zstd")
     root = (
-        corpus.cache_dir
-        / f"encoded-v{ENCODED_CACHE_VERSION}"
-        / f"{cache_key}-{digest}"
+        corpus.cache_dir / f"encoded-v{ENCODED_CACHE_VERSION}" / f"{cache_key}-{digest}"
     )
 
     def prepare(name: str, rows: range) -> Path:

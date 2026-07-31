@@ -114,7 +114,6 @@ class Profile:
     preprocessor_fraction: float = 0.1
     preprocessor_seed: int = 0
     min_count: int = 10
-    buckets_per_field: int = 2**15
 
     def __post_init__(self) -> None:
         if not self.train_sizes or self.train_sizes != tuple(
@@ -138,7 +137,6 @@ PROFILES: dict[str, Profile] = {
         evaluation_seeds=SeedGrid(),
         batch_size=256,
         min_count=2,
-        buckets_per_field=2**8,
     ),
     "small": Profile(
         train_sizes=(2**14, 2**18, 2**22),
@@ -387,7 +385,6 @@ def run_profile(
         sample_size=sample_size,
         sample_seed=profile.preprocessor_seed,
         min_count=profile.min_count,
-        buckets_per_field=profile.buckets_per_field,
         progress=progress,
         progress_file=progress_file,
     )
@@ -555,9 +552,7 @@ def validate_raw(
     evaluation = raw.loc[raw["phase"] == "evaluation"]
     for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
         observed_curves = set(
-            rows[CURVE_COLUMNS]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
+            rows[CURVE_COLUMNS].drop_duplicates().itertuples(index=False, name=None)
         )
         if observed_curves != expected_curves:
             raise ValueError(f"{phase} has an incomplete model/checkpoint grid")

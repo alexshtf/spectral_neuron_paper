@@ -174,18 +174,23 @@ file is written. The first run builds memory-mapped raw and encoded caches besid
 data; later trajectories reuse the encoded features directly. Fitted preprocessors are
 stored as `.pkl.zstd` at Zstandard level 3 because they are loaded wholly into memory.
 Legacy `.pkl` preprocessors are migrated by streaming them into the compressed format.
-Memory-mapped data caches remain uncompressed, and existing cache identities remain
-reusable.
+Memory-mapped data caches remain uncompressed.
 The canonical train encoding for repeated shuffling is the seed- and pass-independent
 `encoded-v4` cache. It stores field-local feature IDs as uint16 values and restores
 their fixed global field offsets in each int32 training batch. Older encoded-cache
-directories may coexist with it and can be removed later if their disk space is
-needed; the raw and preprocessor caches do not need to be rebuilt.
+directories and hashed preprocessors may coexist with the exact-mapping caches and can
+be removed later if their disk space is needed. The first exact-mapping run rebuilds
+the fitted preprocessors and encoded features while reusing the raw corpus and shuffle
+caches.
 
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
-training split. Each model then consumes the repeated-shuffle stream using Adam, with
-validation measurements taken at every requested examples-seen checkpoint. Dense
-parameters use Adam and sparse embedding tables use SparseAdam.
+training split. Retained categorical values receive exact field-local IDs; missing
+values and rare or unseen values use separate reserved IDs. Bucket numerics retain
+their winner-style log-squared transformation, then use exact IDs over each field's
+fitted transformed range, with separate missing and out-of-range IDs. Each model then
+consumes the repeated-shuffle stream using Adam, with validation measurements taken at
+every requested examples-seen checkpoint. Dense parameters use Adam and sparse
+embedding tables use SparseAdam.
 The full profile evaluates its explicit power-of-two grid through `2**28` and stops
 there; the stream automatically creates however many training-pool permutations that
 budget requires. Its four evaluation data-order seeds are held out from tuning.
