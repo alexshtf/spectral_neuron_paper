@@ -12,7 +12,7 @@ from paper.models import (
 )
 
 
-def test_tril_embed_outputs_symmetric():
+def test_tril_embed_is_isometric():
     embed = TrilEmbed(4)
     x = torch.randn(3, 4 * 5 // 2)
 
@@ -20,6 +20,9 @@ def test_tril_embed_outputs_symmetric():
 
     assert mat.shape == (3, 4, 4)
     assert torch.allclose(mat, mat.transpose(-1, -2))
+    torch.testing.assert_close(
+        mat.square().sum(dim=(-2, -1)), x.square().sum(dim=-1)
+    )
 
 
 def _assert_centered_gapped_identity_initialization(
@@ -113,13 +116,14 @@ def test_monotone_spectral_initialization_uses_the_same_pencil_contract():
 
 def test_last_monotone_model_matches_matrix_path():
     model = KthEigvalLastMonotone(num_features=3, dim=2, eig_idx=1)
+    sqrt_2 = 2**0.5
     with torch.no_grad():
         model.dense_tril.copy_(
             torch.tensor(
                 [
-                    [1.0, 0.2, 2.0],
-                    [0.5, -0.4, -0.25],
-                    [-1.0, 0.3, 0.75],
+                    [1.0, sqrt_2 * 0.2, 2.0],
+                    [0.5, sqrt_2 * -0.4, -0.25],
+                    [-1.0, sqrt_2 * 0.3, 0.75],
                 ]
             )
         )
@@ -237,14 +241,15 @@ def test_factorization_machine_matches_pairwise_definition():
 
 def test_sparse_spectral_model_sums_feature_matrices():
     model = SparseKthEigval(num_features=3, num_fields=2, dim=2, eig_idx=1)
+    sqrt_2 = 2**0.5
     with torch.no_grad():
         model.base_tril.copy_(torch.tensor([1.0, 0.0, 2.0]))
         model.feature_tril.weight.copy_(
             torch.tensor(
                 [
                     [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [0.0, 1.0, 3.0],
+                    [0.0, sqrt_2, 0.0],
+                    [0.0, sqrt_2, 3.0],
                 ]
             )
         )

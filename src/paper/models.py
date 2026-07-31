@@ -1,10 +1,17 @@
 from dataclasses import dataclass
+from math import sqrt
 from typing import Literal
 
 import torch
 from torch import nn
 
 type ModelKind = Literal["unconstrained", "monotone"]
+
+
+def _scale_tril_off_diagonal(
+    x: torch.Tensor, diagonal: torch.Tensor, factor: float
+) -> torch.Tensor:
+    return torch.where(diagonal, x, x * factor)
 
 
 def _resolve_eig_idx(dim: int, eig_idx: int | None) -> int:
@@ -70,7 +77,9 @@ def _reset_spectral_pencil_(
     spectrum = torch.arange(dim, device=base_tril.device) - eig_idx
     spectrum = spectrum.sign().to(base_tril.dtype)
     base = (q * spectrum) @ q.mT
-    base_tril.copy_(base[tril_i, tril_j])
+    base_tril.copy_(
+        _scale_tril_off_diagonal(base[tril_i, tril_j], diag, sqrt(2))
+    )
 
 
 @torch.no_grad()
@@ -91,9 +100,11 @@ class TrilEmbed(nn.Module):
         grid = torch.maximum(grid, grid.T)
 
         self.register_buffer("map", grid.flatten())
+        self.register_buffer("diagonal", i == j, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Expand lower-triangular coordinates to symmetric matrices."""
+        """Isometrically embed lower-triangular coordinates as symmetric matrices."""
+        x = _scale_tril_off_diagonal(x, self.diagonal, 1 / sqrt(2))
         return x[..., self.map].view(*x.shape[:-1], self.dim, self.dim)
 
 
