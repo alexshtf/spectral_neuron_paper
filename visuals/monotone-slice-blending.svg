@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1520" height="680" viewBox="0 0 1520 680" role="img" aria-labelledby="title description">
   <title id="title">Smoothly blending monotone slices into a bivariate target</title>
-  <desc id="description">Three-panel illustration. First, monotone functions of x2 are generated at evenly spaced x1 grid points. Second, an x1 value between two adjacent grid points determines a relative coordinate t and smoothstep weight w of t. Third, the two adjacent monotone curves are combined by a convex blend, which remains monotone in x2 and joins neighboring intervals smoothly in x1.</desc>
+  <desc id="description">Three-panel illustration. First, a ridgeline stack shows monotone functions of x2 generated at evenly spaced x1 grid points. Second, an x1 value between two adjacent grid points determines a relative coordinate t and smoothstep weight w of t. Third, the two adjacent monotone curves are combined by a convex blend, which remains monotone in x2 and joins neighboring intervals smoothly in x1.</desc>
 
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
@@ -10,14 +10,27 @@
     <marker id="axis-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
       <path d="M 0 0 L 8 4 L 0 8 z" fill="#4b5563"/>
     </marker>
+    <linearGradient id="ridge-neutral-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8993a1" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#8993a1" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="ridge-blue-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6fbb" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#2f6fbb" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="ridge-orange-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d97928" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#d97928" stop-opacity="0.02"/>
+    </linearGradient>
     <style>
-      .title { font: 500 28px "Helvetica Neue", Arial, sans-serif; fill: #18212f; }
-      .panel-title { font: 500 20px "Helvetica Neue", Arial, sans-serif; fill: #18212f; }
-      .label { font: 400 17px "Helvetica Neue", Arial, sans-serif; fill: #283445; }
-      .small { font: 400 15px "Helvetica Neue", Arial, sans-serif; fill: #5b6573; }
-      .math { font: italic 18px Georgia, "Times New Roman", serif; fill: #202938; }
-      .formula { font: italic 20px Georgia, "Times New Roman", serif; fill: #202938; }
-      .condition { font: 400 18px Georgia, "Times New Roman", serif; fill: #202938; }
+      .title { font: 500 32px "Avenir Next", Avenir, sans-serif; fill: #18212f; }
+      .panel-title { font: 500 24px "Avenir Next", Avenir, sans-serif; fill: #18212f; }
+      .label { font: 400 20px "Avenir Next", Avenir, sans-serif; fill: #283445; }
+      .small { font: 400 21px "Avenir Next", Avenir, sans-serif; fill: #5b6573; }
+      .math { font: italic 22px "STIX Two Text", "Times New Roman", serif; fill: #202938; }
+      .math-inline { font-family: "STIX Two Text", "Times New Roman", serif; font-style: italic; }
+      .formula { font: italic 21px "STIX Two Text", "Times New Roman", serif; fill: #202938; }
+      .condition { font: 400 19px "STIX Two Text", "Times New Roman", serif; fill: #202938; }
       .panel { fill: #fbfcfe; stroke: #d8dee8; stroke-width: 1.5; }
       .axis { fill: none; stroke: #4b5563; stroke-width: 1.5; }
       .guide { fill: none; stroke: #cbd2dc; stroke-width: 1.25; }
@@ -26,6 +39,7 @@
       .slice-left { fill: none; stroke: #2f6fbb; stroke-width: 3; stroke-linecap: round; }
       .slice-right { fill: none; stroke: #d97928; stroke-width: 3; stroke-linecap: round; }
       .slice-blend { fill: none; stroke: #6556a8; stroke-width: 4; stroke-linecap: round; }
+      .ridge-neutral { fill: none; stroke: #9ca6b4; stroke-width: 1.65; stroke-linecap: round; }
     </style>
   </defs>
 
@@ -33,50 +47,56 @@
   <text x="760" y="48" text-anchor="middle" class="title">Smoothly blending monotone slices</text>
 
   <!-- Panel backgrounds -->
-  <rect x="35" y="82" width="420" height="555" rx="12" class="panel"/>
-  <rect x="510" y="82" width="420" height="555" rx="12" class="panel"/>
-  <rect x="985" y="82" width="500" height="555" rx="12" class="panel"/>
+  <rect x="35" y="82" width="420" height="570" rx="12" class="panel"/>
+  <rect x="510" y="82" width="420" height="570" rx="12" class="panel"/>
+  <rect x="985" y="82" width="500" height="570" rx="12" class="panel"/>
 
   <!-- Process arrows -->
   <path d="M 467 360 H 496" fill="none" stroke="#7b8491" stroke-width="2" marker-end="url(#arrow)"/>
   <path d="M 942 360 H 971" fill="none" stroke="#7b8491" stroke-width="2" marker-end="url(#arrow)"/>
 
-  <!-- Panel A: monotone slices -->
+  <!-- Panel A: monotone slices as a ridgeline plot -->
   <text x="62" y="120" class="panel-title">(a) Generate monotone slices</text>
-  <text x="92" y="155" class="small">slice coordinate</text>
-  <text x="241" y="155" class="small">function of x<tspan baseline-shift="sub" font-size="70%">2</tspan></text>
+  <!-- Shared slice-coordinate axis -->
+  <line x1="142" y1="572" x2="142" y2="173" class="axis" marker-end="url(#axis-arrow)"/>
+  <text x="126" y="174" text-anchor="middle" class="math">x<tspan baseline-shift="sub" font-size="70%">1</tspan></text>
 
-  <line x1="166" y1="170" x2="166" y2="602" class="guide"/>
+  <!-- Soft overlapping ridge fills, ordered from ξₘ to ξ₁ -->
+  <path d="M 165 269 C 195 268, 210 257, 236 247 C 263 237, 277 218, 300 212 C 328 205, 343 194, 367 190 C 389 186, 405 178, 420 173 L 420 280 L 165 280 Z" fill="url(#ridge-neutral-fill)"/>
+  <path d="M 165 318 C 192 315, 211 308, 234 295 C 258 282, 281 280, 302 264 C 326 246, 349 245, 371 235 C 391 226, 406 226, 420 219 L 420 328 L 165 328 Z" fill="url(#ridge-neutral-fill)"/>
+  <path d="M 165 365 C 193 364, 208 351, 235 346 C 262 340, 275 321, 301 314 C 328 307, 342 289, 369 285 C 390 281, 404 271, 420 266 L 420 376 L 165 376 Z" fill="url(#ridge-neutral-fill)"/>
+  <path d="M 165 414 C 194 412, 209 402, 236 397 C 262 392, 278 380, 302 368 C 327 355, 346 347, 370 340 C 390 334, 405 323, 420 316 L 420 424 L 165 424 Z" fill="url(#ridge-orange-fill)"/>
+  <path d="M 165 461 C 194 459, 211 448, 236 443 C 261 438, 279 421, 303 414 C 328 406, 347 393, 370 388 C 391 383, 404 371, 420 363 L 420 472 L 165 472 Z" fill="url(#ridge-blue-fill)"/>
+  <path d="M 165 510 C 192 508, 209 496, 234 489 C 260 481, 276 467, 302 459 C 329 451, 344 435, 370 431 C 392 426, 406 416, 420 409 L 420 520 L 165 520 Z" fill="url(#ridge-neutral-fill)"/>
+  <path d="M 165 558 C 192 556, 211 547, 234 533 C 258 518, 278 513, 302 499 C 328 484, 347 476, 370 471 C 393 466, 407 462, 420 456 L 420 568 L 165 568 Z" fill="url(#ridge-neutral-fill)"/>
 
-  <text x="72" y="215" class="math">x<tspan baseline-shift="sub" font-size="70%">1</tspan> = ξ<tspan baseline-shift="sub" font-size="70%">1</tspan></text>
-  <circle cx="166" cy="209" r="4" fill="#8993a1"/>
-  <path d="M 190 231 C 225 230, 236 220, 262 216 C 296 210, 307 198, 340 194 C 369 190, 384 176, 417 171" class="slice-neutral"/>
+  <!-- Ridge outlines -->
+  <path d="M 165 269 C 195 268, 210 257, 236 247 C 263 237, 277 218, 300 212 C 328 205, 343 194, 367 190 C 389 186, 405 178, 420 173" class="ridge-neutral"/>
+  <path d="M 165 318 C 192 315, 211 308, 234 295 C 258 282, 281 280, 302 264 C 326 246, 349 245, 371 235 C 391 226, 406 226, 420 219" class="ridge-neutral"/>
+  <path d="M 165 365 C 193 364, 208 351, 235 346 C 262 340, 275 321, 301 314 C 328 307, 342 289, 369 285 C 390 281, 404 271, 420 266" class="ridge-neutral"/>
+  <path d="M 165 414 C 194 412, 209 402, 236 397 C 262 392, 278 380, 302 368 C 327 355, 346 347, 370 340 C 390 334, 405 323, 420 316" class="slice-right"/>
+  <path d="M 165 461 C 194 459, 211 448, 236 443 C 261 438, 279 421, 303 414 C 328 406, 347 393, 370 388 C 391 383, 404 371, 420 363" class="slice-left"/>
+  <path d="M 165 510 C 192 508, 209 496, 234 489 C 260 481, 276 467, 302 459 C 329 451, 344 435, 370 431 C 392 426, 406 416, 420 409" class="ridge-neutral"/>
+  <path d="M 165 558 C 192 556, 211 547, 234 533 C 258 518, 278 513, 302 499 C 328 484, 347 476, 370 471 C 393 466, 407 462, 420 456" class="ridge-neutral"/>
 
-  <text x="119" y="274" class="label">⋮</text>
-  <text x="292" y="274" class="label">⋮</text>
+  <!-- Labeled grid slices -->
+  <line x1="135" y1="280" x2="151" y2="280" class="guide"/>
+  <line x1="135" y1="328" x2="151" y2="328" class="guide"/>
+  <line x1="135" y1="376" x2="151" y2="376" class="guide"/>
+  <line x1="134" y1="424" x2="152" y2="424" stroke="#d97928" stroke-width="2.5"/>
+  <line x1="134" y1="472" x2="152" y2="472" stroke="#2f6fbb" stroke-width="2.5"/>
+  <line x1="135" y1="520" x2="151" y2="520" class="guide"/>
+  <line x1="135" y1="568" x2="151" y2="568" class="guide"/>
+  <text x="124" y="285" text-anchor="end" class="math">ξ<tspan baseline-shift="sub" font-size="70%">m</tspan></text>
+  <text x="124" y="429" text-anchor="end" class="math">ξ<tspan baseline-shift="sub" font-size="70%">i+1</tspan></text>
+  <text x="124" y="477" text-anchor="end" class="math">ξ<tspan baseline-shift="sub" font-size="70%">i</tspan></text>
+  <text x="124" y="573" text-anchor="end" class="math">ξ<tspan baseline-shift="sub" font-size="70%">1</tspan></text>
 
-  <rect x="57" y="292" width="378" height="83" rx="8" fill="#2f6fbb" opacity="0.07"/>
-  <text x="72" y="337" class="math" fill="#2f6fbb">x<tspan baseline-shift="sub" font-size="70%">1</tspan> = ξ<tspan baseline-shift="sub" font-size="70%">i</tspan></text>
-  <circle cx="166" cy="331" r="5" fill="#2f6fbb"/>
-  <path d="M 190 354 C 224 352, 230 338, 262 334 C 299 330, 307 309, 341 303 C 373 298, 389 281, 417 274" class="slice-left"/>
-
-  <rect x="57" y="386" width="378" height="83" rx="8" fill="#d97928" opacity="0.08"/>
-  <text x="72" y="431" class="math" fill="#d97928">x<tspan baseline-shift="sub" font-size="70%">1</tspan> = ξ<tspan baseline-shift="sub" font-size="70%">i+1</tspan></text>
-  <circle cx="166" cy="425" r="5" fill="#d97928"/>
-  <path d="M 190 447 C 218 446, 231 438, 258 433 C 289 427, 303 415, 332 399 C 363 383, 388 381, 417 359" class="slice-right"/>
-
-  <text x="119" y="505" class="label">⋮</text>
-  <text x="292" y="505" class="label">⋮</text>
-
-  <text x="72" y="562" class="math">x<tspan baseline-shift="sub" font-size="70%">1</tspan> = ξ<tspan baseline-shift="sub" font-size="70%">m</tspan></text>
-  <circle cx="166" cy="556" r="4" fill="#8993a1"/>
-  <path d="M 190 580 C 225 578, 239 569, 267 553 C 295 537, 322 532, 346 514 C 371 495, 393 493, 417 475" class="slice-neutral"/>
-
-  <line x1="190" y1="606" x2="416" y2="606" class="axis" marker-end="url(#axis-arrow)"/>
-  <text x="426" y="611" class="math">x<tspan baseline-shift="sub" font-size="70%">2</tspan></text>
+  <line x1="165" y1="598" x2="419" y2="598" class="axis" marker-end="url(#axis-arrow)"/>
+  <text x="426" y="597" class="math">x<tspan baseline-shift="sub" font-size="70%">2</tspan></text>
 
   <!-- Panel B: interval and smoothstep weight -->
-  <text x="537" y="120" class="panel-title">(b) Locate x<tspan baseline-shift="sub" font-size="70%">1</tspan> and compute its weight</text>
+  <text x="537" y="120" class="panel-title">(b) Locate <tspan class="math-inline">x<tspan baseline-shift="sub" font-size="70%">1</tspan></tspan> and compute its weight</text>
 
   <line x1="559" y1="199" x2="881" y2="199" class="axis" marker-end="url(#axis-arrow)"/>
   <line x1="586" y1="187" x2="586" y2="211" stroke="#2f6fbb" stroke-width="3"/>
@@ -86,30 +106,120 @@
   <text x="692" y="179" text-anchor="middle" class="math" fill="#6556a8">x<tspan baseline-shift="sub" font-size="70%">1</tspan></text>
   <text x="850" y="236" text-anchor="middle" class="math" fill="#d97928">ξ<tspan baseline-shift="sub" font-size="70%">i+1</tspan></text>
   <path d="M 586 254 V 266 H 850 V 254" fill="none" stroke="#a9b1bd" stroke-width="1.5"/>
-  <text x="718" y="288" text-anchor="middle" class="formula">t = (x<tspan baseline-shift="sub" font-size="70%">1</tspan> − ξ<tspan baseline-shift="sub" font-size="70%">i</tspan>) / (ξ<tspan baseline-shift="sub" font-size="70%">i+1</tspan> − ξ<tspan baseline-shift="sub" font-size="70%">i</tspan>)</text>
+  <svg x="654.3" y="270" width="127.4" height="58.72" viewBox="144.9728 -24.4806 53.0981 24.4731" preserveAspectRatio="xMidYMid meet" style="color:#202938" aria-label="Relative coordinate t" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Relative coordinate t</title>
+  <defs>
+  <use id='tex1-g3-42' xlink:href='#tex1-g2-42' transform='scale(1.3333)'/>
+  <use id='tex1-g3-61' xlink:href='#tex1-g2-61' transform='scale(1.3333)'/>
+  <use id='tex1-g1-24' xlink:href='#tex1-g0-24' transform='scale(1.3333)'/>
+  <use id='tex1-g1-116' xlink:href='#tex1-g0-116' transform='scale(1.3333)'/>
+  <use id='tex1-g1-120' xlink:href='#tex1-g0-120' transform='scale(1.3333)'/>
+  <path id='tex1-g2-42' d='M4.9166-1.6812V-2.1893H.4633V-1.6812H4.9166Z'/>
+  <path id='tex1-g2-43' d='M4.9166-1.6812V-2.1893H2.9589V-4.1694H2.4209V-2.1893H.4633V-1.6812H2.4209V.2989H2.9589V-1.6812H4.9166Z'/>
+  <path id='tex1-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex1-g2-61' d='M4.9166-2.4433V-2.9514H.4633V-2.4433H4.9166ZM4.9166-.9191V-1.4197H.4633V-.9191H4.9166Z'/>
+  <path id='tex1-g0-24' d='M2.802-2.9215C2.4209-2.9141 2.0772-2.8244 1.6289-2.6451C1.4944-2.8618 1.4197-3.0037 1.4197-3.2204C1.4197-4.1544 3.0262-4.4159 3.0486-4.4159C3.5118-4.4682 3.5567-4.6252 3.5567-4.8194C3.5567-5.0361 3.4819-5.1706 3.4147-5.1706C3.3101-5.1706 2.7945-5.0137 2.1743-4.6775C1.9726-4.7746 1.8232-4.8792 1.8232-5.1108C1.8232-5.3126 1.8904-5.4172 2.0697-5.5741L1.9726-5.7086C1.6364-5.5741 1.3151-5.3051 1.3151-5.0286C1.3151-4.6625 1.6588-4.5504 1.8829-4.5056V-4.4757C1.3225-4.1993 1.0162-3.8406 1.0162-3.3026C1.0162-2.9066 1.2478-2.7198 1.4271-2.5704V-2.5479C.9116-2.2939 .4633-1.9352 .4633-1.2478C.4633 .3362 2.4583-.269 2.4583 .5529C2.4583 .9041 1.9502 1.0162 1.4496 1.0237C1.2478 1.0237 1.0237 1.0087 .8667 .9938L.8593 1.076C.8593 1.33 1.0012 1.6438 1.4047 1.6438C1.9054 1.6438 2.7945 1.2105 2.7945 .2765C2.7945-.9639 .8144-.4558 .8144-1.3973C.8144-1.8007 1.076-2.1743 1.6812-2.3462C1.7186-2.3462 2.0399-2.2267 2.5106-2.2267C2.675-2.2267 2.8767-2.3238 2.9141-2.6376C2.929-2.7945 2.8991-2.9215 2.802-2.9215Z'/>
+  <path id='tex1-g0-105' d='M1.8157-4.5579C1.8157-4.797 1.6588-4.9689 1.4122-4.9689C1.1731-4.9689 1.0162-4.812 1.0162-4.5579C1.0162-4.2964 1.1731-4.1619 1.4122-4.1619C1.6588-4.1619 1.8157-4.3039 1.8157-4.5579ZM1.6364-3.5567H1.472L.4259-3.4745V-3.2727C.4259-3.2727 .5529-3.2877 .68-3.2877C.8817-3.2877 .9191-3.1681 .9191-3.071C.9191-2.944 .8966-2.8394 .8966-2.8394L.5156-1.061C.4184-.6202 .3885-.4558 .3885-.3288C.3885-.0672 .5604 .0672 .8593 .0672C1.3524 .0672 1.6438-.3512 1.9054-.7173L1.7559-.8294C1.6364-.6949 1.4346-.4408 1.1806-.4408C1.0909-.4408 1.0461-.4857 1.0461-.5828C1.0461-.6874 1.0834-.8966 1.0834-.8966L1.6364-3.5567Z'/>
+  <path id='tex1-g0-116' d='M2.3611-3.5342H1.6214L1.8232-4.4309H1.599C1.2254-3.7808 1.0461-3.6463 .5679-3.3998L.538-3.2428H.9639L.4483-.7547C.4408-.7098 .396-.4558 .396-.3288C.396-.0971 .538 .0672 .8518 .0672C1.4421 .0672 1.7559-.4857 1.9726-.7771L1.8232-.8892C1.5616-.5529 1.4047-.4408 1.188-.4408C1.0834-.4408 1.061-.5156 1.061-.5978C1.061-.7248 1.1133-.9714 1.1133-.9714L1.5616-3.2428H2.3014L2.3611-3.5342Z'/>
+  <path id='tex1-g0-120' d='M2.3537-2.2267H2.3313L2.2416-2.6077C2.137-3.0112 1.995-3.34 1.8157-3.5492H1.7036L.665-3.4296V-3.2055C.665-3.2055 .7771-3.2279 .8966-3.2279C1.3898-3.2354 1.5168-3.0336 1.7186-2.406L1.9278-1.726L1.3898-.9415C1.0984-.523 .9639-.5156 .934-.5156C.807-.5156 .6276-.6127 .4633-.6127C.2839-.6127 .1719-.4483 .1719-.2989C.1719-.1121 .2839 .0672 .6052 .0672C1.0535 .0672 1.3001-.2839 1.5392-.6725L2.0174-1.4496H2.0473L2.2341-.6949C2.3387-.2092 2.5031 .0747 2.8468 .0747C3.3549 .0747 3.6687-.4334 3.8854-.7621L3.7285-.8817C3.5268-.6127 3.3848-.4633 3.1905-.4633C2.9589-.4633 2.8095-.7397 2.6002-1.4271L2.4433-1.9352L2.8991-2.66C3.0262-2.8692 3.1308-2.9738 3.3026-2.9738C3.3998-2.9738 3.5716-2.8991 3.6912-2.8991C3.8929-2.8991 4.0349-3.071 4.0349-3.2503C4.0349-3.4595 3.9452-3.5791 3.6613-3.5791C3.2204-3.5791 2.9215-3.213 2.7198-2.8543L2.3537-2.2267Z'/>
+  </defs>
+  <g id='tex1-page1'>
+  <g fill='currentColor'>
+  <use x='144.4448' y='-9.7459' xlink:href='#tex1-g1-116'/>
+  <use x='150.8783' y='-9.7459' xlink:href='#tex1-g3-61'/>
+  <use x='165.5149' y='-16.8692' xlink:href='#tex1-g1-120'/>
+  <use x='171.084' y='-14.777' xlink:href='#tex1-g2-49'/>
+  <use x='177.4946' y='-16.8692' xlink:href='#tex1-g3-42'/>
+  <use x='186.8816' y='-16.8692' xlink:href='#tex1-g1-24'/>
+  <use x='191.7633' y='-14.777' xlink:href='#tex1-g0-105'/>
+  </g>
+  <rect x='162.0143' y='-12.655' height='.6775' width='36.0566' fill='currentColor'/>
+  <g fill='currentColor'>
+  <use x='162.0143' y='-2.3985' xlink:href='#tex1-g1-24'/>
+  <use x='166.896' y='-.3063' xlink:href='#tex1-g0-105'/>
+  <use x='169.2048' y='-.3063' xlink:href='#tex1-g2-43'/>
+  <use x='174.5846' y='-.3063' xlink:href='#tex1-g2-49'/>
+  <use x='180.9952' y='-2.3985' xlink:href='#tex1-g3-42'/>
+  <use x='190.3822' y='-2.3985' xlink:href='#tex1-g1-24'/>
+  <use x='195.2639' y='-.3063' xlink:href='#tex1-g0-105'/>
+  </g>
+  </g>
+
+    </svg>
 
   <!-- Smoothstep plot -->
   <line x1="575" y1="500" x2="859" y2="500" class="axis" marker-end="url(#axis-arrow)"/>
-  <line x1="575" y1="500" x2="575" y2="321" class="axis" marker-end="url(#axis-arrow)"/>
+  <line x1="575" y1="500" x2="575" y2="365" class="axis" marker-end="url(#axis-arrow)"/>
   <text x="865" y="506" class="math">t</text>
-  <text x="559" y="316" class="math">w</text>
+  <text x="559" y="360" class="math">w</text>
   <text x="575" y="522" text-anchor="middle" class="small">0</text>
   <text x="845" y="522" text-anchor="middle" class="small">1</text>
   <text x="557" y="505" text-anchor="end" class="small">0</text>
-  <text x="557" y="335" text-anchor="end" class="small">1</text>
-  <line x1="575" y1="330" x2="845" y2="330" class="guide dashed"/>
-  <polyline points="575,500 588.5,499.8 602,498.5 615.5,495.5 629,490.2 642.5,482.5 656,472.3 669.5,460.1 683,446.0 696.5,430.9 710,415 723.5,399.1 737,384.0 750.5,369.9 764,357.7 777.5,347.5 791,339.8 804.5,334.5 818,331.5 831.5,330.2 845,330" fill="none" stroke="#6556a8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="683" y1="500" x2="683" y2="446" stroke="#6556a8" stroke-width="1.5" stroke-dasharray="4 4"/>
-  <line x1="575" y1="446" x2="683" y2="446" stroke="#6556a8" stroke-width="1.5" stroke-dasharray="4 4"/>
-  <circle cx="683" cy="446" r="5" fill="#6556a8" stroke="#ffffff" stroke-width="2"/>
-  <text x="710" y="319" text-anchor="middle" class="formula">w(t) = 6t<tspan baseline-shift="super" font-size="70%">5</tspan> − 15t<tspan baseline-shift="super" font-size="70%">4</tspan> + 10t<tspan baseline-shift="super" font-size="70%">3</tspan></text>
+  <text x="557" y="380" text-anchor="end" class="small">1</text>
+  <line x1="575" y1="375" x2="845" y2="375" class="guide dashed"/>
+  <polyline points="575,500.0 588.5,499.9 602,498.9 615.5,496.7 629,492.8 642.5,487.1 656,479.6 669.5,470.6 683,460.3 696.5,449.1 710,437.5 723.5,425.9 737,414.7 750.5,404.4 764,395.4 777.5,387.9 791,382.2 804.5,378.3 818,376.1 831.5,375.1 845,375.0" fill="none" stroke="#6556a8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="683" y1="500" x2="683" y2="460.3" stroke="#6556a8" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <line x1="575" y1="460.3" x2="683" y2="460.3" stroke="#6556a8" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <circle cx="683" cy="460.3" r="5" fill="#6556a8" stroke="#ffffff" stroke-width="2"/>
+  <svg x="596.7" y="337" width="242.5" height="24.62" viewBox="121.155 -10.1942 101.0501 10.259" preserveAspectRatio="xMidYMid meet" style="color:#202938" aria-label="Quintic smoothstep weight" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Quintic smoothstep weight</title>
+  <defs>
+  <use id='tex2-g3-42' xlink:href='#tex2-g2-42' transform='scale(1.3333)'/>
+  <use id='tex2-g3-43' xlink:href='#tex2-g2-43' transform='scale(1.3333)'/>
+  <use id='tex2-g3-46' xlink:href='#tex2-g2-46' transform='scale(1.3333)'/>
+  <use id='tex2-g3-47' xlink:href='#tex2-g2-47' transform='scale(1.3333)'/>
+  <use id='tex2-g3-48' xlink:href='#tex2-g2-48' transform='scale(1.3333)'/>
+  <use id='tex2-g3-49' xlink:href='#tex2-g2-49' transform='scale(1.3333)'/>
+  <use id='tex2-g3-53' xlink:href='#tex2-g2-53' transform='scale(1.3333)'/>
+  <use id='tex2-g3-54' xlink:href='#tex2-g2-54' transform='scale(1.3333)'/>
+  <use id='tex2-g3-61' xlink:href='#tex2-g2-61' transform='scale(1.3333)'/>
+  <use id='tex2-g1-116' xlink:href='#tex2-g0-116' transform='scale(1.3333)'/>
+  <use id='tex2-g1-119' xlink:href='#tex2-g0-119' transform='scale(1.3333)'/>
+  <path id='tex2-g2-42' d='M4.9166-1.6812V-2.1893H.4633V-1.6812H4.9166Z'/>
+  <path id='tex2-g2-43' d='M4.9166-1.6812V-2.1893H2.9589V-4.1694H2.4209V-2.1893H.4633V-1.6812H2.4209V.2989H2.9589V-1.6812H4.9166Z'/>
+  <path id='tex2-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex2-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex2-g2-48' d='M3.4969-2.3686C3.4969-3.9078 2.8244-4.797 1.8605-4.797C.7771-4.797 .2017-3.8107 .2017-2.391C.2017-1.0685 .6426 .0822 1.8456 .0822C3.0187 .0822 3.4969-1.0909 3.4969-2.3686ZM2.7721-2.3238C2.7721-.8892 2.4359-.1868 1.8456-.1868C1.2478-.1868 .9191-.9041 .9191-2.3537C.9191-3.8331 1.2478-4.543 1.8381-4.543C2.4508-4.543 2.7721-3.8406 2.7721-2.3238Z'/>
+  <path id='tex2-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex2-g2-51' d='M.6426-3.721C.8966-4.1171 1.1731-4.3263 1.6214-4.3263C2.0847-4.3263 2.3836-4.0722 2.3836-3.6314C2.3836-3.0262 1.8531-2.6152 1.345-2.6152H1.203V-2.3313H1.3524C2.0697-2.3313 2.7049-1.8904 2.7049-1.2254C2.7049-.4932 2.2491-.2765 1.7783-.2765C1.599-.2765 1.4944-.3064 1.1731-.4707C.9116-.6052 .8518-.6426 .7323-.6426C.538-.6426 .4408-.4707 .4408-.3138C.4408-.1196 .6052 .0971 1.2777 .0971C2.3686 .0971 3.3176-.4259 3.3176-1.4496C3.3176-2.1146 2.8169-2.5106 2.2192-2.6974V-2.7198C2.6899-3.0187 3.0262-3.2951 3.0262-3.8107C3.0262-4.3786 2.5853-4.812 1.8232-4.812C1.2105-4.812 .7472-4.4682 .4707-3.8182L.6426-3.721Z'/>
+  <path id='tex2-g2-52' d='M3.594-1.1806V-1.6961H2.8319V-4.8194H2.3761L.0971-1.6513V-1.1806H2.1669V0H2.8319V-1.1806H3.594ZM2.1669-1.6961H.5081V-1.726L2.137-4.005H2.1669V-1.6961Z'/>
+  <path id='tex2-g2-53' d='M3.1158-4.1021L3.2354-4.7073H1.188L.7248-2.7572L.8144-2.6451C.9191-2.6451 .9564-2.6451 1.1507-2.6301C2.1818-2.5778 2.7646-2.2715 2.7646-1.3375C2.7646-.5604 2.2939-.2765 1.7634-.2765C1.2852-.2765 1.0386-.6426 .7397-.6426C.5529-.6426 .4408-.4932 .4408-.3213C.4408-.0448 .7248 .0971 1.3001 .0971C2.4882 .0971 3.3101-.4857 3.3101-1.6364C3.3101-2.8095 2.391-3.1606 1.5093-3.2279L1.1582-3.2503L1.3599-4.1021H3.1158Z'/>
+  <path id='tex2-g2-54' d='M3.1009-4.8269C1.4944-4.7597 .3362-3.721 .3362-1.9203C.3362-.8219 .8219 .0897 1.9352 .0897C2.8767 .0897 3.4147-.5006 3.4147-1.5168C3.4147-2.4956 2.8842-3.0859 2.0697-3.0859C1.6812-3.0859 1.4047-2.9215 1.0984-2.6227L1.0461-2.6301C1.2329-3.721 2.0697-4.4533 3.1158-4.6102L3.1009-4.8269ZM2.7646-1.457C2.7646-.5081 2.4658-.1719 1.9651-.1719C1.3151-.1719 1.0087-.8369 1.0087-1.7634C1.0087-2.4134 1.4122-2.6526 1.8456-2.6526C2.4658-2.6526 2.7646-2.1295 2.7646-1.457Z'/>
+  <path id='tex2-g2-61' d='M4.9166-2.4433V-2.9514H.4633V-2.4433H4.9166ZM4.9166-.9191V-1.4197H.4633V-.9191H4.9166Z'/>
+  <path id='tex2-g0-116' d='M2.3611-3.5342H1.6214L1.8232-4.4309H1.599C1.2254-3.7808 1.0461-3.6463 .5679-3.3998L.538-3.2428H.9639L.4483-.7547C.4408-.7098 .396-.4558 .396-.3288C.396-.0971 .538 .0672 .8518 .0672C1.4421 .0672 1.7559-.4857 1.9726-.7771L1.8232-.8892C1.5616-.5529 1.4047-.4408 1.188-.4408C1.0834-.4408 1.061-.5156 1.061-.5978C1.061-.7248 1.1133-.9714 1.1133-.9714L1.5616-3.2428H2.3014L2.3611-3.5342Z'/>
+  <path id='tex2-g0-119' d='M2.944-3.4969L2.6451-1.9352C2.533-1.3151 2.2491-.411 1.6289-.411C1.2702-.411 1.1432-.7397 1.1432-1.1283C1.1432-1.4645 1.2403-1.8605 1.3076-2.122L1.6588-3.5567H1.4944L.396-3.4745V-3.2653C.396-3.2653 .6202-3.2877 .7397-3.2877C.8742-3.2877 .9191-3.1831 .9191-3.056C.9191-2.9066 .8667-2.7273 .8443-2.6451L.6949-2.0772C.6127-1.7634 .5305-1.3674 .5305-1.0087C.5305-.4334 .7472 .0672 1.3898 .0672C2.0772 .0672 2.3462-.3362 2.6002-.9788H2.6376C2.6301-.8966 2.6227-.7846 2.6227-.6874C2.6227-.269 2.8095 .0672 3.3026 .0672C4.5953 .0672 5.2453-1.5392 5.2453-2.675C5.2453-3.2055 5.0137-3.5791 4.6775-3.5791C4.5205-3.5791 4.3935-3.467 4.3935-3.2653C4.3935-2.9365 4.8493-2.7572 4.8493-2.2341C4.8493-1.5392 4.4832-.411 3.5866-.411C3.2951-.411 3.1158-.5978 3.1158-1.061C3.1158-1.33 3.1681-1.6663 3.1681-1.6663L3.5342-3.4969H2.944Z'/>
+  </defs>
+  <g id='tex2-page2'>
+  <g fill='currentColor'>
+  <use x='120.6269' y='-1.7883' xlink:href='#tex2-g1-119'/>
+  <use x='128.1686' y='-1.7883' xlink:href='#tex2-g3-46'/>
+  <use x='131.7153' y='-1.7883' xlink:href='#tex2-g1-116'/>
+  <use x='135.3816' y='-1.7883' xlink:href='#tex2-g3-47'/>
+  <use x='141.6956' y='-1.7883' xlink:href='#tex2-g3-61'/>
+  <use x='151.6361' y='-1.7883' xlink:href='#tex2-g3-54'/>
+  <use x='156.5676' y='-1.7883' xlink:href='#tex2-g1-116'/>
+  <use x='160.2338' y='-5.3748' xlink:href='#tex2-g2-53'/>
+  <use x='166.6444' y='-1.7883' xlink:href='#tex2-g3-42'/>
+  <use x='176.0314' y='-1.7883' xlink:href='#tex2-g3-49'/>
+  <use x='180.9629' y='-1.7883' xlink:href='#tex2-g3-53'/>
+  <use x='185.8944' y='-1.7883' xlink:href='#tex2-g1-116'/>
+  <use x='189.5606' y='-5.3748' xlink:href='#tex2-g2-52'/>
+  <use x='195.9713' y='-1.7883' xlink:href='#tex2-g3-43'/>
+  <use x='205.3582' y='-1.7883' xlink:href='#tex2-g3-49'/>
+  <use x='210.2897' y='-1.7883' xlink:href='#tex2-g3-48'/>
+  <use x='215.2212' y='-1.7883' xlink:href='#tex2-g1-116'/>
+  <use x='218.8875' y='-5.3748' xlink:href='#tex2-g2-51'/>
+  </g>
+  </g>
+
+    </svg>
 
   <!-- Weight bar -->
-  <text x="575" y="556" class="small">convex weights at the selected x<tspan baseline-shift="sub" font-size="70%">1</tspan></text>
+  <text x="575" y="556" class="small">weights at selected <tspan class="math-inline">x<tspan baseline-shift="sub" font-size="70%">1</tspan></tspan></text>
   <rect x="575" y="573" width="184" height="18" rx="4" fill="#2f6fbb"/>
   <rect x="759" y="573" width="86" height="18" rx="4" fill="#d97928"/>
-  <text x="667" y="614" text-anchor="middle" class="small">1 − w(t) on f<tspan baseline-shift="sub" font-size="70%">i</tspan></text>
-  <text x="802" y="614" text-anchor="middle" class="small">w(t) on f<tspan baseline-shift="sub" font-size="70%">i+1</tspan></text>
+  <text x="667" y="617" text-anchor="middle" class="small"><tspan class="math-inline">1 − w(t)</tspan> on <tspan class="math-inline">f<tspan baseline-shift="sub" font-size="70%">i</tspan></tspan></text>
+  <text x="802" y="617" text-anchor="middle" class="small"><tspan class="math-inline">w(t)</tspan> on <tspan class="math-inline">f<tspan baseline-shift="sub" font-size="70%">i+1</tspan></tspan></text>
 
   <!-- Panel C: convex blend -->
   <text x="1012" y="120" class="panel-title">(c) Blend the neighboring slices</text>
@@ -128,18 +238,259 @@
   <circle cx="1258" cy="300" r="4.5" fill="#d97928"/>
   <circle cx="1258" cy="324" r="6" fill="#6556a8" stroke="#ffffff" stroke-width="2"/>
 
-  <line x1="1122" y1="160" x2="1152" y2="160" class="slice-left"/>
-  <text x="1161" y="166" class="math" fill="#2f6fbb">f<tspan baseline-shift="sub" font-size="70%">i</tspan>(x<tspan baseline-shift="sub" font-size="70%">2</tspan>)</text>
-  <line x1="1233" y1="160" x2="1263" y2="160" class="slice-right"/>
-  <text x="1272" y="166" class="math" fill="#d97928">f<tspan baseline-shift="sub" font-size="70%">i+1</tspan>(x<tspan baseline-shift="sub" font-size="70%">2</tspan>)</text>
-  <line x1="1122" y1="190" x2="1152" y2="190" class="slice-blend"/>
-  <text x="1161" y="196" class="math" fill="#6556a8">f(x<tspan baseline-shift="sub" font-size="70%">1</tspan>, x<tspan baseline-shift="sub" font-size="70%">2</tspan>)</text>
+  <line x1="1101" y1="160" x2="1131" y2="160" class="slice-left"/>
+  <svg x="1139" y="148.5" width="60" height="22.76" viewBox="159.1881 -9.4545 25.0062 9.4844" preserveAspectRatio="xMidYMid meet" style="color:#2f6fbb" aria-label="Left monotone slice" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Left monotone slice</title>
+  <defs>
+  <use id='tex6-g3-46' xlink:href='#tex6-g2-46' transform='scale(1.3333)'/>
+  <use id='tex6-g3-47' xlink:href='#tex6-g2-47' transform='scale(1.3333)'/>
+  <use id='tex6-g1-102' xlink:href='#tex6-g0-102' transform='scale(1.3333)'/>
+  <use id='tex6-g1-120' xlink:href='#tex6-g0-120' transform='scale(1.3333)'/>
+  <path id='tex6-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex6-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex6-g2-50' d='M3.467-1.1955H3.2503C3.0785-.7472 2.9813-.5903 2.5853-.5903H1.5467L1.0237-.5679V-.6052L2.01-1.5392C2.802-2.3387 3.2279-2.8543 3.2279-3.5193C3.2279-4.3039 2.6376-4.812 1.7933-4.812C1.0685-4.812 .5604-4.3935 .3288-3.6687L.5081-3.594C.7846-4.1544 1.1133-4.3263 1.599-4.3263C2.1743-4.3263 2.533-3.9676 2.533-3.4072C2.533-2.6227 2.1594-2.1519 1.4197-1.3898L.2839-.254V0H3.2279L3.467-1.1955Z'/>
+  <path id='tex6-g0-102' d='M1.4869-3.4894L1.4496-3.1831H2.0697L1.5616-.396C1.4869 0 1.2852 1.4197 .8593 1.4197C.5753 1.4197 .8294 .7547 .3811 .7547C.1868 .7547 .0747 .9191 .0747 1.1283C.0747 1.3898 .2615 1.6588 .7323 1.6588C1.7559 1.6588 2.0996-.0149 2.2267-.6575L2.6899-3.1831H3.3848L3.4371-3.4894H2.7273L2.8244-4.0199C2.9514-4.655 3.1831-5.0959 3.5866-5.0959C3.736-5.0959 3.7285-4.8941 3.7509-4.7223C3.7733-4.5654 3.8481-4.4384 4.0274-4.4384C4.2142-4.4384 4.3562-4.5504 4.3562-4.7746C4.3562-5.0959 4.1096-5.3126 3.6837-5.3126C3.0112-5.3126 2.7049-4.9689 2.5031-4.6177C2.3238-4.3113 2.2267-3.9078 2.1295-3.4894H1.4869Z'/>
+  <path id='tex6-g0-105' d='M1.8157-4.5579C1.8157-4.797 1.6588-4.9689 1.4122-4.9689C1.1731-4.9689 1.0162-4.812 1.0162-4.5579C1.0162-4.2964 1.1731-4.1619 1.4122-4.1619C1.6588-4.1619 1.8157-4.3039 1.8157-4.5579ZM1.6364-3.5567H1.472L.4259-3.4745V-3.2727C.4259-3.2727 .5529-3.2877 .68-3.2877C.8817-3.2877 .9191-3.1681 .9191-3.071C.9191-2.944 .8966-2.8394 .8966-2.8394L.5156-1.061C.4184-.6202 .3885-.4558 .3885-.3288C.3885-.0672 .5604 .0672 .8593 .0672C1.3524 .0672 1.6438-.3512 1.9054-.7173L1.7559-.8294C1.6364-.6949 1.4346-.4408 1.1806-.4408C1.0909-.4408 1.0461-.4857 1.0461-.5828C1.0461-.6874 1.0834-.8966 1.0834-.8966L1.6364-3.5567Z'/>
+  <path id='tex6-g0-120' d='M2.3537-2.2267H2.3313L2.2416-2.6077C2.137-3.0112 1.995-3.34 1.8157-3.5492H1.7036L.665-3.4296V-3.2055C.665-3.2055 .7771-3.2279 .8966-3.2279C1.3898-3.2354 1.5168-3.0336 1.7186-2.406L1.9278-1.726L1.3898-.9415C1.0984-.523 .9639-.5156 .934-.5156C.807-.5156 .6276-.6127 .4633-.6127C.2839-.6127 .1719-.4483 .1719-.2989C.1719-.1121 .2839 .0672 .6052 .0672C1.0535 .0672 1.3001-.2839 1.5392-.6725L2.0174-1.4496H2.0473L2.2341-.6949C2.3387-.2092 2.5031 .0747 2.8468 .0747C3.3549 .0747 3.6687-.4334 3.8854-.7621L3.7285-.8817C3.5268-.6127 3.3848-.4633 3.1905-.4633C2.9589-.4633 2.8095-.7397 2.6002-1.4271L2.4433-1.9352L2.8991-2.66C3.0262-2.8692 3.1308-2.9738 3.3026-2.9738C3.3998-2.9738 3.5716-2.8991 3.6912-2.8991C3.8929-2.8991 4.0349-3.071 4.0349-3.2503C4.0349-3.4595 3.9452-3.5791 3.6613-3.5791C3.2204-3.5791 2.9215-3.213 2.7198-2.8543L2.3537-2.2267Z'/>
+  </defs>
+  <g id='tex6-page6'>
+  <g fill='currentColor'>
+  <use x='159.0884' y='-2.1818' xlink:href='#tex6-g1-102'/>
+  <use x='164.9564' y='-.0897' xlink:href='#tex6-g0-105'/>
+  <use x='167.7634' y='-2.1818' xlink:href='#tex6-g3-46'/>
+  <use x='171.3101' y='-2.1818' xlink:href='#tex6-g1-120'/>
+  <use x='176.8792' y='-.0897' xlink:href='#tex6-g2-50'/>
+  <use x='181.076' y='-2.1818' xlink:href='#tex6-g3-47'/>
+  </g>
+  </g>
+
+    </svg>
+  <line x1="1216" y1="160" x2="1246" y2="160" class="slice-right"/>
+  <svg x="1254" y="148.5" width="82" height="23.25" viewBox="154.6489 -9.6712 34.0847 9.6638" preserveAspectRatio="xMidYMid meet" style="color:#d97928" aria-label="Right monotone slice" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Right monotone slice</title>
+  <defs>
+  <use id='tex7-g3-46' xlink:href='#tex7-g2-46' transform='scale(1.3333)'/>
+  <use id='tex7-g3-47' xlink:href='#tex7-g2-47' transform='scale(1.3333)'/>
+  <use id='tex7-g1-102' xlink:href='#tex7-g0-102' transform='scale(1.3333)'/>
+  <use id='tex7-g1-120' xlink:href='#tex7-g0-120' transform='scale(1.3333)'/>
+  <path id='tex7-g2-43' d='M4.9166-1.6812V-2.1893H2.9589V-4.1694H2.4209V-2.1893H.4633V-1.6812H2.4209V.2989H2.9589V-1.6812H4.9166Z'/>
+  <path id='tex7-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex7-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex7-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex7-g2-50' d='M3.467-1.1955H3.2503C3.0785-.7472 2.9813-.5903 2.5853-.5903H1.5467L1.0237-.5679V-.6052L2.01-1.5392C2.802-2.3387 3.2279-2.8543 3.2279-3.5193C3.2279-4.3039 2.6376-4.812 1.7933-4.812C1.0685-4.812 .5604-4.3935 .3288-3.6687L.5081-3.594C.7846-4.1544 1.1133-4.3263 1.599-4.3263C2.1743-4.3263 2.533-3.9676 2.533-3.4072C2.533-2.6227 2.1594-2.1519 1.4197-1.3898L.2839-.254V0H3.2279L3.467-1.1955Z'/>
+  <path id='tex7-g0-102' d='M1.4869-3.4894L1.4496-3.1831H2.0697L1.5616-.396C1.4869 0 1.2852 1.4197 .8593 1.4197C.5753 1.4197 .8294 .7547 .3811 .7547C.1868 .7547 .0747 .9191 .0747 1.1283C.0747 1.3898 .2615 1.6588 .7323 1.6588C1.7559 1.6588 2.0996-.0149 2.2267-.6575L2.6899-3.1831H3.3848L3.4371-3.4894H2.7273L2.8244-4.0199C2.9514-4.655 3.1831-5.0959 3.5866-5.0959C3.736-5.0959 3.7285-4.8941 3.7509-4.7223C3.7733-4.5654 3.8481-4.4384 4.0274-4.4384C4.2142-4.4384 4.3562-4.5504 4.3562-4.7746C4.3562-5.0959 4.1096-5.3126 3.6837-5.3126C3.0112-5.3126 2.7049-4.9689 2.5031-4.6177C2.3238-4.3113 2.2267-3.9078 2.1295-3.4894H1.4869Z'/>
+  <path id='tex7-g0-105' d='M1.8157-4.5579C1.8157-4.797 1.6588-4.9689 1.4122-4.9689C1.1731-4.9689 1.0162-4.812 1.0162-4.5579C1.0162-4.2964 1.1731-4.1619 1.4122-4.1619C1.6588-4.1619 1.8157-4.3039 1.8157-4.5579ZM1.6364-3.5567H1.472L.4259-3.4745V-3.2727C.4259-3.2727 .5529-3.2877 .68-3.2877C.8817-3.2877 .9191-3.1681 .9191-3.071C.9191-2.944 .8966-2.8394 .8966-2.8394L.5156-1.061C.4184-.6202 .3885-.4558 .3885-.3288C.3885-.0672 .5604 .0672 .8593 .0672C1.3524 .0672 1.6438-.3512 1.9054-.7173L1.7559-.8294C1.6364-.6949 1.4346-.4408 1.1806-.4408C1.0909-.4408 1.0461-.4857 1.0461-.5828C1.0461-.6874 1.0834-.8966 1.0834-.8966L1.6364-3.5567Z'/>
+  <path id='tex7-g0-120' d='M2.3537-2.2267H2.3313L2.2416-2.6077C2.137-3.0112 1.995-3.34 1.8157-3.5492H1.7036L.665-3.4296V-3.2055C.665-3.2055 .7771-3.2279 .8966-3.2279C1.3898-3.2354 1.5168-3.0336 1.7186-2.406L1.9278-1.726L1.3898-.9415C1.0984-.523 .9639-.5156 .934-.5156C.807-.5156 .6276-.6127 .4633-.6127C.2839-.6127 .1719-.4483 .1719-.2989C.1719-.1121 .2839 .0672 .6052 .0672C1.0535 .0672 1.3001-.2839 1.5392-.6725L2.0174-1.4496H2.0473L2.2341-.6949C2.3387-.2092 2.5031 .0747 2.8468 .0747C3.3549 .0747 3.6687-.4334 3.8854-.7621L3.7285-.8817C3.5268-.6127 3.3848-.4633 3.1905-.4633C2.9589-.4633 2.8095-.7397 2.6002-1.4271L2.4433-1.9352L2.8991-2.66C3.0262-2.8692 3.1308-2.9738 3.3026-2.9738C3.3998-2.9738 3.5716-2.8991 3.6912-2.8991C3.8929-2.8991 4.0349-3.071 4.0349-3.2503C4.0349-3.4595 3.9452-3.5791 3.6613-3.5791C3.2204-3.5791 2.9215-3.213 2.7198-2.8543L2.3537-2.2267Z'/>
+  </defs>
+  <g id='tex7-page7'>
+  <g fill='currentColor'>
+  <use x='154.5492' y='-2.3985' xlink:href='#tex7-g1-102'/>
+  <use x='160.4172' y='-.3063' xlink:href='#tex7-g0-105'/>
+  <use x='162.7261' y='-.3063' xlink:href='#tex7-g2-43'/>
+  <use x='168.1059' y='-.3063' xlink:href='#tex7-g2-49'/>
+  <use x='172.3026' y='-2.3985' xlink:href='#tex7-g3-46'/>
+  <use x='175.8493' y='-2.3985' xlink:href='#tex7-g1-120'/>
+  <use x='181.4184' y='-.3063' xlink:href='#tex7-g2-50'/>
+  <use x='185.6152' y='-2.3985' xlink:href='#tex7-g3-47'/>
+  </g>
+  </g>
+
+    </svg>
+  <line x1="1350" y1="160" x2="1380" y2="160" class="slice-blend"/>
+  <svg x="1388" y="148.5" width="88" height="22.88" viewBox="153.4538 -9.4545 36.4748 9.4844" preserveAspectRatio="xMidYMid meet" style="color:#6556a8" aria-label="Blended monotone slice" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Blended monotone slice</title>
+  <defs>
+  <use id='tex8-g3-46' xlink:href='#tex8-g2-46' transform='scale(1.3333)'/>
+  <use id='tex8-g3-47' xlink:href='#tex8-g2-47' transform='scale(1.3333)'/>
+  <use id='tex8-g1-59' xlink:href='#tex8-g0-59' transform='scale(1.3333)'/>
+  <use id='tex8-g1-102' xlink:href='#tex8-g0-102' transform='scale(1.3333)'/>
+  <use id='tex8-g1-120' xlink:href='#tex8-g0-120' transform='scale(1.3333)'/>
+  <path id='tex8-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex8-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex8-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex8-g2-50' d='M3.467-1.1955H3.2503C3.0785-.7472 2.9813-.5903 2.5853-.5903H1.5467L1.0237-.5679V-.6052L2.01-1.5392C2.802-2.3387 3.2279-2.8543 3.2279-3.5193C3.2279-4.3039 2.6376-4.812 1.7933-4.812C1.0685-4.812 .5604-4.3935 .3288-3.6687L.5081-3.594C.7846-4.1544 1.1133-4.3263 1.599-4.3263C2.1743-4.3263 2.533-3.9676 2.533-3.4072C2.533-2.6227 2.1594-2.1519 1.4197-1.3898L.2839-.254V0H3.2279L3.467-1.1955Z'/>
+  <path id='tex8-g0-59' d='M.5529 1.061C.8518 .9265 1.4795 .6725 1.4795-.1719C1.4795-.5828 1.2777-.8294 .9041-.8294C.6052-.8294 .4408-.6276 .4408-.3885C.4408-.1719 .5604 .0149 .8518 .0149C.934 .0149 1.0012 0 1.0834-.0299C1.0834 .5753 .7397 .7547 .4633 .8742L.5529 1.061Z'/>
+  <path id='tex8-g0-102' d='M1.4869-3.4894L1.4496-3.1831H2.0697L1.5616-.396C1.4869 0 1.2852 1.4197 .8593 1.4197C.5753 1.4197 .8294 .7547 .3811 .7547C.1868 .7547 .0747 .9191 .0747 1.1283C.0747 1.3898 .2615 1.6588 .7323 1.6588C1.7559 1.6588 2.0996-.0149 2.2267-.6575L2.6899-3.1831H3.3848L3.4371-3.4894H2.7273L2.8244-4.0199C2.9514-4.655 3.1831-5.0959 3.5866-5.0959C3.736-5.0959 3.7285-4.8941 3.7509-4.7223C3.7733-4.5654 3.8481-4.4384 4.0274-4.4384C4.2142-4.4384 4.3562-4.5504 4.3562-4.7746C4.3562-5.0959 4.1096-5.3126 3.6837-5.3126C3.0112-5.3126 2.7049-4.9689 2.5031-4.6177C2.3238-4.3113 2.2267-3.9078 2.1295-3.4894H1.4869Z'/>
+  <path id='tex8-g0-120' d='M2.3537-2.2267H2.3313L2.2416-2.6077C2.137-3.0112 1.995-3.34 1.8157-3.5492H1.7036L.665-3.4296V-3.2055C.665-3.2055 .7771-3.2279 .8966-3.2279C1.3898-3.2354 1.5168-3.0336 1.7186-2.406L1.9278-1.726L1.3898-.9415C1.0984-.523 .9639-.5156 .934-.5156C.807-.5156 .6276-.6127 .4633-.6127C.2839-.6127 .1719-.4483 .1719-.2989C.1719-.1121 .2839 .0672 .6052 .0672C1.0535 .0672 1.3001-.2839 1.5392-.6725L2.0174-1.4496H2.0473L2.2341-.6949C2.3387-.2092 2.5031 .0747 2.8468 .0747C3.3549 .0747 3.6687-.4334 3.8854-.7621L3.7285-.8817C3.5268-.6127 3.3848-.4633 3.1905-.4633C2.9589-.4633 2.8095-.7397 2.6002-1.4271L2.4433-1.9352L2.8991-2.66C3.0262-2.8692 3.1308-2.9738 3.3026-2.9738C3.3998-2.9738 3.5716-2.8991 3.6912-2.8991C3.8929-2.8991 4.0349-3.071 4.0349-3.2503C4.0349-3.4595 3.9452-3.5791 3.6613-3.5791C3.2204-3.5791 2.9215-3.213 2.7198-2.8543L2.3537-2.2267Z'/>
+  </defs>
+  <g id='tex8-page8'>
+  <g fill='currentColor'>
+  <use x='153.3541' y='-2.1818' xlink:href='#tex8-g1-102'/>
+  <use x='159.5708' y='-2.1818' xlink:href='#tex8-g3-46'/>
+  <use x='163.1175' y='-2.1818' xlink:href='#tex8-g1-120'/>
+  <use x='168.6866' y='-.0897' xlink:href='#tex8-g2-49'/>
+  <use x='172.8834' y='-2.1818' xlink:href='#tex8-g1-59'/>
+  <use x='177.0444' y='-2.1818' xlink:href='#tex8-g1-120'/>
+  <use x='182.6135' y='-.0897' xlink:href='#tex8-g2-50'/>
+  <use x='186.8103' y='-2.1818' xlink:href='#tex8-g3-47'/>
+  </g>
+  </g>
+
+    </svg>
 
   <rect x="1016" y="480" width="438" height="52" rx="8" fill="#6556a8" opacity="0.07"/>
-  <text x="1235" y="513" text-anchor="middle" class="formula">f(x<tspan baseline-shift="sub" font-size="70%">1</tspan>,x<tspan baseline-shift="sub" font-size="70%">2</tspan>) = [1 − w(t)] f<tspan baseline-shift="sub" font-size="70%">i</tspan>(x<tspan baseline-shift="sub" font-size="70%">2</tspan>) + w(t) f<tspan baseline-shift="sub" font-size="70%">i+1</tspan>(x<tspan baseline-shift="sub" font-size="70%">2</tspan>)</text>
+  <svg x="1021" y="494" width="428" height="22.90" viewBox="81.2015 -9.6911 180.9794 9.6837" preserveAspectRatio="xMidYMid meet" style="color:#202938" aria-label="Convex blend formula" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Convex blend formula</title>
+  <defs>
+  <use id='tex3-g3-42' xlink:href='#tex3-g2-42' transform='scale(1.3333)'/>
+  <use id='tex3-g3-43' xlink:href='#tex3-g2-43' transform='scale(1.3333)'/>
+  <use id='tex3-g3-46' xlink:href='#tex3-g2-46' transform='scale(1.3333)'/>
+  <use id='tex3-g3-47' xlink:href='#tex3-g2-47' transform='scale(1.3333)'/>
+  <use id='tex3-g3-49' xlink:href='#tex3-g2-49' transform='scale(1.3333)'/>
+  <use id='tex3-g3-61' xlink:href='#tex3-g2-61' transform='scale(1.3333)'/>
+  <use id='tex3-g3-91' xlink:href='#tex3-g2-91' transform='scale(1.3333)'/>
+  <use id='tex3-g3-93' xlink:href='#tex3-g2-93' transform='scale(1.3333)'/>
+  <use id='tex3-g1-59' xlink:href='#tex3-g0-59' transform='scale(1.3333)'/>
+  <use id='tex3-g1-102' xlink:href='#tex3-g0-102' transform='scale(1.3333)'/>
+  <use id='tex3-g1-116' xlink:href='#tex3-g0-116' transform='scale(1.3333)'/>
+  <use id='tex3-g1-119' xlink:href='#tex3-g0-119' transform='scale(1.3333)'/>
+  <use id='tex3-g1-120' xlink:href='#tex3-g0-120' transform='scale(1.3333)'/>
+  <path id='tex3-g2-42' d='M4.9166-1.6812V-2.1893H.4633V-1.6812H4.9166Z'/>
+  <path id='tex3-g2-43' d='M4.9166-1.6812V-2.1893H2.9589V-4.1694H2.4209V-2.1893H.4633V-1.6812H2.4209V.2989H2.9589V-1.6812H4.9166Z'/>
+  <path id='tex3-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex3-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex3-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex3-g2-50' d='M3.467-1.1955H3.2503C3.0785-.7472 2.9813-.5903 2.5853-.5903H1.5467L1.0237-.5679V-.6052L2.01-1.5392C2.802-2.3387 3.2279-2.8543 3.2279-3.5193C3.2279-4.3039 2.6376-4.812 1.7933-4.812C1.0685-4.812 .5604-4.3935 .3288-3.6687L.5081-3.594C.7846-4.1544 1.1133-4.3263 1.599-4.3263C2.1743-4.3263 2.533-3.9676 2.533-3.4072C2.533-2.6227 2.1594-2.1519 1.4197-1.3898L.2839-.254V0H3.2279L3.467-1.1955Z'/>
+  <path id='tex3-g2-61' d='M4.9166-2.4433V-2.9514H.4633V-2.4433H4.9166ZM4.9166-.9191V-1.4197H.4633V-.9191H4.9166Z'/>
+  <path id='tex3-g2-91' d='M2.2416 1.3898V1.1656H1.2702V-5.2453H2.2416V-5.4695H.68V1.3898H2.2416Z'/>
+  <path id='tex3-g2-93' d='M1.9128 1.3898V-5.4695H.3512V-5.2453H1.3225V1.1656H.3512V1.3898H1.9128Z'/>
+  <path id='tex3-g0-59' d='M.5529 1.061C.8518 .9265 1.4795 .6725 1.4795-.1719C1.4795-.5828 1.2777-.8294 .9041-.8294C.6052-.8294 .4408-.6276 .4408-.3885C.4408-.1719 .5604 .0149 .8518 .0149C.934 .0149 1.0012 0 1.0834-.0299C1.0834 .5753 .7397 .7547 .4633 .8742L.5529 1.061Z'/>
+  <path id='tex3-g0-102' d='M1.4869-3.4894L1.4496-3.1831H2.0697L1.5616-.396C1.4869 0 1.2852 1.4197 .8593 1.4197C.5753 1.4197 .8294 .7547 .3811 .7547C.1868 .7547 .0747 .9191 .0747 1.1283C.0747 1.3898 .2615 1.6588 .7323 1.6588C1.7559 1.6588 2.0996-.0149 2.2267-.6575L2.6899-3.1831H3.3848L3.4371-3.4894H2.7273L2.8244-4.0199C2.9514-4.655 3.1831-5.0959 3.5866-5.0959C3.736-5.0959 3.7285-4.8941 3.7509-4.7223C3.7733-4.5654 3.8481-4.4384 4.0274-4.4384C4.2142-4.4384 4.3562-4.5504 4.3562-4.7746C4.3562-5.0959 4.1096-5.3126 3.6837-5.3126C3.0112-5.3126 2.7049-4.9689 2.5031-4.6177C2.3238-4.3113 2.2267-3.9078 2.1295-3.4894H1.4869Z'/>
+  <path id='tex3-g0-105' d='M1.8157-4.5579C1.8157-4.797 1.6588-4.9689 1.4122-4.9689C1.1731-4.9689 1.0162-4.812 1.0162-4.5579C1.0162-4.2964 1.1731-4.1619 1.4122-4.1619C1.6588-4.1619 1.8157-4.3039 1.8157-4.5579ZM1.6364-3.5567H1.472L.4259-3.4745V-3.2727C.4259-3.2727 .5529-3.2877 .68-3.2877C.8817-3.2877 .9191-3.1681 .9191-3.071C.9191-2.944 .8966-2.8394 .8966-2.8394L.5156-1.061C.4184-.6202 .3885-.4558 .3885-.3288C.3885-.0672 .5604 .0672 .8593 .0672C1.3524 .0672 1.6438-.3512 1.9054-.7173L1.7559-.8294C1.6364-.6949 1.4346-.4408 1.1806-.4408C1.0909-.4408 1.0461-.4857 1.0461-.5828C1.0461-.6874 1.0834-.8966 1.0834-.8966L1.6364-3.5567Z'/>
+  <path id='tex3-g0-116' d='M2.3611-3.5342H1.6214L1.8232-4.4309H1.599C1.2254-3.7808 1.0461-3.6463 .5679-3.3998L.538-3.2428H.9639L.4483-.7547C.4408-.7098 .396-.4558 .396-.3288C.396-.0971 .538 .0672 .8518 .0672C1.4421 .0672 1.7559-.4857 1.9726-.7771L1.8232-.8892C1.5616-.5529 1.4047-.4408 1.188-.4408C1.0834-.4408 1.061-.5156 1.061-.5978C1.061-.7248 1.1133-.9714 1.1133-.9714L1.5616-3.2428H2.3014L2.3611-3.5342Z'/>
+  <path id='tex3-g0-119' d='M2.944-3.4969L2.6451-1.9352C2.533-1.3151 2.2491-.411 1.6289-.411C1.2702-.411 1.1432-.7397 1.1432-1.1283C1.1432-1.4645 1.2403-1.8605 1.3076-2.122L1.6588-3.5567H1.4944L.396-3.4745V-3.2653C.396-3.2653 .6202-3.2877 .7397-3.2877C.8742-3.2877 .9191-3.1831 .9191-3.056C.9191-2.9066 .8667-2.7273 .8443-2.6451L.6949-2.0772C.6127-1.7634 .5305-1.3674 .5305-1.0087C.5305-.4334 .7472 .0672 1.3898 .0672C2.0772 .0672 2.3462-.3362 2.6002-.9788H2.6376C2.6301-.8966 2.6227-.7846 2.6227-.6874C2.6227-.269 2.8095 .0672 3.3026 .0672C4.5953 .0672 5.2453-1.5392 5.2453-2.675C5.2453-3.2055 5.0137-3.5791 4.6775-3.5791C4.5205-3.5791 4.3935-3.467 4.3935-3.2653C4.3935-2.9365 4.8493-2.7572 4.8493-2.2341C4.8493-1.5392 4.4832-.411 3.5866-.411C3.2951-.411 3.1158-.5978 3.1158-1.061C3.1158-1.33 3.1681-1.6663 3.1681-1.6663L3.5342-3.4969H2.944Z'/>
+  <path id='tex3-g0-120' d='M2.3537-2.2267H2.3313L2.2416-2.6077C2.137-3.0112 1.995-3.34 1.8157-3.5492H1.7036L.665-3.4296V-3.2055C.665-3.2055 .7771-3.2279 .8966-3.2279C1.3898-3.2354 1.5168-3.0336 1.7186-2.406L1.9278-1.726L1.3898-.9415C1.0984-.523 .9639-.5156 .934-.5156C.807-.5156 .6276-.6127 .4633-.6127C.2839-.6127 .1719-.4483 .1719-.2989C.1719-.1121 .2839 .0672 .6052 .0672C1.0535 .0672 1.3001-.2839 1.5392-.6725L2.0174-1.4496H2.0473L2.2341-.6949C2.3387-.2092 2.5031 .0747 2.8468 .0747C3.3549 .0747 3.6687-.4334 3.8854-.7621L3.7285-.8817C3.5268-.6127 3.3848-.4633 3.1905-.4633C2.9589-.4633 2.8095-.7397 2.6002-1.4271L2.4433-1.9352L2.8991-2.66C3.0262-2.8692 3.1308-2.9738 3.3026-2.9738C3.3998-2.9738 3.5716-2.8991 3.6912-2.8991C3.8929-2.8991 4.0349-3.071 4.0349-3.2503C4.0349-3.4595 3.9452-3.5791 3.6613-3.5791C3.2204-3.5791 2.9215-3.213 2.7198-2.8543L2.3537-2.2267Z'/>
+  </defs>
+  <g id='tex3-page3'>
+  <g fill='currentColor'>
+  <use x='81.1019' y='-2.3985' xlink:href='#tex3-g1-102'/>
+  <use x='87.3186' y='-2.3985' xlink:href='#tex3-g3-46'/>
+  <use x='90.8653' y='-2.3985' xlink:href='#tex3-g1-120'/>
+  <use x='96.4344' y='-.3063' xlink:href='#tex3-g2-49'/>
+  <use x='100.6311' y='-2.3985' xlink:href='#tex3-g1-59'/>
+  <use x='104.7922' y='-2.3985' xlink:href='#tex3-g1-120'/>
+  <use x='110.3613' y='-.3063' xlink:href='#tex3-g2-50'/>
+  <use x='114.558' y='-2.3985' xlink:href='#tex3-g3-47'/>
+  <use x='120.8721' y='-2.3985' xlink:href='#tex3-g3-61'/>
+  <use x='130.8125' y='-2.3985' xlink:href='#tex3-g3-91'/>
+  <use x='134.2695' y='-2.3985' xlink:href='#tex3-g3-49'/>
+  <use x='141.4149' y='-2.3985' xlink:href='#tex3-g3-42'/>
+  <use x='150.8019' y='-2.3985' xlink:href='#tex3-g1-119'/>
+  <use x='158.3436' y='-2.3985' xlink:href='#tex3-g3-46'/>
+  <use x='161.8903' y='-2.3985' xlink:href='#tex3-g1-116'/>
+  <use x='165.5565' y='-2.3985' xlink:href='#tex3-g3-47'/>
+  <use x='169.1032' y='-2.3985' xlink:href='#tex3-g3-93'/>
+  <use x='172.5603' y='-2.3985' xlink:href='#tex3-g1-102'/>
+  <use x='178.4283' y='-.3063' xlink:href='#tex3-g0-105'/>
+  <use x='181.2352' y='-2.3985' xlink:href='#tex3-g3-46'/>
+  <use x='184.7819' y='-2.3985' xlink:href='#tex3-g1-120'/>
+  <use x='190.351' y='-.3063' xlink:href='#tex3-g2-50'/>
+  <use x='194.5478' y='-2.3985' xlink:href='#tex3-g3-47'/>
+  <use x='200.3084' y='-2.3985' xlink:href='#tex3-g3-43'/>
+  <use x='209.6953' y='-2.3985' xlink:href='#tex3-g1-119'/>
+  <use x='217.237' y='-2.3985' xlink:href='#tex3-g3-46'/>
+  <use x='220.7837' y='-2.3985' xlink:href='#tex3-g1-116'/>
+  <use x='224.45' y='-2.3985' xlink:href='#tex3-g3-47'/>
+  <use x='227.9967' y='-2.3985' xlink:href='#tex3-g1-102'/>
+  <use x='233.8647' y='-.3063' xlink:href='#tex3-g0-105'/>
+  <use x='236.1735' y='-.3063' xlink:href='#tex3-g2-43'/>
+  <use x='241.5533' y='-.3063' xlink:href='#tex3-g2-49'/>
+  <use x='245.7501' y='-2.3985' xlink:href='#tex3-g3-46'/>
+  <use x='249.2968' y='-2.3985' xlink:href='#tex3-g1-120'/>
+  <use x='254.8659' y='-.3063' xlink:href='#tex3-g2-50'/>
+  <use x='259.0627' y='-2.3985' xlink:href='#tex3-g3-47'/>
+  </g>
+  </g>
 
-  <text x="1235" y="566" text-anchor="middle" class="condition">w(0) = 0,  w(1) = 1</text>
-  <text x="1235" y="591" text-anchor="middle" class="condition">w′(0) = w′(1) = w″(0) = w″(1) = 0</text>
-  <text x="1235" y="615" text-anchor="middle" class="small">Adjacent intervals meet C<tspan baseline-shift="super" font-size="70%">2</tspan>-smoothly in x<tspan baseline-shift="sub" font-size="70%">1</tspan>.</text>
-  <text x="1235" y="634" text-anchor="middle" class="small">The convex blend remains increasing in x<tspan baseline-shift="sub" font-size="70%">2</tspan>.</text>
+    </svg>
+
+  <svg x="1130.5" y="548" width="209" height="21.87" viewBox="128.1657 -9.061 87.2204 9.1258" preserveAspectRatio="xMidYMid meet" style="color:#202938" aria-label="Endpoint values of w" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Endpoint values of w</title>
+  <defs>
+  <use id='tex4-g3-46' xlink:href='#tex4-g2-46' transform='scale(1.3333)'/>
+  <use id='tex4-g3-47' xlink:href='#tex4-g2-47' transform='scale(1.3333)'/>
+  <use id='tex4-g3-48' xlink:href='#tex4-g2-48' transform='scale(1.3333)'/>
+  <use id='tex4-g3-49' xlink:href='#tex4-g2-49' transform='scale(1.3333)'/>
+  <use id='tex4-g3-61' xlink:href='#tex4-g2-61' transform='scale(1.3333)'/>
+  <use id='tex4-g1-59' xlink:href='#tex4-g0-59' transform='scale(1.3333)'/>
+  <use id='tex4-g1-119' xlink:href='#tex4-g0-119' transform='scale(1.3333)'/>
+  <path id='tex4-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex4-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex4-g2-48' d='M3.4969-2.3686C3.4969-3.9078 2.8244-4.797 1.8605-4.797C.7771-4.797 .2017-3.8107 .2017-2.391C.2017-1.0685 .6426 .0822 1.8456 .0822C3.0187 .0822 3.4969-1.0909 3.4969-2.3686ZM2.7721-2.3238C2.7721-.8892 2.4359-.1868 1.8456-.1868C1.2478-.1868 .9191-.9041 .9191-2.3537C.9191-3.8331 1.2478-4.543 1.8381-4.543C2.4508-4.543 2.7721-3.8406 2.7721-2.3238Z'/>
+  <path id='tex4-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex4-g2-61' d='M4.9166-2.4433V-2.9514H.4633V-2.4433H4.9166ZM4.9166-.9191V-1.4197H.4633V-.9191H4.9166Z'/>
+  <path id='tex4-g0-59' d='M.5529 1.061C.8518 .9265 1.4795 .6725 1.4795-.1719C1.4795-.5828 1.2777-.8294 .9041-.8294C.6052-.8294 .4408-.6276 .4408-.3885C.4408-.1719 .5604 .0149 .8518 .0149C.934 .0149 1.0012 0 1.0834-.0299C1.0834 .5753 .7397 .7547 .4633 .8742L.5529 1.061Z'/>
+  <path id='tex4-g0-119' d='M2.944-3.4969L2.6451-1.9352C2.533-1.3151 2.2491-.411 1.6289-.411C1.2702-.411 1.1432-.7397 1.1432-1.1283C1.1432-1.4645 1.2403-1.8605 1.3076-2.122L1.6588-3.5567H1.4944L.396-3.4745V-3.2653C.396-3.2653 .6202-3.2877 .7397-3.2877C.8742-3.2877 .9191-3.1831 .9191-3.056C.9191-2.9066 .8667-2.7273 .8443-2.6451L.6949-2.0772C.6127-1.7634 .5305-1.3674 .5305-1.0087C.5305-.4334 .7472 .0672 1.3898 .0672C2.0772 .0672 2.3462-.3362 2.6002-.9788H2.6376C2.6301-.8966 2.6227-.7846 2.6227-.6874C2.6227-.269 2.8095 .0672 3.3026 .0672C4.5953 .0672 5.2453-1.5392 5.2453-2.675C5.2453-3.2055 5.0137-3.5791 4.6775-3.5791C4.5205-3.5791 4.3935-3.467 4.3935-3.2653C4.3935-2.9365 4.8493-2.7572 4.8493-2.2341C4.8493-1.5392 4.4832-.411 3.5866-.411C3.2951-.411 3.1158-.5978 3.1158-1.061C3.1158-1.33 3.1681-1.6663 3.1681-1.6663L3.5342-3.4969H2.944Z'/>
+  </defs>
+  <g id='tex4-page4'>
+  <g fill='currentColor'>
+  <use x='127.6377' y='-1.7883' xlink:href='#tex4-g1-119'/>
+  <use x='135.1794' y='-1.7883' xlink:href='#tex4-g3-46'/>
+  <use x='138.7261' y='-1.7883' xlink:href='#tex4-g3-48'/>
+  <use x='143.6576' y='-1.7883' xlink:href='#tex4-g3-47'/>
+  <use x='149.9716' y='-1.7883' xlink:href='#tex4-g3-61'/>
+  <use x='159.9121' y='-1.7883' xlink:href='#tex4-g3-48'/>
+  <use x='164.8436' y='-1.7883' xlink:href='#tex4-g1-59'/>
+  <use x='178.8676' y='-1.7883' xlink:href='#tex4-g1-119'/>
+  <use x='186.4093' y='-1.7883' xlink:href='#tex4-g3-46'/>
+  <use x='189.956' y='-1.7883' xlink:href='#tex4-g3-49'/>
+  <use x='194.8875' y='-1.7883' xlink:href='#tex4-g3-47'/>
+  <use x='201.2015' y='-1.7883' xlink:href='#tex4-g3-61'/>
+  <use x='211.142' y='-1.7883' xlink:href='#tex4-g3-49'/>
+  </g>
+  </g>
+
+    </svg>
+  <svg x="1053.5" y="576" width="363" height="23.49" viewBox="96.5721 -9.6936 150.826 9.7584" preserveAspectRatio="xMidYMid meet" style="color:#202938" aria-label="Endpoint derivatives of w" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <title>Endpoint derivatives of w</title>
+  <defs>
+  <use id='tex5-g3-46' xlink:href='#tex5-g2-46' transform='scale(1.3333)'/>
+  <use id='tex5-g3-47' xlink:href='#tex5-g2-47' transform='scale(1.3333)'/>
+  <use id='tex5-g3-48' xlink:href='#tex5-g2-48' transform='scale(1.3333)'/>
+  <use id='tex5-g3-49' xlink:href='#tex5-g2-49' transform='scale(1.3333)'/>
+  <use id='tex5-g3-61' xlink:href='#tex5-g2-61' transform='scale(1.3333)'/>
+  <use id='tex5-g1-119' xlink:href='#tex5-g0-119' transform='scale(1.3333)'/>
+  <path id='tex5-g2-46' d='M.3213-2.0473C.3213-.4035 1.1059 .7696 2.3088 1.3898L2.4284 1.1806C1.3375 .4633 .934-.5455 .934-2.0473C.934-3.5342 1.3375-4.5355 2.4284-5.2603L2.3088-5.4545C1.1059-4.8418 .3213-3.6762 .3213-2.0473Z'/>
+  <path id='tex5-g2-47' d='M2.3387-2.0473C2.3387-3.6762 1.5542-4.8418 .3512-5.4545L.2316-5.2603C1.3225-4.5355 1.726-3.5342 1.726-2.0473C1.726-.5455 1.3225 .4633 .2316 1.1806L.3512 1.3898C1.5542 .7696 2.3387-.4035 2.3387-2.0473Z'/>
+  <path id='tex5-g2-48' d='M3.4969-2.3686C3.4969-3.9078 2.8244-4.797 1.8605-4.797C.7771-4.797 .2017-3.8107 .2017-2.391C.2017-1.0685 .6426 .0822 1.8456 .0822C3.0187 .0822 3.4969-1.0909 3.4969-2.3686ZM2.7721-2.3238C2.7721-.8892 2.4359-.1868 1.8456-.1868C1.2478-.1868 .9191-.9041 .9191-2.3537C.9191-3.8331 1.2478-4.543 1.8381-4.543C2.4508-4.543 2.7721-3.8406 2.7721-2.3238Z'/>
+  <path id='tex5-g2-49' d='M3.1831 0V-.2092C2.4956-.2092 2.2192-.3437 2.2192-.7098V-4.7746H2.0025L.5529-4.3636V-4.1171C.7846-4.1918 1.1656-4.2366 1.3151-4.2366C1.5019-4.2366 1.5616-4.132 1.5616-3.8705V-.7098C1.5616-.3362 1.3001-.2092 .5978-.2092V0H3.1831Z'/>
+  <path id='tex5-g2-61' d='M4.9166-2.4433V-2.9514H.4633V-2.4433H4.9166ZM4.9166-.9191V-1.4197H.4633V-.9191H4.9166Z'/>
+  <path id='tex5-g2-168' d='M.5978-.2092C1.061-1.076 2.0174-2.9813 2.1818-3.4147C2.2192-3.5118 2.2565-3.6912 2.2565-3.7808C2.2565-4.1544 2.01-4.3188 1.7335-4.3188C1.5019-4.3188 1.2777-4.2366 1.1507-3.8481C1.0162-3.3998 .5305-1.2478 .3362-.3064L.5978-.2092Z'/>
+  <path id='tex5-g0-119' d='M2.944-3.4969L2.6451-1.9352C2.533-1.3151 2.2491-.411 1.6289-.411C1.2702-.411 1.1432-.7397 1.1432-1.1283C1.1432-1.4645 1.2403-1.8605 1.3076-2.122L1.6588-3.5567H1.4944L.396-3.4745V-3.2653C.396-3.2653 .6202-3.2877 .7397-3.2877C.8742-3.2877 .9191-3.1831 .9191-3.056C.9191-2.9066 .8667-2.7273 .8443-2.6451L.6949-2.0772C.6127-1.7634 .5305-1.3674 .5305-1.0087C.5305-.4334 .7472 .0672 1.3898 .0672C2.0772 .0672 2.3462-.3362 2.6002-.9788H2.6376C2.6301-.8966 2.6227-.7846 2.6227-.6874C2.6227-.269 2.8095 .0672 3.3026 .0672C4.5953 .0672 5.2453-1.5392 5.2453-2.675C5.2453-3.2055 5.0137-3.5791 4.6775-3.5791C4.5205-3.5791 4.3935-3.467 4.3935-3.2653C4.3935-2.9365 4.8493-2.7572 4.8493-2.2341C4.8493-1.5392 4.4832-.411 3.5866-.411C3.2951-.411 3.1158-.5978 3.1158-1.061C3.1158-1.33 3.1681-1.6663 3.1681-1.6663L3.5342-3.4969H2.944Z'/>
+  </defs>
+  <g id='tex5-page5'>
+  <g fill='currentColor'>
+  <use x='96.0441' y='-1.7883' xlink:href='#tex5-g1-119'/>
+  <use x='103.5858' y='-5.3748' xlink:href='#tex5-g2-168'/>
+  <use x='106.6842' y='-1.7883' xlink:href='#tex5-g3-46'/>
+  <use x='110.2309' y='-1.7883' xlink:href='#tex5-g3-48'/>
+  <use x='115.1624' y='-1.7883' xlink:href='#tex5-g3-47'/>
+  <use x='121.4764' y='-1.7883' xlink:href='#tex5-g3-61'/>
+  <use x='131.4169' y='-1.7883' xlink:href='#tex5-g1-119'/>
+  <use x='138.9586' y='-5.3748' xlink:href='#tex5-g2-168'/>
+  <use x='142.0569' y='-1.7883' xlink:href='#tex5-g3-46'/>
+  <use x='145.6036' y='-1.7883' xlink:href='#tex5-g3-49'/>
+  <use x='150.5351' y='-1.7883' xlink:href='#tex5-g3-47'/>
+  <use x='156.8492' y='-1.7883' xlink:href='#tex5-g3-61'/>
+  <use x='166.7896' y='-1.7883' xlink:href='#tex5-g1-119'/>
+  <use x='174.3313' y='-5.3748' xlink:href='#tex5-g2-168'/>
+  <use x='176.9316' y='-5.3748' xlink:href='#tex5-g2-168'/>
+  <use x='180.0299' y='-1.7883' xlink:href='#tex5-g3-46'/>
+  <use x='183.5766' y='-1.7883' xlink:href='#tex5-g3-48'/>
+  <use x='188.5081' y='-1.7883' xlink:href='#tex5-g3-47'/>
+  <use x='194.8222' y='-1.7883' xlink:href='#tex5-g3-61'/>
+  <use x='204.7626' y='-1.7883' xlink:href='#tex5-g1-119'/>
+  <use x='212.3043' y='-5.3748' xlink:href='#tex5-g2-168'/>
+  <use x='214.9045' y='-5.3748' xlink:href='#tex5-g2-168'/>
+  <use x='218.0029' y='-1.7883' xlink:href='#tex5-g3-46'/>
+  <use x='221.5496' y='-1.7883' xlink:href='#tex5-g3-49'/>
+  <use x='226.4811' y='-1.7883' xlink:href='#tex5-g3-47'/>
+  <use x='232.7951' y='-1.7883' xlink:href='#tex5-g3-61'/>
+  <use x='242.7356' y='-1.7883' xlink:href='#tex5-g3-48'/>
+  </g>
+  </g>
+
+    </svg>
+  <text x="1235" y="619" text-anchor="middle" class="small">Adjacent intervals meet <tspan class="math-inline">C<tspan baseline-shift="super" font-size="70%">2</tspan></tspan>-smoothly in <tspan class="math-inline">x<tspan baseline-shift="sub" font-size="70%">1</tspan></tspan>.</text>
+  <text x="1235" y="643" text-anchor="middle" class="small">The convex blend remains increasing in <tspan class="math-inline">x<tspan baseline-shift="sub" font-size="70%">2</tspan></tspan>.</text>
 </svg>
