@@ -115,8 +115,8 @@ def test_cli_accepts_append_mode():
 
 def test_default_path_is_protocol_specific():
     assert default_raw_path("full").name == ("criteo_scaling_full_repeated_shuffle.csv")
-    assert default_raw_path("full", "linear-new").name == (
-        "criteo_scaling_full_repeated_shuffle_linear-new.csv"
+    assert default_raw_path("full", "linear-continuous").name == (
+        "criteo_scaling_full_repeated_shuffle_linear-continuous.csv"
     )
 
 
@@ -405,7 +405,7 @@ def test_profile_evaluates_only_its_requested_train_sizes(tmp_path):
         profile,
         raw_path=raw_path,
         cache_dir=cache_dir,
-        variant="linear",
+        variant="linear-bucketed",
     )
 
     assert raw["train_pool_size"].unique().item() == 80
@@ -430,11 +430,11 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     summary = summarize_raw(raw)
 
     assert set(raw["model"]) == {
-        "linear",
-        "linear-new",
+        "linear-bucketed",
+        "linear-continuous",
         "fm",
-        "spectral-old",
-        "spectral-new",
+        "spectral-bucketed",
+        "spectral-continuous",
     }
     assert set(raw["protocol"]) == {"repeated_shuffle"}
     assert set(raw["optimizer"]) == {"adam+sparseadam"}
@@ -477,10 +477,10 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
         _tiny_profile(),
         raw_path=raw_path,
         cache_dir=cache_dir,
-        variant="linear-new",
+        variant="linear-continuous",
     )
 
-    assert set(raw["model"]) == {"linear-new"}
+    assert set(raw["model"]) == {"linear-continuous"}
     assert len(list(cache_dir.glob("preprocessor-v*_*.pkl.zstd"))) == 1
     assert legacy.exists()
     assert len(list((cache_dir / "encoded-v4").iterdir())) == 1
@@ -488,8 +488,10 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
 
 def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw):
     validate_raw(complete_raw, _tiny_profile())
-    linear = complete_raw.loc[complete_raw["model"] == "linear"].copy()
-    validate_raw(linear, _tiny_profile(), variant="linear")
+    linear = complete_raw.loc[
+        complete_raw["model"] == "linear-bucketed"
+    ].copy()
+    validate_raw(linear, _tiny_profile(), variant="linear-bucketed")
 
 
 def test_validate_raw_rejects_identity_and_incomplete_grids(complete_raw):
@@ -587,7 +589,7 @@ def test_lr_selection_uses_median_tuning_validation_only():
         "preprocessor_seed": 0,
         "train_pool_size": 80,
         "train_size": 32,
-        "model": "linear",
+        "model": "linear-bucketed",
         "dim": 0,
         "data_seed": 0,
     }
@@ -631,7 +633,7 @@ def test_lr_selection_keeps_training_pools_separate():
             "preprocessor_seed": 0,
             "train_pool_size": train_pool_size,
             "train_size": 32,
-            "model": "linear",
+            "model": "linear-bucketed",
             "dim": 0,
             "data_seed": 0,
             "init_seed": 0,

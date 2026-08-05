@@ -228,12 +228,12 @@ def test_plot_bivariate_target_gallery_draws_contours():
 
 def _criteo_results() -> pd.DataFrame:
     models = (
-        ("linear", 0),
-        ("linear-new", 0),
+        ("linear-bucketed", 0),
+        ("linear-continuous", 0),
         *(
             (model, dim)
             for dim in (3, 5)
-            for model in ("fm", "spectral-old", "spectral-new")
+            for model in ("fm", "spectral-bucketed", "spectral-continuous")
         ),
     )
     return pd.DataFrame(
@@ -257,11 +257,11 @@ def test_plot_criteo_models_by_dimension_facets_matched_models():
     fig = plot_criteo_models_by_dimension(_criteo_results())
     assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
     assert _legend_labels(fig) == [
-        "Linear",
-        "Linear-new",
+        "Linear (bucketed)",
+        "Linear (continuous)",
         "FM",
-        "Spectral-old",
-        "Spectral-new",
+        "Spectral (bucketed)",
+        "Spectral (continuous)",
     ]
     assert fig.legends[0].get_title().get_text() == "model"
     assert len(fig.axes[1].lines) == 5
@@ -272,13 +272,18 @@ def test_plot_criteo_models_by_dimension_facets_matched_models():
 def test_plot_criteo_spectral_comparison_facets_dimensions():
     fig = plot_criteo_spectral_comparison(_criteo_results())
     assert [ax.get_title() for ax in fig.axes] == ["dim=3", "dim=5"]
-    assert _legend_labels(fig) == ["Spectral-old", "Spectral-new"]
+    assert _legend_labels(fig) == [
+        "Spectral (bucketed)",
+        "Spectral (continuous)",
+    ]
     assert fig.legends[0].get_title().get_text() == "model"
     assert len(fig.axes[1].lines) == 2
     assert len(fig.axes[1].collections) == 2
 
 
-@pytest.mark.parametrize("variant", ["spectral-old", "spectral-new"])
+@pytest.mark.parametrize(
+    "variant", ["spectral-bucketed", "spectral-continuous"]
+)
 def test_plot_criteo_spectral_dimensions_uses_one_axis(variant):
     fig = plot_criteo_spectral_dimensions(_criteo_results(), variant)
     assert len(fig.axes) == 1

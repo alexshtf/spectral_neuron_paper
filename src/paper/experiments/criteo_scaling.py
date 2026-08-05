@@ -45,19 +45,19 @@ from paper.training import (
 
 
 type Variant = Literal[
-    "linear",
-    "linear-new",
+    "linear-bucketed",
+    "linear-continuous",
     "fm",
-    "spectral-old",
-    "spectral-new",
+    "spectral-bucketed",
+    "spectral-continuous",
 ]
 
 VARIANTS: tuple[Variant, ...] = (
-    "linear",
-    "linear-new",
+    "linear-bucketed",
+    "linear-continuous",
     "fm",
-    "spectral-old",
-    "spectral-new",
+    "spectral-bucketed",
+    "spectral-continuous",
 )
 
 OPTIMIZER = "adam+sparseadam"
@@ -167,17 +167,22 @@ class CriteoModelSpec:
 
     @property
     def preprocessing(self) -> PreprocessingKind:
-        return "hybrid" if self.variant.endswith("-new") else "bucket"
+        if self.variant in ("linear-continuous", "spectral-continuous"):
+            return "hybrid"
+        return "bucket"
 
 
 def _model_specs(
     profile: Profile, variants: tuple[Variant, ...]
 ) -> tuple[CriteoModelSpec, ...]:
-    specs = [CriteoModelSpec("linear"), CriteoModelSpec("linear-new")]
+    specs = [
+        CriteoModelSpec("linear-bucketed"),
+        CriteoModelSpec("linear-continuous"),
+    ]
     specs.extend(
         CriteoModelSpec(variant, dim)
         for dim in profile.dims
-        for variant in ("fm", "spectral-old", "spectral-new")
+        for variant in ("fm", "spectral-bucketed", "spectral-continuous")
     )
     return tuple(spec for spec in specs if spec.variant in variants)
 
@@ -202,12 +207,12 @@ class RunSettings:
 
 def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
     match spec.variant:
-        case "linear" | "linear-new":
+        case "linear-bucketed" | "linear-continuous":
             return SparseLinear(num_features, NUM_FIELDS)
         case "fm":
             rank = spec.dim * (spec.dim + 1) // 2 - 1
             return FactorizationMachine(num_features, NUM_FIELDS, rank)
-        case "spectral-old" | "spectral-new":
+        case "spectral-bucketed" | "spectral-continuous":
             return SparseKthEigval(num_features, NUM_FIELDS, spec.dim)
         case _:
             raise ValueError(spec.variant)

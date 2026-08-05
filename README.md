@@ -219,18 +219,20 @@ uv run python -m paper.experiments.criteo_scaling \
 ```
 
 Use `--cache-dir` to place the cache elsewhere and `--out` to set the result CSV path.
-For a sharded full run, start with `linear`, then append `linear-new` to the same output:
+For a sharded full run, start with `linear-bucketed`, then append
+`linear-continuous` to the same output:
 
 ```bash
 uv run python -m paper.experiments.criteo_scaling \
-  --data /path/to/train.txt --profile full --variant linear \
+  --data /path/to/train.txt --profile full --variant linear-bucketed \
   --out notebooks/runs/criteo_scaling_full_repeated_shuffle.csv \
   --write-mode overwrite
 uv run python -m paper.experiments.criteo_scaling \
-  --data /path/to/train.txt --profile full --variant linear-new \
+  --data /path/to/train.txt --profile full --variant linear-continuous \
   --out notebooks/runs/criteo_scaling_full_repeated_shuffle.csv \
   --write-mode append
 ```
 
-Append `fm`, `spectral-old`, and `spectral-new` in the same way. The notebook performs
-validation selection and aggregation directly from this raw result table.
+Append `fm`, `spectral-bucketed`, and `spectral-continuous` in the same way. The
+notebook performs validation selection and aggregation directly from this raw result
+table.

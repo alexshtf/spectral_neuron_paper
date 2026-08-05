@@ -420,38 +420,41 @@ def plot_scaling(
 
 
 CRITEO_MODEL_LABELS = {
-    "linear": "Linear",
-    "linear-new": "Linear-new",
+    "linear-bucketed": "Linear (bucketed)",
+    "linear-continuous": "Linear (continuous)",
     "fm": "FM",
-    "spectral-old": "Spectral-old",
-    "spectral-new": "Spectral-new",
+    "spectral-bucketed": "Spectral (bucketed)",
+    "spectral-continuous": "Spectral (continuous)",
 }
 
 CRITEO_MODEL_COLORS = {
-    "Linear": "#555555",
-    "Linear-new": "#CC78BC",
+    "Linear (bucketed)": "#555555",
+    "Linear (continuous)": "#CC78BC",
     "FM": "#0173B2",
-    "Spectral-old": "#DE8F05",
-    "Spectral-new": "#029E73",
+    "Spectral (bucketed)": "#DE8F05",
+    "Spectral (continuous)": "#029E73",
 }
 
 CRITEO_MODEL_MARKERS = {
-    "Linear": "o",
-    "Linear-new": "P",
+    "Linear (bucketed)": "o",
+    "Linear (continuous)": "P",
     "FM": "s",
-    "Spectral-old": "^",
-    "Spectral-new": "D",
+    "Spectral (bucketed)": "^",
+    "Spectral (continuous)": "D",
 }
 
 CRITEO_MODEL_DASHES = {
-    "Linear": "",
-    "Linear-new": (2, 2),
+    "Linear (bucketed)": "",
+    "Linear (continuous)": (2, 2),
     "FM": "",
-    "Spectral-old": (4, 2),
-    "Spectral-new": "",
+    "Spectral (bucketed)": (4, 2),
+    "Spectral (continuous)": "",
 }
 
-type CriteoSpectralVariant = Literal["spectral-old", "spectral-new"]
+type CriteoSpectralVariant = Literal[
+    "spectral-bucketed",
+    "spectral-continuous",
+]
 
 _DIMENSION_MARKERS = ("o", "s", "^", "D", "P", "X", "v", "<", ">", "*")
 
@@ -477,7 +480,7 @@ def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
 
 def _spectral_dimensions(results: pd.DataFrame) -> list[int]:
     values = results.loc[
-        results["model"].isin(("spectral-old", "spectral-new")),
+        results["model"].isin(("spectral-bucketed", "spectral-continuous")),
         "dim",
     ].unique()
     dimensions = sorted(map(int, values))
@@ -655,14 +658,14 @@ def plot_criteo_models_by_dimension(
     dimensions = _spectral_dimensions(results)
 
     nonlinear = results.loc[
-        results["model"].isin(("fm", "spectral-old", "spectral-new"))
+        results["model"].isin(("fm", "spectral-bucketed", "spectral-continuous"))
     ].copy()
     if not set(nonlinear["dim"]) <= set(dimensions):
         raise ValueError("some nonlinear models have no matched spectral dimension")
     nonlinear["dimension"] = nonlinear["dim"]
 
     linears = results.loc[
-        results["model"].isin(("linear", "linear-new"))
+        results["model"].isin(("linear-bucketed", "linear-continuous"))
     ].merge(
         pd.DataFrame({"dimension": dimensions}), how="cross"
     )
@@ -686,11 +689,15 @@ def plot_criteo_spectral_comparison(
     *,
     metric: str = "logloss",
 ) -> Figure:
-    """Compare old and new spectral preprocessing in one facet per dimension."""
+    """Compare bucketed and continuous spectral preprocessing by dimension."""
     spectral = _label_criteo_models(
-        results.loc[results["model"].isin(("spectral-old", "spectral-new"))]
+        results.loc[
+            results["model"].isin(
+                ("spectral-bucketed", "spectral-continuous")
+            )
+        ]
     )
-    model_order = ["Spectral-old", "Spectral-new"]
+    model_order = ["Spectral (bucketed)", "Spectral (continuous)"]
     return _criteo_relplot(
         spectral,
         metric=metric,
@@ -712,7 +719,7 @@ def plot_criteo_spectral_dimensions(
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
     """Compare all dimensions of one spectral preprocessing variant."""
-    if variant not in ("spectral-old", "spectral-new"):
+    if variant not in ("spectral-bucketed", "spectral-continuous"):
         raise ValueError(f"unknown spectral variant {variant!r}")
     spectral = results.loc[results["model"] == variant]
     dimensions = _spectral_dimensions(spectral)
