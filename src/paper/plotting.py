@@ -65,6 +65,21 @@ HIGGS_MODEL_DASHES = {
     "MLP-3": (4, 2, 1, 2),
 }
 
+HIGGS_DEVIATION_COLUMNS = {
+    "dim",
+    "data_seed",
+    "init_seed",
+    "noise_level",
+    "feature_index",
+    "feature_name",
+    "magnitude_bin_index",
+    "magnitude_left",
+    "magnitude_right",
+    "total_count",
+    "zero_bound_count",
+}
+HIGGS_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
+
 MOVIELENS_MODEL_LABELS = {
     "linear": "Linear",
     "fm": "FM",
@@ -764,6 +779,239 @@ def plot_criteo_fm_dimensions(
         dashes=False,
         xlim=xlim,
     )
+
+
+def _higgs_ratio_count_columns(results: pd.DataFrame) -> list[str]:
+    columns = [
+        column
+        for column in results
+        if column.startswith("ratio_bin_") and column.endswith("_count")
+    ]
+    expected = [
+        f"ratio_bin_{bin_index:03d}_count"
+        for bin_index in range(len(columns))
+    ]
+    if columns != expected:
+        raise ValueError("ratio count columns must be contiguous and ordered")
+    return columns
+
+
+def _mean_higgs_deviation_shells(
+    results: pd.DataFrame,
+    *,
+    shell_count: int,
+) -> tuple[float, list[str], pd.DataFrame]:
+    missing = HIGGS_DEVIATION_COLUMNS.difference(results.columns)
+    if missing:
+        raise ValueError(f"results are missing columns: {sorted(missing)}")
+    ratio_columns = _higgs_ratio_count_columns(results)
+    required = list(HIGGS_DEVIATION_COLUMNS) + ratio_columns
+    if (
+        results.empty
+        or not ratio_columns
+        or results[required].isna().any().any()
+    ):
+        raise ValueError("HIGGS deviation histograms must be complete")
+
+    noise_levels = results["noise_level"].unique()
+    if len(noise_levels) != 1:
+        raise ValueError(
+            "plot_higgs_deviation_shell_grid expects one noise_level; "
+            f"got {sorted(map(float, noise_levels))}"
+        )
+    if isinstance(shell_count, (bool, np.bool_)) or not isinstance(
+        shell_count, (int, np.integer)
+    ):
+        raise TypeError("shell_count must be an integer")
+    magnitude_bins = sorted(map(int, results["magnitude_bin_index"].unique()))
+    if magnitude_bins != list(range(len(magnitude_bins))):
+        raise ValueError("magnitude bins must be contiguous and zero-based")
+    if shell_count <= 0 or len(magnitude_bins) % shell_count:
+        raise ValueError(
+            f"shell_count must be a positive divisor of {len(magnitude_bins)}"
+        )
+
+    bins_per_shell = len(magnitude_bins) // shell_count
+    shelled = results.assign(
+        shell_index=results["magnitude_bin_index"] // bins_per_shell
+    )
+    run_columns = [
+        "dim",
+        "data_seed",
+        "init_seed",
+        "feature_index",
+        "feature_name",
+        "shell_index",
+    ]
+    sums = (
+        shelled.groupby(run_columns, as_index=False, sort=True)[
+            ratio_columns + ["total_count", "zero_bound_count"]
+        ]
+        .sum()
+    )
+    defined_count = sums["total_count"] - sums["zero_bound_count"]
+    if (defined_count < 0).any():
+        raise ValueError("zero-bound counts exceed total counts")
+    probabilities = sums[ratio_columns].div(
+        defined_count.where(defined_count > 0), axis=0
+    )
+    probabilities[run_columns] = sums[run_columns]
+    average_columns = ["dim", "feature_index", "feature_name", "shell_index"]
+    averaged = (
+        probabilities.groupby(average_columns, as_index=False, sort=True)[
+            ratio_columns
+        ]
+        .mean()
+    )
+    return float(noise_levels[0]), ratio_columns, averaged
+
+
+def plot_higgs_deviation_shell_grid(
+    results: pd.DataFrame,
+    *,
+    shell_count: int = 4,
+) -> Figure:
+    """Plot seed-averaged ratio ridges in disjoint magnitude shells."""
+    noise_level, ratio_columns, averaged = _mean_higgs_deviation_shells(
+        results, shell_count=shell_count
+    )
+    peak = averaged[ratio_columns].max().max()
+    if not np.isfinite(peak) or peak <= 0:
+        raise ValueError("histograms contain no ratios in [0, 1]")
+
+    dimensions = sorted(map(int, averaged["dim"].unique()))
+    colors, _ = _dimension_styles(dimensions)
+    linestyles = {
+        dim: HIGGS_DIMENSION_LINESTYLES[
+            index % len(HIGGS_DIMENSION_LINESTYLES)
+        ]
+        for index, dim in enumerate(dimensions)
+    }
+    features = (
+        averaged[["feature_index", "feature_name"]]
+        .drop_duplicates()
+        .sort_values("feature_index", kind="stable")
+    )
+    positions = {
+        int(feature.feature_index): len(features) - index - 1
+        for index, feature in enumerate(features.itertuples(index=False))
+    }
+    ridge_scale = 0.85 / peak
+    ratio_edges = np.linspace(0, 1, len(ratio_columns) + 1)
+    shell_edges = np.linspace(0, noise_level, shell_count + 1)
+
+    fig, axes = plt.subplots(
+        1,
+        shell_count,
+        figsize=(max(90, 45 * shell_count) / 25.4, 170 / 25.4),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+        layout="constrained",
+    )
+    axes = axes.ravel()
+    for shell_index, ax in enumerate(axes):
+        ax.hlines(
+            list(positions.values()),
+            0,
+            1,
+            color="#d9d9d9",
+            linewidth=0.4,
+            zorder=0,
+        )
+        shell = averaged.loc[averaged["shell_index"] == shell_index]
+        for dim in dimensions:
+            dimension = shell.loc[shell["dim"] == dim]
+            for feature_index, baseline in positions.items():
+                histogram = dimension.loc[
+                    dimension["feature_index"] == feature_index, ratio_columns
+                ]
+                if histogram.empty or histogram.iloc[0].isna().all():
+                    continue
+
+                heights = (
+                    baseline
+                    + ridge_scale * histogram.iloc[0].fillna(0).to_numpy()
+                )
+                heights = np.r_[heights, heights[-1]]
+                ax.fill_between(
+                    ratio_edges,
+                    baseline,
+                    heights,
+                    step="post",
+                    color=colors[dim],
+                    alpha=0.07,
+                    linewidth=0,
+                )
+                ax.step(
+                    ratio_edges,
+                    heights,
+                    where="post",
+                    color=colors[dim],
+                    linestyle=linestyles[dim],
+                    linewidth=1.1,
+                )
+
+        bracket = "]" if shell_index == shell_count - 1 else ")"
+        ax.axvline(1, color="#555555", linestyle="--", linewidth=0.8)
+        ax.set(
+            xlim=(0, 1),
+            ylim=(-0.15, len(features) - 0.05),
+            title=(
+                f"|δ| ∈ [{shell_edges[shell_index]:g}, "
+                f"{shell_edges[shell_index + 1]:g}{bracket}"
+            ),
+        )
+        ax.set_xticks(np.linspace(0, 1, 6))
+        ax.set_yticks(
+            [positions[int(index)] for index in features["feature_index"]],
+            features["feature_name"],
+        )
+        ax.tick_params(axis="x", labelsize=7)
+        ax.tick_params(
+            axis="y",
+            labelsize=6,
+            length=0,
+            pad=3,
+            labelleft=shell_index == 0,
+        )
+        ax.title.set_size(8)
+        ax.grid(axis="x", alpha=0.2, linewidth=0.5)
+        sns.despine(ax=ax, left=True)
+
+    fig.suptitle(
+        (
+            "HIGGS deviation ratios under "
+            f"δ ∼ Uniform(−ε, ε), ε = {noise_level:g}"
+        ),
+        x=0.01,
+        ha="left",
+        fontsize=9,
+    )
+    fig.supxlabel("Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)", fontsize=8)
+    fig.supylabel("Feature", fontsize=8)
+
+    handles = [
+        Line2D(
+            [],
+            [],
+            color=colors[dim],
+            linestyle=linestyles[dim],
+            linewidth=1.2,
+            label=str(dim),
+        )
+        for dim in dimensions
+    ]
+    fig.legend(
+        handles=handles,
+        title="Matrix dimension",
+        loc="outside upper right",
+        ncols=len(handles),
+        frameon=False,
+        fontsize=7,
+        title_fontsize=7,
+    )
+    return fig
 
 
 def _check_higgs_metric(results: pd.DataFrame, metric: str) -> str:

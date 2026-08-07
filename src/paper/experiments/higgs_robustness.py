@@ -1,0 +1,634 @@
+import argparse
+from collections.abc import Iterable, Mapping
+from functools import partial
+from itertools import product
+from operator import index
+from pathlib import Path
+from typing import TextIO
+
+import numpy as np
+import pandas as pd
+import torch
+
+from paper.experiments import run_many
+from paper.experiments.higgs_scaling import (
+    CURVE_COLUMNS,
+    EXPERIMENT_COLUMNS,
+    OPTIMIZER,
+    PROFILES,
+    HiggsModelSpec,
+    Profile,
+    RunSettings,
+    default_raw_path as default_scaling_path,
+    make_task_model,
+    validate_raw,
+)
+from paper.experiments.scaling import PROTOCOL, RunConfig, selected_runs
+from paper.experiments.synthetic import DEFAULT_RUNS_DIR, write_csv
+from paper.higgs import (
+    FEATURE_NAMES,
+    NUM_FEATURES,
+    OFFICIAL_LAYOUT,
+    HiggsLayout,
+    default_cache_dir,
+    prepare_corpus,
+)
+from paper.models import KthEigval
+from paper.shuffling import resolve_train_sizes
+from paper.training import BINARY_OBJECTIVE, Batch, train_scaling_events
+
+
+NOISE_LEVEL = 0.5
+MAGNITUDE_BINS = 16
+RATIO_BINS = 100
+PERTURBATION_SEED = 0
+
+_BASE_RESULT_COLUMNS = [
+    "protocol",
+    "optimizer",
+    "train_pool_size",
+    "train_size",
+    "model",
+    "dim",
+    "lr",
+    "data_seed",
+    "init_seed",
+    "perturbation_seed",
+    "noise_level",
+    "feature_index",
+    "feature_name",
+    "feature_matrix_norm",
+    "magnitude_bin_index",
+    "magnitude_left",
+    "magnitude_right",
+    "total_count",
+    "zero_bound_count",
+    "above_bound_count",
+    "max_ratio",
+]
+
+
+def ratio_count_columns(bins: int = RATIO_BINS) -> list[str]:
+    return [f"ratio_bin_{bin_index:03d}_count" for bin_index in range(bins)]
+
+
+def result_columns(ratio_bins: int = RATIO_BINS) -> list[str]:
+    return _BASE_RESULT_COLUMNS + ratio_count_columns(ratio_bins)
+
+
+RESULT_COLUMNS = result_columns()
+
+_RUN_COLUMNS = ["dim", "data_seed", "init_seed"]
+_FEATURE_COLUMNS = _RUN_COLUMNS + ["feature_index"]
+_HISTOGRAM_COLUMNS = _FEATURE_COLUMNS + ["magnitude_bin_index"]
+
+
+def _noise_level(value: float) -> float:
+    value = float(value)
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError("noise level must be finite and positive")
+    return value
+
+
+def _num_bins(value: int) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("bins must be an integer")
+    try:
+        value = index(value)
+    except TypeError as error:
+        raise TypeError("bins must be an integer") from error
+    if value <= 0:
+        raise ValueError("bins must be positive")
+    return value
+
+
+def selected_configs(
+    scaling_results: pd.DataFrame,
+    profile: Profile,
+) -> tuple[RunConfig[HiggsModelSpec], ...]:
+    """Select final-checkpoint spectral runs from a HIGGS scaling result."""
+    if "model" not in scaling_results:
+        raise ValueError("incompatible HIGGS result schema")
+    spectral = scaling_results.loc[scaling_results["model"] == "spectral"].copy()
+    validate_raw(spectral, profile, variant="spectral")
+
+    train_size = resolve_train_sizes(
+        profile.train_sizes, batch_size=profile.batch_size
+    )[-1]
+    tuning = spectral.loc[
+        (spectral["phase"] == "tuning")
+        & (spectral["train_size"] == train_size)
+    ]
+    return tuple(
+        selected.config
+        for selected in selected_runs(
+            tuning,
+            experiment_columns=EXPERIMENT_COLUMNS,
+            curve_columns=CURVE_COLUMNS,
+            validation_metric="val_logloss",
+            evaluation_seeds=profile.evaluation_seeds,
+            make_model_spec=HiggsModelSpec,
+        )
+    )
+
+
+def feature_matrices(
+    model: KthEigval,
+    *,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Return A_1, ..., A_n for a dense spectral neuron."""
+    weight = model.lin.weight if dtype is None else model.lin.weight.to(dtype)
+    return model.tril_emb(weight.mT)
+
+
+def _joint_histogram(
+    actual: torch.Tensor,
+    bound: torch.Tensor,
+    magnitude: torch.Tensor,
+    *,
+    noise_level: float,
+    magnitude_bins: int,
+    ratio_bins: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not (actual.shape == bound.shape == magnitude.shape):
+        raise ValueError("actual deviations, bounds, and magnitudes must align")
+    if (
+        not torch.isfinite(actual).all()
+        or not torch.isfinite(bound).all()
+        or not torch.isfinite(magnitude).all()
+        or (actual < 0).any()
+        or (bound < 0).any()
+        or (magnitude < 0).any()
+        or (magnitude > noise_level).any()
+    ):
+        raise ValueError("deviations, bounds, and magnitudes are invalid")
+
+    magnitude_indices = (
+        (magnitude * magnitude_bins / noise_level)
+        .floor()
+        .to(torch.int64)
+        .clamp(max=magnitude_bins - 1)
+    )
+    totals = torch.bincount(magnitude_indices, minlength=magnitude_bins)
+
+    defined = bound > 0
+    ratios = torch.zeros_like(actual)
+    ratios[defined] = actual[defined] / bound[defined]
+    if not torch.isfinite(ratios[defined]).all():
+        raise ValueError("deviation ratios must be finite when the bound is nonzero")
+
+    above = defined & (ratios > 1)
+    included = defined & ~above
+    ratio_indices = (
+        (ratios * ratio_bins)
+        .floor()
+        .to(torch.int64)
+        .clamp(max=ratio_bins - 1)
+    )
+    joint_indices = magnitude_indices * ratio_bins + ratio_indices
+    counts = torch.bincount(
+        joint_indices[included], minlength=magnitude_bins * ratio_bins
+    ).reshape(magnitude_bins, ratio_bins)
+    zero_bounds = torch.bincount(
+        magnitude_indices[~defined], minlength=magnitude_bins
+    )
+    above_bounds = torch.bincount(
+        magnitude_indices[above], minlength=magnitude_bins
+    )
+    maxima = torch.full(
+        (magnitude_bins,), -torch.inf, dtype=actual.dtype, device=actual.device
+    )
+    maxima.scatter_reduce_(
+        0,
+        magnitude_indices[defined],
+        ratios[defined],
+        reduce="amax",
+        include_self=True,
+    )
+    return counts, totals, zero_bounds, above_bounds, maxima
+
+
+def deviation_histograms(
+    model: KthEigval,
+    batches: Iterable[Batch],
+    *,
+    noise_level: float = NOISE_LEVEL,
+    magnitude_bins: int = MAGNITUDE_BINS,
+    ratio_bins: int = RATIO_BINS,
+    perturbation_seed: int = PERTURBATION_SEED,
+) -> pd.DataFrame:
+    """Measure featurewise deviations under one signed uniform perturbation."""
+    noise_level = _noise_level(noise_level)
+    magnitude_bins = _num_bins(magnitude_bins)
+    ratio_bins = _num_bins(ratio_bins)
+    was_training = model.training
+
+    weight = model.lin.weight.detach().to(torch.float64)
+    bias = model.lin.bias.detach().to(torch.float64)
+    matrices = feature_matrices(model, dtype=torch.float64).detach()
+    matrix_norms = torch.linalg.matrix_norm(matrices, ord=2)
+    device = weight.device
+    counts = torch.zeros(
+        NUM_FEATURES,
+        magnitude_bins,
+        ratio_bins,
+        dtype=torch.int64,
+        device=device,
+    )
+    totals = torch.zeros(
+        NUM_FEATURES, magnitude_bins, dtype=torch.int64, device=device
+    )
+    zero_bounds = torch.zeros_like(totals)
+    above_bounds = torch.zeros_like(totals)
+    max_ratios = torch.full(
+        (NUM_FEATURES, magnitude_bins),
+        -torch.inf,
+        dtype=torch.float64,
+        device=device,
+    )
+    rng = np.random.default_rng(perturbation_seed)
+    test_rows = 0
+
+    model.eval()
+    try:
+        with torch.inference_mode():
+            for model_inputs, _ in batches:
+                (features,) = model_inputs
+                features = features.to(device=device, dtype=torch.float64)
+                coordinates = features.matmul(weight.mT) + bias
+                base_matrices = model.tril_emb(coordinates)
+                base_logits = torch.linalg.eigvalsh(base_matrices)[..., model.eig_idx]
+                perturbations = torch.from_numpy(
+                    rng.uniform(-noise_level, noise_level, size=features.shape)
+                ).to(device=device)
+
+                for feature_index in range(NUM_FEATURES):
+                    perturbation = perturbations[:, feature_index]
+                    perturbed_matrices = (
+                        base_matrices
+                        + perturbation[:, None, None] * matrices[feature_index]
+                    )
+                    perturbed_logits = torch.linalg.eigvalsh(perturbed_matrices)[
+                        ..., model.eig_idx
+                    ]
+                    actual = (perturbed_logits - base_logits).abs()
+                    magnitude = perturbation.abs()
+                    bound = magnitude * matrix_norms[feature_index]
+                    chunk = _joint_histogram(
+                        actual,
+                        bound,
+                        magnitude,
+                        noise_level=noise_level,
+                        magnitude_bins=magnitude_bins,
+                        ratio_bins=ratio_bins,
+                    )
+                    counts[feature_index] += chunk[0]
+                    totals[feature_index] += chunk[1]
+                    zero_bounds[feature_index] += chunk[2]
+                    above_bounds[feature_index] += chunk[3]
+                    max_ratios[feature_index] = torch.maximum(
+                        max_ratios[feature_index], chunk[4]
+                    )
+                test_rows += len(features)
+    finally:
+        model.train(was_training)
+
+    if test_rows == 0:
+        raise ValueError("test data must not be empty")
+
+    magnitude_edges = np.linspace(0.0, noise_level, magnitude_bins + 1)
+    feature_indices = np.repeat(np.arange(NUM_FEATURES), magnitude_bins)
+    magnitude_indices = np.tile(np.arange(magnitude_bins), NUM_FEATURES)
+    maxima = max_ratios.cpu().numpy()
+    maxima[np.isneginf(maxima)] = np.nan
+    data = {
+        "noise_level": noise_level,
+        "feature_index": feature_indices,
+        "feature_name": np.asarray(FEATURE_NAMES)[feature_indices],
+        "feature_matrix_norm": np.repeat(
+            matrix_norms.cpu().numpy(), magnitude_bins
+        ),
+        "magnitude_bin_index": magnitude_indices,
+        "magnitude_left": magnitude_edges[magnitude_indices],
+        "magnitude_right": magnitude_edges[magnitude_indices + 1],
+        "total_count": totals.cpu().numpy().reshape(-1),
+        "zero_bound_count": zero_bounds.cpu().numpy().reshape(-1),
+        "above_bound_count": above_bounds.cpu().numpy().reshape(-1),
+        "max_ratio": maxima.reshape(-1),
+    }
+    data.update(
+        {
+            column: counts[..., bin_index].cpu().numpy().reshape(-1)
+            for bin_index, column in enumerate(ratio_count_columns(ratio_bins))
+        }
+    )
+    return pd.DataFrame(data)
+
+
+def run_config(
+    config: RunConfig[HiggsModelSpec],
+    settings: RunSettings,
+    *,
+    noise_level: float = NOISE_LEVEL,
+    magnitude_bins: int = MAGNITUDE_BINS,
+    ratio_bins: int = RATIO_BINS,
+    perturbation_seed: int = PERTURBATION_SEED,
+) -> pd.DataFrame:
+    task, model = make_task_model(config, settings)
+    if not isinstance(model, KthEigval):
+        raise TypeError("HIGGS robustness requires a spectral model")
+    train_size = settings.train_sizes[-1]
+    for _ in train_scaling_events(
+        task,
+        model,
+        lr=config.lr,
+        checkpoints=(train_size,),
+        loss=BINARY_OBJECTIVE.loss,
+    ):
+        pass
+
+    return deviation_histograms(
+        model,
+        task.test_batches(),
+        noise_level=noise_level,
+        magnitude_bins=magnitude_bins,
+        ratio_bins=ratio_bins,
+        perturbation_seed=perturbation_seed,
+    ).assign(
+        protocol=PROTOCOL,
+        optimizer=OPTIMIZER,
+        train_pool_size=settings.corpus.train_stop,
+        train_size=train_size,
+        model=config.model_spec.variant,
+        dim=config.model_spec.dim,
+        lr=config.lr,
+        data_seed=config.data_seed,
+        init_seed=config.init_seed,
+        perturbation_seed=perturbation_seed,
+    ).loc[:, result_columns(ratio_bins)]
+
+
+def run_profile(
+    profile: Profile,
+    scaling_results: pd.DataFrame,
+    *,
+    raw_path: Path,
+    cache_dir: Path,
+    layout: HiggsLayout = OFFICIAL_LAYOUT,
+    chunk_size: int = 250_000,
+    workers: int = 1,
+    noise_level: float = NOISE_LEVEL,
+    magnitude_bins: int = MAGNITUDE_BINS,
+    ratio_bins: int = RATIO_BINS,
+    perturbation_seed: int = PERTURBATION_SEED,
+    progress: bool = False,
+    progress_file: TextIO | None = None,
+) -> pd.DataFrame:
+    if workers < 1:
+        raise ValueError(f"workers must be positive; got {workers}")
+    noise_level = _noise_level(noise_level)
+    magnitude_bins = _num_bins(magnitude_bins)
+    ratio_bins = _num_bins(ratio_bins)
+    configs = selected_configs(scaling_results, profile)
+    corpus = prepare_corpus(
+        raw_path,
+        cache_dir,
+        layout=layout,
+        chunk_size=chunk_size,
+        progress=progress,
+        progress_file=progress_file,
+    )
+    spectral_pool_sizes = set(
+        scaling_results.loc[
+            scaling_results["model"] == "spectral", "train_pool_size"
+        ]
+    )
+    if spectral_pool_sizes != {corpus.train_stop}:
+        raise ValueError(
+            "scaling results and HIGGS corpus use different training pools"
+        )
+
+    train_size = resolve_train_sizes(
+        profile.train_sizes, batch_size=profile.batch_size
+    )[-1]
+    required_passes = (train_size + corpus.train_stop - 1) // corpus.train_stop
+    for data_seed in sorted({config.data_seed for config in configs}):
+        corpus.shuffled_epochs(data_seed).prepare(required_passes)
+
+    settings = RunSettings(
+        train_sizes=(train_size,),
+        batch_size=profile.batch_size,
+        corpus=corpus,
+        threads_per_worker=1 if workers > 1 else None,
+    )
+    run = partial(
+        run_config,
+        settings=settings,
+        noise_level=noise_level,
+        magnitude_bins=magnitude_bins,
+        ratio_bins=ratio_bins,
+        perturbation_seed=perturbation_seed,
+    )
+    results = run_many(
+        run,
+        configs,
+        workers=workers,
+        desc="Train + perturb",
+        unit="model",
+        progress=progress,
+        progress_file=progress_file,
+    )
+    if not results:
+        return pd.DataFrame(columns=result_columns(ratio_bins))
+    return pd.concat(results, ignore_index=True).loc[:, result_columns(ratio_bins)]
+
+
+def validate_results(
+    results: pd.DataFrame,
+    profile: Profile,
+    *,
+    noise_level: float = NOISE_LEVEL,
+    magnitude_bins: int = MAGNITUDE_BINS,
+    ratio_bins: int = RATIO_BINS,
+    perturbation_seed: int = PERTURBATION_SEED,
+) -> None:
+    """Validate a complete HIGGS robustness result."""
+    noise_level = _noise_level(noise_level)
+    magnitude_bins = _num_bins(magnitude_bins)
+    ratio_bins = _num_bins(ratio_bins)
+    columns = result_columns(ratio_bins)
+    ratio_columns = ratio_count_columns(ratio_bins)
+    if list(results.columns) != columns:
+        raise ValueError("incompatible HIGGS robustness result schema")
+    if results.empty:
+        raise ValueError("HIGGS robustness results must not be empty")
+    required = [column for column in columns if column != "max_ratio"]
+    if results[required].isna().any().any():
+        raise ValueError("HIGGS robustness results contain missing values")
+    if set(results["protocol"]) != {PROTOCOL}:
+        raise ValueError(f"expected protocol={PROTOCOL!r}")
+    if set(results["optimizer"]) != {OPTIMIZER}:
+        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
+    if set(results["model"]) != {"spectral"}:
+        raise ValueError("HIGGS robustness results must contain spectral models")
+    if set(results["perturbation_seed"]) != {perturbation_seed}:
+        raise ValueError("unexpected perturbation seed")
+    if not np.allclose(results["noise_level"], noise_level, rtol=0, atol=0):
+        raise ValueError("unexpected noise level")
+
+    train_size = resolve_train_sizes(
+        profile.train_sizes, batch_size=profile.batch_size
+    )[-1]
+    if set(results["train_size"]) != {train_size}:
+        raise ValueError("unexpected robustness training checkpoint")
+    if results.groupby("dim")["lr"].nunique().ne(1).any():
+        raise ValueError("each matrix dimension must use one learning rate")
+
+    feature_labels = set(
+        results[["feature_index", "feature_name"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    if feature_labels != set(enumerate(FEATURE_NAMES)):
+        raise ValueError("HIGGS feature labels are incomplete")
+
+    expected_histograms = {
+        (dim, data_seed, init_seed, feature_index, magnitude_bin_index)
+        for dim, (data_seed, init_seed), feature_index, magnitude_bin_index in product(
+            profile.dims,
+            profile.evaluation_seeds,
+            range(NUM_FEATURES),
+            range(magnitude_bins),
+        )
+    }
+    observed_histograms = set(
+        results[_HISTOGRAM_COLUMNS].itertuples(index=False, name=None)
+    )
+    if observed_histograms != expected_histograms:
+        raise ValueError("incomplete robustness histogram grid")
+    if results.duplicated(_HISTOGRAM_COLUMNS).any():
+        raise ValueError("duplicate robustness histogram bins")
+
+    magnitude_indices = results["magnitude_bin_index"].to_numpy(dtype=int)
+    if not np.array_equal(
+        magnitude_indices,
+        results["magnitude_bin_index"].to_numpy(),
+    ) or not np.isin(magnitude_indices, np.arange(magnitude_bins)).all():
+        raise ValueError("invalid magnitude bin index")
+    magnitude_edges = np.linspace(0.0, noise_level, magnitude_bins + 1)
+    if not (
+        np.allclose(results["magnitude_left"], magnitude_edges[magnitude_indices])
+        and np.allclose(
+            results["magnitude_right"], magnitude_edges[magnitude_indices + 1]
+        )
+    ):
+        raise ValueError("invalid magnitude bin edges")
+
+    count_values = results[ratio_columns].to_numpy()
+    if (
+        not np.isfinite(count_values).all()
+        or (count_values < 0).any()
+        or not np.equal(count_values, np.floor(count_values)).all()
+    ):
+        raise ValueError("invalid robustness histogram counts")
+    binned_count = count_values.sum(axis=1)
+    total_count = results["total_count"].to_numpy()
+    zero_bound_count = results["zero_bound_count"].to_numpy()
+    above_bound_count = results["above_bound_count"].to_numpy()
+    if (
+        not np.isfinite(total_count).all()
+        or not np.isfinite(zero_bound_count).all()
+        or not np.isfinite(above_bound_count).all()
+        or (total_count < 0).any()
+        or (zero_bound_count < 0).any()
+        or (above_bound_count < 0).any()
+        or not np.equal(total_count, np.floor(total_count)).all()
+        or not np.equal(zero_bound_count, np.floor(zero_bound_count)).all()
+        or not np.equal(above_bound_count, np.floor(above_bound_count)).all()
+        or not (
+            binned_count + zero_bound_count + above_bound_count == total_count
+        ).all()
+    ):
+        raise ValueError("invalid robustness histogram count accounting")
+
+    feature_groups = results.groupby(_FEATURE_COLUMNS, sort=False)
+    if feature_groups["feature_matrix_norm"].nunique(dropna=False).ne(1).any():
+        raise ValueError("inconsistent feature matrix norms")
+    feature_norms = feature_groups["feature_matrix_norm"].first()
+    if not np.isfinite(feature_norms).all() or (feature_norms < 0).any():
+        raise ValueError("invalid feature matrix norms")
+    test_counts = feature_groups["total_count"].sum()
+    if (test_counts <= 0).any() or test_counts.nunique() != 1:
+        raise ValueError("inconsistent test-set counts")
+
+    defined = total_count > zero_bound_count
+    maxima = results["max_ratio"].to_numpy()
+    if (
+        not np.isfinite(maxima[defined]).all()
+        or (maxima[defined] < 0).any()
+        or not np.isnan(maxima[~defined]).all()
+    ):
+        raise ValueError("invalid maximum deviation ratios")
+
+
+def _float_label(value: float) -> str:
+    return f"{value:g}".replace(".", "p")
+
+
+def default_result_path(
+    profile_name: str,
+    noise_level: float = NOISE_LEVEL,
+) -> Path:
+    return DEFAULT_RUNS_DIR / (
+        f"higgs_robustness_{profile_name}_noise_{_float_label(_noise_level(noise_level))}"
+        "_repeated_shuffle.csv.gz"
+    )
+
+
+def build_arg_parser(
+    profiles: Mapping[str, Profile] = PROFILES,
+) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data", type=Path, required=True, help="Headerless HIGGS CSV."
+    )
+    parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
+    parser.add_argument("--scaling-results", type=Path, default=None)
+    parser.add_argument("--cache-dir", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--noise-level",
+        type=_noise_level,
+        default=NOISE_LEVEL,
+        help="Maximum absolute perturbation in standardized feature units.",
+    )
+    parser.add_argument("--chunk-size", type=int, default=250_000)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--quiet", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+    profile = PROFILES[args.profile]
+    scaling_path = args.scaling_results or default_scaling_path(args.profile)
+    results = run_profile(
+        profile,
+        pd.read_csv(scaling_path),
+        raw_path=args.data,
+        cache_dir=args.cache_dir or default_cache_dir(args.data),
+        chunk_size=args.chunk_size,
+        workers=args.workers,
+        noise_level=args.noise_level,
+        progress=not args.quiet,
+    )
+    validate_results(results, profile, noise_level=args.noise_level)
+    write_csv(
+        results,
+        args.out or default_result_path(args.profile, args.noise_level),
+    )
+
+
+if __name__ == "__main__":
+    main()

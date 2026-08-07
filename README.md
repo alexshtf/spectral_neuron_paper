@@ -124,9 +124,9 @@ Use `--cache-dir` to place it elsewhere. Existing base caches remain valid; repe
 shuffling adds versioned order caches separately.
 
 The shared per-checkpoint validation-selection contract applies. The full profile
-evaluates its explicit power-of-two grid through `2**24` and stops there. Because that
-budget exceeds the 10-million-row training pool, the stream automatically draws its
-remaining examples from a second deterministic shuffle.
+evaluates its explicit power-of-two grid through `2**26` and stops there. Because that
+budget exceeds the 10-million-row training pool, the stream continues through
+successive deterministic shuffles.
 
 The comparison contains linear and spectral models plus one-, two-, and three-hidden-
 layer ReLU MLP families. Hidden layers within an MLP have constant width. Widths are
@@ -164,6 +164,32 @@ completeness, derives its capacity table from recorded widths and parameter coun
 performs validation selection, and plots median test log loss or Brier score with
 interquartile bands. The experiment deliberately focuses on log loss and Brier rather
 than leaderboard-oriented AUC reporting.
+
+### HIGGS feature-sensitivity bounds
+
+The robustness runner loads a completed scaling profile, takes each spectral
+dimension's validation-selected learning rate at the final checkpoint, and retrains
+the profile's evaluation seeds to that budget using the same corpus and shuffle
+caches. For the CLI-selected maximum magnitude `ε`, it draws one deterministic signed
+perturbation `δ ~ Uniform(-ε, ε)` per standardized test row and feature, then compares
+the logit change with the corresponding spectral-norm bound using the realized `|δ|`.
+
+```bash
+uv run python -m paper.experiments.higgs_robustness \
+  --data ~/datasets/HIGGS.csv \
+  --profile full \
+  --noise-level 0.5 \
+  --workers 4
+```
+
+The compressed result stores a `16 × 100` joint histogram over `|δ| ∈ [0, ε]` and
+deviation ratio in `[0, 1]` for every seed, feature, and dimension, together with
+zero-bound, above-bound, and maximum-ratio diagnostics.
+`notebooks/higgs_robustness.ipynb` validates that file, reports the diagnostics, and
+exports a publication PDF and PNG.
+Its `shell_count` parameter merges adjacent magnitude bins into disjoint ranges; it
+never interprets a shell as a cumulative upper bound. Any divisor of 16 is supported
+(`1`, `2`, `4`, `8`, or `16`).
 
 ## Criteo scaling experiment
 

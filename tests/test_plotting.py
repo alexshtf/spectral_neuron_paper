@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,6 +15,7 @@ from paper.plotting import (
     plot_criteo_fm_dimensions,
     plot_criteo_spectral_comparison,
     plot_criteo_spectral_dimensions,
+    plot_higgs_deviation_shell_grid,
     plot_higgs_models_by_dimension,
     plot_higgs_spectral_dimensions,
     plot_movielens_dimensions,
@@ -343,6 +345,155 @@ def _higgs_results() -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows).drop_duplicates()
+
+
+def _higgs_deviation_results(
+    *,
+    noise_levels: tuple[float, ...] = (0.5,),
+    dimensions: tuple[int, ...] = (3, 7),
+    features: tuple[tuple[int, str], ...] = ((0, "lepton pT"), (1, "lepton η")),
+    magnitude_bins: int = 4,
+    ratio_bins: int = 4,
+) -> pd.DataFrame:
+    rows = []
+    for (
+        noise_level,
+        dim,
+        init_seed,
+        (feature_index, feature_name),
+        magnitude_bin_index,
+    ) in product(
+        noise_levels,
+        dimensions,
+        range(2),
+        features,
+        range(magnitude_bins),
+    ):
+        counts = np.arange(1, ratio_bins + 1) * (magnitude_bin_index + 1)
+        row = {
+            "dim": dim,
+            "data_seed": 0,
+            "init_seed": init_seed,
+            "noise_level": noise_level,
+            "feature_index": feature_index,
+            "feature_name": feature_name,
+            "magnitude_bin_index": magnitude_bin_index,
+            "magnitude_left": noise_level * magnitude_bin_index / magnitude_bins,
+            "magnitude_right": noise_level
+            * (magnitude_bin_index + 1)
+            / magnitude_bins,
+            "total_count": int(counts.sum() + 1),
+            "zero_bound_count": 1,
+        }
+        row.update(
+            {
+                f"ratio_bin_{bin_index:03d}_count": int(count)
+                for bin_index, count in enumerate(counts)
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def test_plot_higgs_deviation_shell_grid_uses_disjoint_ranges_and_feature_order():
+    fig = plot_higgs_deviation_shell_grid(
+        _higgs_deviation_results(), shell_count=4
+    )
+    ax = fig.axes[0]
+
+    assert len(fig.axes) == 4
+    assert [axis.get_title() for axis in fig.axes] == [
+        "|δ| ∈ [0, 0.125)",
+        "|δ| ∈ [0.125, 0.25)",
+        "|δ| ∈ [0.25, 0.375)",
+        "|δ| ∈ [0.375, 0.5]",
+    ]
+    assert ax.get_xlim() == pytest.approx((0, 1))
+    assert fig._supxlabel.get_text() == "Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)"
+    assert fig._supylabel.get_text() == "Feature"
+    assert len(ax.lines) == 5  # Two features × two dimensions, plus x=1.
+    assert _legend_labels(fig) == ["3", "7"]
+    assert fig.legends[0].get_title().get_text() == "Matrix dimension"
+    feature_positions = {
+        label.get_text(): position
+        for label, position in zip(ax.get_yticklabels(), ax.get_yticks())
+    }
+    assert feature_positions["lepton pT"] > feature_positions["lepton η"]
+
+
+def test_plot_higgs_deviation_shell_grid_aggregates_shells_without_cumulation():
+    rows = []
+    for magnitude_bin_index in range(4):
+        row = {
+            "dim": 3,
+            "data_seed": 0,
+            "init_seed": 0,
+            "noise_level": 0.5,
+            "feature_index": 0,
+            "feature_name": "lepton pT",
+            "magnitude_bin_index": magnitude_bin_index,
+            "magnitude_left": magnitude_bin_index / 8,
+            "magnitude_right": (magnitude_bin_index + 1) / 8,
+            "total_count": 1,
+            "zero_bound_count": 0,
+        }
+        row.update(
+            {
+                f"ratio_bin_{bin_index:03d}_count": int(
+                    bin_index == magnitude_bin_index
+                )
+                for bin_index in range(4)
+            }
+        )
+        rows.append(row)
+
+    fig = plot_higgs_deviation_shell_grid(pd.DataFrame(rows), shell_count=2)
+    first_shell = fig.axes[0].lines[0].get_ydata()[:-1]
+    second_shell = fig.axes[1].lines[0].get_ydata()[:-1]
+
+    assert first_shell.tolist() == pytest.approx([0.85, 0.85, 0, 0])
+    assert second_shell.tolist() == pytest.approx([0, 0, 0.85, 0.85])
+
+
+def test_plot_higgs_deviation_shell_grid_weights_runs_equally():
+    rows = []
+    for init_seed, (counts, total_count) in enumerate(
+        (((8, 2), 10), ((0, 100), 100))
+    ):
+        rows.append(
+            {
+                "dim": 3,
+                "data_seed": 0,
+                "init_seed": init_seed,
+                "noise_level": 0.5,
+                "feature_index": 0,
+                "feature_name": "lepton pT",
+                "magnitude_bin_index": 0,
+                "magnitude_left": 0,
+                "magnitude_right": 0.5,
+                "total_count": total_count,
+                "zero_bound_count": 0,
+                "ratio_bin_000_count": counts[0],
+                "ratio_bin_001_count": counts[1],
+            }
+        )
+
+    fig = plot_higgs_deviation_shell_grid(pd.DataFrame(rows), shell_count=1)
+    heights = fig.axes[0].lines[0].get_ydata()[:-1]
+
+    # Mean seed probabilities are (0.4, 0.6), not pooled counts (8, 102).
+    assert heights[0] / heights[1] == pytest.approx(2 / 3)
+
+
+def test_plot_higgs_deviation_shell_grid_rejects_mixed_noise_and_bad_shell_count():
+    with pytest.raises(ValueError, match="one noise_level"):
+        plot_higgs_deviation_shell_grid(
+            _higgs_deviation_results(noise_levels=(0.25, 0.5))
+        )
+    with pytest.raises(ValueError, match="divisor"):
+        plot_higgs_deviation_shell_grid(
+            _higgs_deviation_results(), shell_count=3
+        )
 
 
 def test_plot_higgs_models_by_dimension_facets_and_annotates_capacity():

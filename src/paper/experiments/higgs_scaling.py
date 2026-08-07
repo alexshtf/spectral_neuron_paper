@@ -34,6 +34,7 @@ from paper.higgs import (
     HiggsCorpus,
     HiggsLayout,
     HiggsTask,
+    default_cache_dir,
     prepare_corpus,
 )
 from paper.models import KthEigval
@@ -327,7 +328,7 @@ def _make_seeded_model(spec: HiggsModelSpec, *, init_seed: int) -> nn.Module:
         return make_model(spec)
 
 
-def _make_task_model(
+def make_task_model(
     config: RunConfig[HiggsModelSpec], settings: RunSettings
 ) -> tuple[HiggsTask, nn.Module]:
     if settings.threads_per_worker is not None:
@@ -390,7 +391,7 @@ def _report_timings(
 def run_config(
     config: RunConfig[HiggsModelSpec], settings: RunSettings
 ) -> pd.DataFrame:
-    task, model = _make_task_model(config, settings)
+    task, model = make_task_model(config, settings)
     result = tune_scaling_stream(
         task,
         model,
@@ -411,7 +412,7 @@ def run_selected(
     selected: SelectedRun[HiggsModelSpec], settings: RunSettings
 ) -> pd.DataFrame:
     config = selected.config
-    task, model = _make_task_model(config, settings)
+    task, model = make_task_model(config, settings)
     checkpoints = tuple(
         size for size in settings.train_sizes if size <= max(selected.train_sizes)
     )
@@ -710,7 +711,7 @@ def build_arg_parser(
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     profile = PROFILES[args.profile]
-    cache_dir = args.cache_dir or args.data.with_name(f".{args.data.name}.cache-v1")
+    cache_dir = args.cache_dir or default_cache_dir(args.data)
     print(cache_dir)
     raw = run_profile(
         profile,

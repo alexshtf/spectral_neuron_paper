@@ -22,7 +22,43 @@ FEATURES_FILE = "features.dat"
 LABELS_FILE = "labels.dat"
 METADATA_FILE = "metadata.json"
 
+FEATURE_NAMES = (
+    "lepton pT",
+    "lepton eta",
+    "lepton phi",
+    "missing energy magnitude",
+    "missing energy phi",
+    "jet 1 pT",
+    "jet 1 eta",
+    "jet 1 phi",
+    "jet 1 b-tag",
+    "jet 2 pT",
+    "jet 2 eta",
+    "jet 2 phi",
+    "jet 2 b-tag",
+    "jet 3 pT",
+    "jet 3 eta",
+    "jet 3 phi",
+    "jet 3 b-tag",
+    "jet 4 pT",
+    "jet 4 eta",
+    "jet 4 phi",
+    "jet 4 b-tag",
+    "m(jj)",
+    "m(jjj)",
+    "m(lv)",
+    "m(jlv)",
+    "m(bb)",
+    "m(wbb)",
+    "m(wwbb)",
+)
+
 type BinaryBatch = tuple[tuple[torch.Tensor, ...], torch.Tensor]
+
+
+def default_cache_dir(raw_path: Path) -> Path:
+    raw_path = Path(raw_path)
+    return raw_path.with_name(f".{raw_path.name}.cache-v{CACHE_VERSION}")
 
 
 @dataclass(frozen=True)
