@@ -144,12 +144,11 @@ def test_summarize_scaling_uses_only_selected_evaluation_rows():
                 "train_size": 10,
                 "lr": lr,
                 "test_loss": loss,
-                "coverage": coverage,
             }
-            for lr, loss, coverage in (
-                (0.01, 1.0, 0.5),
-                (0.01, 3.0, 0.9),
-                (0.1, 100.0, 1.0),
+            for lr, loss in (
+                (0.01, 1.0),
+                (0.01, 3.0),
+                (0.1, 100.0),
             )
         ]
     )
@@ -159,7 +158,6 @@ def test_summarize_scaling_uses_only_selected_evaluation_rows():
         curve_columns=CURVE_COLUMNS,
         validation_metric="val_loss",
         quantile_metrics=("test_loss",),
-        median_metrics=("coverage",),
     ).iloc[0]
 
     assert summary[
@@ -168,7 +166,6 @@ def test_summarize_scaling_uses_only_selected_evaluation_rows():
             "median_test_loss",
             "q25_test_loss",
             "q75_test_loss",
-            "median_coverage",
             "n",
         ]
-    ].tolist() == [0.01, 2.0, 1.5, 2.5, 0.7, 2]
+    ].tolist() == [0.01, 2.0, 1.5, 2.5, 2]

@@ -4,7 +4,7 @@ Research code for the spectral neuron paper.
 
 ## Real-data scaling protocol
 
-The MovieLens, HIGGS, and Criteo runners use the `repeated_shuffle` protocol.
+The HIGGS and Criteo runners use the `repeated_shuffle` protocol.
 Within one trajectory, `data_seed` initializes a deterministic stream of successive
 fresh permutations of the fixed training pool. The permutations are concatenated and
 batched as one stream rather than batched separately; a minibatch may therefore cross a
@@ -19,9 +19,9 @@ fixed `train_pool_size`. Thus the x-axis is examples seen by the optimizer, not 
 number of distinct available rows.
 
 At every resolved `train_size`, each model-capacity configuration selects the learning
-rate with the best median validation metric across tuning seeds: log loss for HIGGS and
-Criteo, and RMSE for MovieLens. Evaluation then starts fresh trajectories and reports
-test metrics only at the checkpoints assigned to their selected rate. Checkpoints that
+rate with the best median validation log loss across tuning seeds. Evaluation then
+starts fresh trajectories and reports test metrics only at the checkpoints assigned to
+their selected rate. Checkpoints that
 select the same rate share one evaluation trajectory; when the selected rate changes,
 the plotted curve stitches checkpoints from different trajectories. The result is a
 validation-selected performance envelope over exact examples-seen budgets, not one
@@ -36,74 +36,6 @@ generated repeated-shuffle files with injected pass-boundary checkpoints use the
 contract and must be overwritten before analysis. The committed unsuffixed CSVs under
 `notebooks/runs/` are retained as historical provenance and are unsuitable for claims
 that rely on the aligned protocol.
-
-## MovieLens scaling experiment
-
-The MovieLens experiment is a matrix-completion study using only user and movie
-identities to predict ratings. With exactly those two active fields, the FM is classical
-biased matrix factorization:
-
-```text
-rating(user, movie) = global bias + user bias + movie bias
-                    + dot(user embedding, movie embedding)
-```
-
-The fixed split is random 80/10/10 within each user. If a movie would otherwise be
-absent from training, one of its holdout ratings is moved into training. Thus every
-validation and test identity is estimable from the complete training pool, while each
-data seed controls only its repeated-shuffle stream. Prefix warm-coverage fractions are
-recorded because the complete split is warm but an early checkpoint need not be.
-
-Users and movies are mapped to compact, disjoint ID ranges. There is no hashing or
-fitted feature preprocessing. Ratings are shifted by the fixed midpoint of the official
-0.5--5 scale for optimization; RMSE is unchanged and remains in rating units.
-For a spectral dimension `d`, each identity has `d * (d + 1) // 2` matrix coordinates.
-The `spectral` variant selects the middle eigenvalue, while `spectral-max` selects the
-largest eigenvalue of the same matrix pencil. The matched FM rank is one less, because
-its per-identity linear bias consumes the remaining parameter.
-
-The runner accepts `ratings.csv`, its containing directory, or the official MovieLens
-ZIP. The first invocation writes compact NumPy memory maps to a reusable base cache.
-Existing base caches remain valid; repeated shuffling adds only versioned order caches.
-
-```bash
-uv run python -m paper.experiments.movielens_scaling \
-  --data ~/datasets/ml-20m.zip \
-  --profile sanity \
-  --workers 2
-```
-
-The `small` profile is the inexpensive capacity pilot. The `full` profile evaluates its
-explicit power-of-two grid from `2**18` through `2**26` and stops there. If that budget
-exceeds the training-pool size, the stream automatically continues into fresh
-permutations. The recorded warm coverage shows how much early checkpoints are still
-affected by unseen identities. The shared per-checkpoint validation-selection contract
-applies. For example, start a sharded full run with `linear`, then append `fm` to the
-same file:
-
-```bash
-uv run python -m paper.experiments.movielens_scaling \
-  --data ~/datasets/ml-20m.zip --profile full --variant linear \
-  --out notebooks/runs/movielens_scaling_full_repeated_shuffle.csv \
-  --write-mode overwrite
-uv run python -m paper.experiments.movielens_scaling \
-  --data ~/datasets/ml-20m.zip --profile full --variant fm \
-  --out notebooks/runs/movielens_scaling_full_repeated_shuffle.csv \
-  --write-mode append
-```
-
-Append the `spectral` shard in the same way, followed by the largest-eigenvalue shard:
-
-```bash
-uv run python -m paper.experiments.movielens_scaling \
-  --data ~/datasets/ml-20m.zip --profile full --variant spectral-max \
-  --out notebooks/runs/movielens_scaling_full_repeated_shuffle.csv \
-  --write-mode append
-```
-
-The merged full-profile result is complete only after it contains `linear`, `fm`,
-`spectral`, and `spectral-max` rows. Append each shard once and sequentially; the result
-validator rejects duplicate trajectory checkpoints.
 
 ## HIGGS scaling experiment
 

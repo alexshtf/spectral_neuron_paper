@@ -80,39 +80,7 @@ HIGGS_DEVIATION_COLUMNS = {
 }
 HIGGS_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
 
-MOVIELENS_MODEL_LABELS = {
-    "linear": "Linear",
-    "fm": "FM",
-    "spectral": "Spectral",
-    "spectral-max": "Spectral max",
-}
-
-MOVIELENS_MODEL_COLORS = {
-    "Linear": "#555555",
-    "FM": "#0173B2",
-    "Spectral": "#029E73",
-    "Spectral max": "#DE8F05",
-}
-
-MOVIELENS_MODEL_MARKERS = {
-    "Linear": "o",
-    "FM": "s",
-    "Spectral": "^",
-    "Spectral max": "D",
-}
-
-MOVIELENS_MODEL_DASHES = {
-    "Linear": "",
-    "FM": (4, 2),
-    "Spectral": "",
-    "Spectral max": (2, 2),
-}
-
-MOVIELENS_SPECTRAL_MODELS = ("spectral", "spectral-max")
-MOVIELENS_NONLINEAR_MODELS = ("fm", *MOVIELENS_SPECTRAL_MODELS)
-
 type FigureContainer = Figure | SubFigure
-type MovieLensNonlinearModel = Literal["fm", "spectral", "spectral-max"]
 
 
 def _subplot_matrix(
@@ -539,13 +507,13 @@ def _finish_scaling_grid(
     return grid.figure
 
 
-def _scaling_relplot(
+def _binary_relplot(
     results: pd.DataFrame,
     *,
     value: str,
+    metric: str,
     title: str,
     x_label: str,
-    y_label: str,
     by: str,
     hue_order: list,
     palette,
@@ -589,40 +557,7 @@ def _scaling_relplot(
         grid,
         title=title,
         x_label=x_label,
-        y_label=y_label,
-        xlim=xlim,
-    )
-
-
-def _binary_relplot(
-    results: pd.DataFrame,
-    *,
-    value: str,
-    metric: str,
-    title: str,
-    x_label: str,
-    by: str,
-    hue_order: list,
-    palette,
-    markers,
-    dashes,
-    legend_title: str,
-    col: str | None = None,
-    xlim: tuple[float, float] | None = None,
-) -> Figure:
-    return _scaling_relplot(
-        results,
-        value=value,
-        title=title,
-        x_label=x_label,
         y_label=f"{BINARY_METRIC_LABELS[metric]} ↓",
-        by=by,
-        hue_order=hue_order,
-        palette=palette,
-        markers=markers,
-        dashes=dashes,
-        legend_title=legend_title,
-        col=col,
         xlim=xlim,
     )
 
@@ -1200,163 +1135,6 @@ def plot_higgs_spectral_dimensions(
         legend_title="dimension",
         xlim=xlim,
     )
-
-
-def _check_movielens_results(results: pd.DataFrame) -> None:
-    required = {
-        "train_size",
-        "data_seed",
-        "model",
-        "dim",
-        "rank",
-        "parameters_per_identity",
-        "test_rmse",
-        "test_warm_fraction",
-    }
-    missing = required.difference(results.columns)
-    if missing:
-        raise ValueError(f"results are missing columns: {sorted(missing)}")
-    if results.empty or results[list(required)].isna().any().any():
-        raise ValueError("MovieLens plotting columns must be complete")
-
-
-def _movielens_dimensions(results: pd.DataFrame) -> list[int]:
-    _check_movielens_results(results)
-    dimensions = sorted(
-        map(
-            int,
-            results.loc[
-                results["model"].isin(MOVIELENS_SPECTRAL_MODELS), "dim"
-            ].unique(),
-        )
-    )
-    if not dimensions:
-        raise ValueError("results contain no spectral models")
-    return dimensions
-
-
-def _movielens_capacity_title(results: pd.DataFrame, dim: int) -> str:
-    parameters = results.loc[
-        results["model"].isin(MOVIELENS_SPECTRAL_MODELS)
-        & (results["dim"] == dim),
-        "parameters_per_identity",
-    ].unique()
-    ranks = results.loc[
-        (results["model"] == "fm") & (results["dim"] == dim), "rank"
-    ].unique()
-    if len(parameters) != 1 or len(ranks) != 1:
-        raise ValueError(f"dimension {dim} does not have one matched capacity")
-    return (
-        f"dim={dim} · {int(parameters[0])} parameters/identity\n"
-        f"FM rank={int(ranks[0])}"
-    )
-
-
-def plot_movielens_models_by_dimension(results: pd.DataFrame) -> Figure:
-    """Compare linear, FM, and spectral rating models at matched capacity."""
-    dimensions = _movielens_dimensions(results)
-    nonlinear = results.loc[
-        results["model"].isin(MOVIELENS_NONLINEAR_MODELS)
-    ].copy()
-    nonlinear["dimension"] = nonlinear["dim"].astype(int)
-    linears = results.loc[results["model"] == "linear"].merge(
-        pd.DataFrame({"dimension": dimensions}), how="cross"
-    )
-    faceted = pd.concat((linears, nonlinear), ignore_index=True)
-    faceted["model_label"] = faceted["model"].map(MOVIELENS_MODEL_LABELS)
-    present_models = set(faceted["model"])
-    model_order = [
-        label
-        for model, label in MOVIELENS_MODEL_LABELS.items()
-        if model in present_models
-    ]
-
-    figure = _scaling_relplot(
-        faceted,
-        value="test_rmse",
-        title="MovieLens test RMSE: matched model families",
-        x_label=TRAIN_SIZE_LABEL,
-        y_label="test RMSE ↓",
-        by="model_label",
-        hue_order=model_order,
-        palette=MOVIELENS_MODEL_COLORS,
-        markers=MOVIELENS_MODEL_MARKERS,
-        dashes=MOVIELENS_MODEL_DASHES,
-        legend_title="model",
-        col="dimension",
-    )
-    for dim, ax in zip(dimensions, figure.axes, strict=True):
-        ax.set_title(_movielens_capacity_title(results, dim), fontsize="small")
-    return figure
-
-
-def plot_movielens_dimensions(
-    results: pd.DataFrame,
-    model: MovieLensNonlinearModel,
-    *,
-    xlim: tuple[float, float] | None = None,
-) -> Figure:
-    """Compare capacities within one nonlinear MovieLens model family."""
-    _check_movielens_results(results)
-    if model not in MOVIELENS_NONLINEAR_MODELS:
-        raise ValueError(f"unknown nonlinear MovieLens model {model!r}")
-
-    subset = results.loc[results["model"] == model]
-    if subset.empty:
-        raise ValueError(f"results contain no {model} models")
-    capacity = "rank" if model == "fm" else "dim"
-    values = sorted(map(int, subset[capacity].unique()))
-    palette, markers = _dimension_styles(values)
-    family = {
-        "fm": "FM across embedding ranks",
-        "spectral": "spectral neurons across dimensions",
-        "spectral-max": "maximum-eigenvalue spectral neurons across dimensions",
-    }[model]
-    legend = "rank" if model == "fm" else "dimension"
-    return _scaling_relplot(
-        subset,
-        value="test_rmse",
-        title=f"MovieLens test RMSE: {family}",
-        x_label=TRAIN_SIZE_LABEL,
-        y_label="test RMSE ↓",
-        by=capacity,
-        hue_order=values,
-        palette=palette,
-        markers=markers,
-        dashes=False,
-        legend_title=legend,
-        xlim=xlim,
-    )
-
-
-def plot_movielens_warm_coverage(results: pd.DataFrame) -> Figure:
-    """Show fixed-test warm coverage against ratings seen by the optimizer."""
-    _check_movielens_results(results)
-    coverage = results[
-        ["train_size", "data_seed", "test_warm_fraction"]
-    ].drop_duplicates()
-    figure, ax = plt.subplots(figsize=(6, 3.5), layout="constrained")
-    sns.lineplot(
-        data=coverage,
-        x="train_size",
-        y="test_warm_fraction",
-        estimator=np.median,
-        errorbar=("pi", 50),
-        err_kws={"alpha": 0.15},
-        color="#555555",
-        marker="o",
-        linewidth=2,
-        ax=ax,
-    )
-    ax.set(
-        title="MovieLens test-set warm coverage",
-        xlabel=TRAIN_SIZE_LABEL,
-        ylabel="warm test fraction",
-        ylim=(0, 1.02),
-    )
-    ax.set_xscale("log", base=2)
-    ax.grid(True, alpha=0.25)
-    return figure
 
 
 def plot_target_gallery(specs: list[TargetSpec]):

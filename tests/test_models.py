@@ -5,8 +5,8 @@ from paper.models import (
     FactorizationMachine,
     KthEigval,
     KthEigvalLastMonotone,
-    SparseKthEigval,
     SparseLinear,
+    SparseMiddleEigval,
     TrilEmbed,
     square_plus,
 )
@@ -65,20 +65,18 @@ def test_dense_spectral_initialization_is_centered_gapped_and_linear(eig_idx):
     torch.testing.assert_close(model(x), x @ coefficients, atol=1e-6, rtol=1e-6)
 
 
-@pytest.mark.parametrize("eig_idx", [2, 4])
-def test_sparse_spectral_initialization_is_centered_gapped_and_additive(eig_idx):
+def test_sparse_spectral_initialization_is_centered_gapped_and_additive():
     torch.manual_seed(0)
-    model = SparseKthEigval(
+    model = SparseMiddleEigval(
         num_features=7,
         num_fields=2,
         dim=5,
-        eig_idx=eig_idx,
     )
     coefficients = _assert_centered_gapped_identity_initialization(
         model.base_tril,
         model.feature_tril.weight,
         dim=model.dim,
-        eig_idx=model.eig_idx,
+        eig_idx=model.dim // 2,
         fan_in=model.num_fields,
     )
 
@@ -179,7 +177,7 @@ def test_sparse_models_preserve_leading_shape():
         FactorizationMachine(5, 2, rank=3)(feature_ids, feature_values).shape
         == (2, 2)
     )
-    assert SparseKthEigval(5, 2, dim=3)(feature_ids, feature_values).shape == (
+    assert SparseMiddleEigval(5, 2, dim=3)(feature_ids, feature_values).shape == (
         2,
         2,
     )
@@ -192,7 +190,7 @@ def test_sparse_models_treat_implicit_values_as_unit_weights():
     for model in (
         SparseLinear(3, 3),
         FactorizationMachine(3, 3, rank=2),
-        SparseKthEigval(3, 3, dim=3),
+        SparseMiddleEigval(3, 3, dim=3),
     ):
         assert torch.allclose(
             model(feature_ids), model(feature_ids, unit_weights)
@@ -208,7 +206,7 @@ def test_fm_and_spectral_match_parameters_per_feature(dim):
         num_fields=3,
         rank=parameters_per_feature - 1,
     )
-    spectral = SparseKthEigval(num_features, num_fields=3, dim=dim)
+    spectral = SparseMiddleEigval(num_features, num_fields=3, dim=dim)
 
     fm_lookup_parameters = fm.weight.weight.numel() + fm.embedding.weight.numel()
     spectral_lookup_parameters = spectral.feature_tril.weight.numel()
@@ -240,7 +238,7 @@ def test_factorization_machine_matches_pairwise_definition():
 
 
 def test_sparse_spectral_model_sums_feature_matrices():
-    model = SparseKthEigval(num_features=3, num_fields=2, dim=2, eig_idx=1)
+    model = SparseMiddleEigval(num_features=3, num_fields=2, dim=2)
     sqrt_2 = 2**0.5
     with torch.no_grad():
         model.base_tril.copy_(torch.tensor([1.0, 0.0, 2.0]))

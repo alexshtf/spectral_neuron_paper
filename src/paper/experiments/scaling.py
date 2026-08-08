@@ -163,7 +163,6 @@ def summarize_scaling(
     curve_columns: Sequence[str],
     validation_metric: str,
     quantile_metrics: Sequence[str],
-    median_metrics: Sequence[str] = (),
 ) -> pd.DataFrame:
     quantile_metrics = tuple(quantile_metrics)
     if not quantile_metrics:
@@ -179,8 +178,6 @@ def summarize_scaling(
         aggregations[f"median_{metric}"] = (metric, "median")
         aggregations[f"q25_{metric}"] = (metric, lambda s: s.quantile(0.25))
         aggregations[f"q75_{metric}"] = (metric, lambda s: s.quantile(0.75))
-    for metric in median_metrics:
-        aggregations[f"median_{metric}"] = (metric, "median")
     aggregations["n"] = (quantile_metrics[0], "size")
 
     return (

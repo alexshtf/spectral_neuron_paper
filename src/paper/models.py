@@ -209,20 +209,18 @@ class FactorizationMachine(SparseLinear):
         return linear + interaction
 
 
-class SparseKthEigval(nn.Module):
-    """A spectral neuron whose active categorical features contribute matrices."""
+class SparseMiddleEigval(nn.Module):
+    """A middle-eigenvalue neuron over active sparse features."""
 
     def __init__(
         self,
         num_features: int,
         num_fields: int,
         dim: int,
-        eig_idx: int | None = None,
     ):
         super().__init__()
         self.num_fields = num_fields
         self.dim = dim
-        self.eig_idx = _resolve_eig_idx(dim, eig_idx)
 
         num_tril = dim * (dim + 1) // 2
         self.feature_tril = nn.Embedding(num_features, num_tril, sparse=True)
@@ -235,7 +233,7 @@ class SparseKthEigval(nn.Module):
             self.base_tril,
             self.feature_tril.weight,
             dim=self.dim,
-            eig_idx=self.eig_idx,
+            eig_idx=self.dim // 2,
             fan_in=self.num_fields,
         )
 
@@ -249,7 +247,7 @@ class SparseKthEigval(nn.Module):
             self.feature_tril, feature_ids, feature_values
         )
         tril = self.base_tril + weighted.sum(dim=-2)
-        return torch.linalg.eigvalsh(self.tril_emb(tril))[..., self.eig_idx]
+        return torch.linalg.eigvalsh(self.tril_emb(tril))[..., self.dim // 2]
 
 
 def square_plus(x: torch.Tensor) -> torch.Tensor:

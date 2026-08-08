@@ -35,7 +35,7 @@ from paper.experiments.scaling import (
     tuning_configs,
 )
 from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
-from paper.models import FactorizationMachine, SparseKthEigval, SparseLinear
+from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
 from paper.shuffling import ShuffledEpochs, resolve_train_sizes
 from paper.training import (
     BINARY_OBJECTIVE,
@@ -213,7 +213,7 @@ def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
             rank = spec.dim * (spec.dim + 1) // 2 - 1
             return FactorizationMachine(num_features, NUM_FIELDS, rank)
         case "spectral-bucketed" | "spectral-continuous":
-            return SparseKthEigval(num_features, NUM_FIELDS, spec.dim)
+            return SparseMiddleEigval(num_features, NUM_FIELDS, spec.dim)
         case _:
             raise ValueError(spec.variant)
 
