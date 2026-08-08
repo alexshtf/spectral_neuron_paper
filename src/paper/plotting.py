@@ -832,9 +832,8 @@ def _mean_higgs_deviation_shells(
         )
 
     bins_per_shell = len(magnitude_bins) // shell_count
-    shelled = results.assign(
-        shell_index=results["magnitude_bin_index"] // bins_per_shell
-    )
+    shelled = results.copy()
+    shelled["shell_index"] = shelled["magnitude_bin_index"] // bins_per_shell
     run_columns = [
         "dim",
         "data_seed",
@@ -870,14 +869,24 @@ def plot_higgs_deviation_shell_grid(
     results: pd.DataFrame,
     *,
     shell_count: int = 4,
+    feature_row_height_mm: float = 12.0,
 ) -> Figure:
-    """Plot seed-averaged ratio ridges in disjoint magnitude shells."""
+    """Plot raw histogram probabilities with one y-scale per grid cell."""
     noise_level, ratio_columns, averaged = _mean_higgs_deviation_shells(
         results, shell_count=shell_count
     )
-    peak = averaged[ratio_columns].max().max()
-    if not np.isfinite(peak) or peak <= 0:
-        raise ValueError("histograms contain no ratios in [0, 1]")
+    if feature_row_height_mm <= 0:
+        raise ValueError("feature_row_height_mm must be positive")
+
+    cell_peaks = (
+        averaged.groupby(["feature_index", "shell_index"], sort=False)[
+            ratio_columns
+        ]
+        .max()
+        .max(axis="columns")
+    )
+    if not np.isfinite(cell_peaks).all() or (cell_peaks <= 0).any():
+        raise ValueError("some grid cells contain no ratios in [0, 1]")
 
     dimensions = sorted(map(int, averaged["dim"].unique()))
     colors, _ = _dimension_styles(dimensions)
@@ -892,51 +901,37 @@ def plot_higgs_deviation_shell_grid(
         .drop_duplicates()
         .sort_values("feature_index", kind="stable")
     )
-    positions = {
-        int(feature.feature_index): len(features) - index - 1
-        for index, feature in enumerate(features.itertuples(index=False))
-    }
-    ridge_scale = 0.85 / peak
     ratio_edges = np.linspace(0, 1, len(ratio_columns) + 1)
     shell_edges = np.linspace(0, noise_level, shell_count + 1)
 
     fig, axes = plt.subplots(
-        1,
+        len(features),
         shell_count,
-        figsize=(max(90, 45 * shell_count) / 25.4, 170 / 25.4),
+        figsize=(
+            max(90, 45 * shell_count) / 25.4,
+            feature_row_height_mm * len(features) / 25.4,
+        ),
         sharex=True,
-        sharey=True,
         squeeze=False,
         layout="constrained",
     )
-    axes = axes.ravel()
-    for shell_index, ax in enumerate(axes):
-        ax.hlines(
-            list(positions.values()),
-            0,
-            1,
-            color="#d9d9d9",
-            linewidth=0.4,
-            zorder=0,
-        )
-        shell = averaged.loc[averaged["shell_index"] == shell_index]
-        for dim in dimensions:
-            dimension = shell.loc[shell["dim"] == dim]
-            for feature_index, baseline in positions.items():
-                histogram = dimension.loc[
-                    dimension["feature_index"] == feature_index, ratio_columns
-                ]
+    for feature_row, feature in enumerate(features.itertuples(index=False)):
+        feature_index = int(feature.feature_index)
+        for shell_index, ax in enumerate(axes[feature_row]):
+            cell = averaged.loc[
+                (averaged["feature_index"] == feature_index)
+                & (averaged["shell_index"] == shell_index)
+            ]
+            for dim in dimensions:
+                histogram = cell.loc[cell["dim"] == dim, ratio_columns]
                 if histogram.empty or histogram.iloc[0].isna().all():
                     continue
 
-                heights = (
-                    baseline
-                    + ridge_scale * histogram.iloc[0].fillna(0).to_numpy()
-                )
+                heights = histogram.iloc[0].fillna(0).to_numpy()
                 heights = np.r_[heights, heights[-1]]
                 ax.fill_between(
                     ratio_edges,
-                    baseline,
+                    0,
                     heights,
                     step="post",
                     color=colors[dim],
@@ -952,32 +947,35 @@ def plot_higgs_deviation_shell_grid(
                     linewidth=1.1,
                 )
 
-        bracket = "]" if shell_index == shell_count - 1 else ")"
-        ax.axvline(1, color="#555555", linestyle="--", linewidth=0.8)
-        ax.set(
-            xlim=(0, 1),
-            ylim=(-0.15, len(features) - 0.05),
-            title=(
-                f"|δ| ∈ [{shell_edges[shell_index]:g}, "
-                f"{shell_edges[shell_index + 1]:g}{bracket}"
-            ),
-        )
-        ax.set_xticks(np.linspace(0, 1, 6))
-        ax.set_yticks(
-            [positions[int(index)] for index in features["feature_index"]],
-            features["feature_name"],
-        )
-        ax.tick_params(axis="x", labelsize=7)
-        ax.tick_params(
-            axis="y",
-            labelsize=6,
-            length=0,
-            pad=3,
-            labelleft=shell_index == 0,
-        )
-        ax.title.set_size(8)
-        ax.grid(axis="x", alpha=0.2, linewidth=0.5)
-        sns.despine(ax=ax, left=True)
+            peak = cell_peaks.at[(feature_index, shell_index)]
+            ax.axhline(0, color="#d9d9d9", linewidth=0.4, zorder=0)
+            ax.axvline(1, color="#555555", linestyle="--", linewidth=0.8)
+            ax.set(xlim=(0, 1), ylim=(0, peak / 0.85))
+            ax.set_xticks(np.linspace(0, 1, 6))
+            ax.set_yticks([])
+            ax.tick_params(
+                axis="x",
+                labelsize=7,
+                labelbottom=feature_row == len(features) - 1,
+            )
+            if shell_index == 0:
+                ax.set_ylabel(
+                    feature.feature_name,
+                    fontsize=8,
+                    rotation=0,
+                    ha="right",
+                    va="center",
+                    labelpad=3,
+                )
+            if feature_row == 0:
+                bracket = "]" if shell_index == shell_count - 1 else ")"
+                ax.set_title(
+                    f"|δ| ∈ [{shell_edges[shell_index]:g}, "
+                    f"{shell_edges[shell_index + 1]:g}{bracket}",
+                    fontsize=8,
+                )
+            ax.grid(axis="x", alpha=0.2, linewidth=0.5)
+            sns.despine(ax=ax, left=True)
 
     fig.suptitle(
         (

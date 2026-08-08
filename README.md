@@ -189,7 +189,10 @@ zero-bound, above-bound, and maximum-ratio diagnostics.
 exports a publication PDF and PNG.
 Its `shell_count` parameter merges adjacent magnitude bins into disjoint ranges; it
 never interprets a shell as a cumulative upper bound. Any divisor of 16 is supported
-(`1`, `2`, `4`, `8`, or `16`).
+(`1`, `2`, `4`, `8`, or `16`). Each feature-by-shell cell plots the raw histogram
+probabilities and chooses its own y-axis limit; dimensions within a cell share that
+limit. `feature_row_height_mm` controls the vertical space per feature and defaults to
+12 mm.
 
 ## Criteo scaling experiment
 
