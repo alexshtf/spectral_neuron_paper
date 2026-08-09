@@ -136,7 +136,7 @@ PROFILES: dict[str, Profile] = {
         tuning_seeds=SeedGrid(),
         evaluation_seeds=SeedGrid(),
         batch_size=256,
-        min_count=2,
+        min_count=10,
     ),
     "small": Profile(
         train_sizes=(2**14, 2**18, 2**22),
