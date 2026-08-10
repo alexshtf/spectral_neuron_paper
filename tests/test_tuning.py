@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -84,6 +85,28 @@ def test_seed_aggregation_is_median_not_minimum():
 
     best = pd.DataFrame(rows)
     selected = select_lr(best)
+
+    assert selected["selected_lr"].unique().tolist() == [0.1]
+
+
+def test_lr_is_rejected_if_any_validation_trial_is_nonfinite():
+    best = pd.DataFrame(
+        [
+            _row(
+                step=1,
+                train_size=4,
+                lr=lr,
+                target_seed=seed,
+                val_rmse=val_rmse,
+                test_rmse=0.0,
+            )
+            for lr, scores in ((0.01, (0.1, np.nan)), (0.1, (1.0, 1.0)))
+            for seed, val_rmse in enumerate(scores)
+        ]
+    )
+
+    with pytest.warns(RuntimeWarning, match="nonfinite"):
+        selected = select_lr(best)
 
     assert selected["selected_lr"].unique().tolist() == [0.1]
 

@@ -6,7 +6,6 @@ import pytest
 
 from paper.experiments.scaling import (
     SeedGrid,
-    best_lrs,
     selected_runs,
     summarize_scaling,
 )
@@ -38,36 +37,6 @@ def _tuning() -> pd.DataFrame:
                     }
                 )
     return pd.DataFrame(rows)
-
-
-def test_best_lrs_selects_each_checkpoint_and_breaks_ties_toward_lower_lr():
-    with pytest.warns(RuntimeWarning, match="nonfinite"):
-        best = best_lrs(
-            _tuning(),
-            curve_columns=CURVE_COLUMNS,
-            validation_metric="val_loss",
-        )
-
-    assert best[["train_size", "selected_lr"]].to_dict("records") == [
-        {"train_size": 10, "selected_lr": 0.01},
-        {"train_size": 20, "selected_lr": 0.1},
-        {"train_size": 30, "selected_lr": 0.01},
-    ]
-
-
-def test_best_lrs_requires_a_finite_candidate_at_every_checkpoint():
-    tuning = _tuning()
-    tuning.loc[tuning["train_size"] == 20, "val_loss"] = np.nan
-
-    with (
-        pytest.warns(RuntimeWarning, match="nonfinite"),
-        pytest.raises(ValueError, match="no finite validation"),
-    ):
-        best_lrs(
-            tuning,
-            curve_columns=CURVE_COLUMNS,
-            validation_metric="val_loss",
-        )
 
 
 @dataclass(frozen=True)

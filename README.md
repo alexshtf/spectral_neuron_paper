@@ -134,15 +134,10 @@ suffix. Compressed input is decompressed as the TSV stream is read; no expanded 
 file is written. The first run builds memory-mapped raw and encoded caches beside the
 data; later trajectories reuse the encoded features directly. Fitted preprocessors are
 stored as `.pkl.zstd` at Zstandard level 3 because they are loaded wholly into memory.
-Legacy `.pkl` preprocessors are migrated by streaming them into the compressed format.
 Memory-mapped data caches remain uncompressed.
 The canonical train encoding for repeated shuffling is the seed- and pass-independent
 `encoded-v4` cache. It stores field-local feature IDs as uint16 values and restores
-their fixed global field offsets in each int32 training batch. Older encoded-cache
-directories and hashed preprocessors may coexist with the exact-mapping caches and can
-be removed later if their disk space is needed. The first exact-mapping run rebuilds
-the fitted preprocessors and encoded features while reusing the raw corpus and shuffle
-caches.
+their fixed global field offsets in each int32 training batch.
 
 Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
 training split. Retained categorical values receive exact field-local IDs; missing

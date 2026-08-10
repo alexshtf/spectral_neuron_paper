@@ -23,8 +23,8 @@ from paper.experiments.higgs_scaling import (
     make_task_model,
     validate_raw,
 )
+from paper.experiments.results import DEFAULT_RUNS_DIR, write_csv
 from paper.experiments.scaling import PROTOCOL, RunConfig, selected_runs
-from paper.experiments.synthetic import DEFAULT_RUNS_DIR, write_csv
 from paper.higgs import (
     FEATURE_NAMES,
     NUM_FEATURES,
@@ -385,8 +385,6 @@ def run_profile(
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> pd.DataFrame:
-    if workers < 1:
-        raise ValueError(f"workers must be positive; got {workers}")
     noise_level = _noise_level(noise_level)
     magnitude_bins = _num_bins(magnitude_bins)
     ratio_bins = _num_bins(ratio_bins)

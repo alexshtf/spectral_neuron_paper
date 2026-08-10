@@ -1,11 +1,10 @@
 import json
 import sys
+import tempfile
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
-from operator import index
 from pathlib import Path
 from typing import Any, TextIO
-from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -68,8 +67,6 @@ class HiggsLayout:
     val_stop: int
 
     def __post_init__(self) -> None:
-        if any(type(value) is not int for value in asdict(self).values()):
-            raise TypeError("HIGGS layout boundaries must be integers")
         if not 0 < self.train_stop < self.val_stop < self.rows:
             raise ValueError(
                 "expected 0 < train_stop < val_stop < rows; "
@@ -82,19 +79,6 @@ class HiggsLayout:
 OFFICIAL_LAYOUT = HiggsLayout(11_000_000, 10_000_000, 10_500_000)
 
 
-def _temporary_path(directory: Path, filename: str) -> Path:
-    return directory / f".{filename}.{uuid4().hex}.tmp"
-
-
-def _close_memmap(array: np.memmap | None, *, flush: bool = False) -> None:
-    if array is None or array._mmap.closed:
-        return
-    if flush:
-        array.flush()
-    # NumPy exposes no public close method for memmap objects.
-    array._mmap.close()
-
-
 def _combine_moments(
     count: int,
     mean: np.ndarray,
@@ -103,21 +87,14 @@ def _combine_moments(
 ) -> tuple[int, np.ndarray, np.ndarray]:
     values = np.asarray(values, dtype=np.float64)
     batch_count = len(values)
-    if batch_count == 0:
-        return count, mean, squared_deviations
-
     batch_mean = values.mean(axis=0)
     centered = values - batch_mean
-    batch_squared_deviations = np.einsum("ij,ij->j", centered, centered)
-    if count == 0:
-        return batch_count, batch_mean, batch_squared_deviations
-
     total = count + batch_count
     delta = batch_mean - mean
     mean = mean + delta * (batch_count / total)
     squared_deviations = (
         squared_deviations
-        + batch_squared_deviations
+        + np.einsum("ij,ij->j", centered, centered)
         + np.square(delta) * (count * batch_count / total)
     )
     return total, mean, squared_deviations
@@ -132,64 +109,34 @@ def prepare_corpus(
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> "HiggsCorpus":
-    """Convert the HIGGS CSV into validated memory-mapped arrays."""
+    """Convert the CSV to memory-mapped arrays, trusting an existing cache."""
     raw_path = Path(raw_path)
     cache_dir = Path(cache_dir)
-    try:
-        chunk_size = index(chunk_size)
-    except TypeError as error:
-        raise TypeError("chunk_size must be an integer") from error
-    if chunk_size <= 0:
-        raise ValueError(f"chunk_size must be positive; got {chunk_size}")
-    if not raw_path.is_file():
-        raise FileNotFoundError(raw_path)
-
-    source_size = raw_path.stat().st_size
     cache_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = cache_dir / METADATA_FILE
     if metadata_path.exists():
-        try:
-            corpus = HiggsCorpus.open(
-                cache_dir,
-                layout=layout,
-                source_size=source_size,
+        corpus = HiggsCorpus.open(cache_dir, layout=layout)
+        if progress:
+            tqdm.write(
+                f"HIGGS corpus: {corpus.rows:,} rows (cached)",
+                file=sys.stderr if progress_file is None else progress_file,
             )
-        except (KeyError, OSError, TypeError, ValueError):
-            metadata_path.unlink(missing_ok=True)
-        else:
-            if progress:
-                tqdm.write(
-                    f"HIGGS corpus: {corpus.rows:,} rows (cached)",
-                    file=sys.stderr if progress_file is None else progress_file,
-                )
-            return corpus
+        return corpus
 
-    feature_tmp = _temporary_path(cache_dir, FEATURES_FILE)
-    label_tmp = _temporary_path(cache_dir, LABELS_FILE)
-    metadata_tmp = _temporary_path(cache_dir, METADATA_FILE)
-    temporary_paths = (feature_tmp, label_tmp, metadata_tmp)
+    with tempfile.TemporaryDirectory(prefix=".corpus-", dir=cache_dir) as tmp:
+        temporary = Path(tmp)
+        feature_path = temporary / FEATURES_FILE
+        label_path = temporary / LABELS_FILE
+        rows = 0
+        count = 0
+        mean = np.zeros(NUM_FEATURES, dtype=np.float64)
+        squared_deviations = np.zeros(NUM_FEATURES, dtype=np.float64)
 
-    features: np.memmap | None = None
-    labels: np.memmap | None = None
-    rows = 0
-    count = 0
-    mean = np.zeros(NUM_FEATURES, dtype=np.float64)
-    squared_deviations = np.zeros(NUM_FEATURES, dtype=np.float64)
-
-    try:
-        features = np.memmap(
-            feature_tmp,
-            mode="w+",
-            dtype=np.float32,
-            shape=(layout.rows, NUM_FEATURES),
-        )
-        labels = np.memmap(
-            label_tmp,
-            mode="w+",
-            dtype=np.uint8,
-            shape=(layout.rows,),
-        )
-        with open_dataset_file(raw_path) as raw_file:
+        with (
+            open_dataset_file(raw_path) as raw_file,
+            feature_path.open("wb") as feature_file,
+            label_path.open("wb") as label_file,
+        ):
             chunks = pd.read_csv(
                 raw_file,
                 header=None,
@@ -225,8 +172,8 @@ def prepare_corpus(
                     if not ((batch_labels == 0.0) | (batch_labels == 1.0)).all():
                         raise ValueError("HIGGS labels must be binary")
 
-                    features[rows:stop] = batch_features
-                    labels[rows:stop] = batch_labels.astype(np.uint8, copy=False)
+                    batch_features.tofile(feature_file)
+                    batch_labels.astype(np.uint8, copy=False).tofile(label_file)
                     training_rows = max(0, min(stop, layout.train_stop) - rows)
                     if training_rows > 0:
                         count, mean, squared_deviations = _combine_moments(
@@ -240,52 +187,30 @@ def prepare_corpus(
 
         if rows != layout.rows:
             raise ValueError(f"expected {layout.rows:,} rows; got {rows:,}")
-        if raw_path.stat().st_size != source_size:
-            raise ValueError("HIGGS source changed while it was being read")
 
         variance = np.maximum(squared_deviations / count, 0.0)
         scale = np.sqrt(variance)
         scale[scale == 0.0] = 1.0
-        _close_memmap(features, flush=True)
-        _close_memmap(labels, flush=True)
-        features = None
-        labels = None
 
-        feature_tmp.replace(cache_dir / FEATURES_FILE)
-        label_tmp.replace(cache_dir / LABELS_FILE)
+        feature_path.replace(cache_dir / FEATURES_FILE)
+        label_path.replace(cache_dir / LABELS_FILE)
         metadata = {
             "version": CACHE_VERSION,
             "layout": asdict(layout),
-            "num_features": NUM_FEATURES,
-            "feature_dtype": np.dtype(np.float32).name,
-            "label_dtype": np.dtype(np.uint8).name,
-            "source_size": source_size,
             "feature_mean": mean.tolist(),
             "feature_scale": scale.tolist(),
         }
+        metadata_tmp = temporary / METADATA_FILE
         metadata_tmp.write_text(json.dumps(metadata, sort_keys=True))
         metadata_tmp.replace(metadata_path)
-    except BaseException:
-        _close_memmap(features)
-        _close_memmap(labels)
-        features = None
-        labels = None
-        for path in temporary_paths:
-            path.unlink(missing_ok=True)
-        raise
 
-    return HiggsCorpus.open(
-        cache_dir,
-        layout=layout,
-        source_size=source_size,
-    )
+    return HiggsCorpus.open(cache_dir, layout=layout)
 
 
 @dataclass(frozen=True)
 class HiggsCorpus:
     cache_dir: Path
     layout: HiggsLayout
-    source_size: int
     feature_mean: tuple[float, ...]
     feature_scale: tuple[float, ...]
 
@@ -295,12 +220,9 @@ class HiggsCorpus:
         cache_dir: Path,
         *,
         layout: HiggsLayout | None = None,
-        source_size: int | None = None,
     ) -> "HiggsCorpus":
         cache_dir = Path(cache_dir)
         metadata = json.loads((cache_dir / METADATA_FILE).read_text())
-        if not isinstance(metadata, dict):
-            raise ValueError("HIGGS cache metadata must be a JSON object")
         version = metadata.get("version")
         if version != CACHE_VERSION:
             raise ValueError(
@@ -313,51 +235,12 @@ class HiggsCorpus:
             raise ValueError(
                 f"cached HIGGS layout {cached_layout} does not match {layout}"
             )
-        if metadata.get("num_features") != NUM_FEATURES:
-            raise ValueError(f"expected {NUM_FEATURES} cached HIGGS features")
-        if metadata.get("feature_dtype") != np.dtype(np.float32).name:
-            raise ValueError("cached HIGGS features must use float32")
-        if metadata.get("label_dtype") != np.dtype(np.uint8).name:
-            raise ValueError("cached HIGGS labels must use uint8")
-
-        cached_source_size = metadata["source_size"]
-        if type(cached_source_size) is not int or cached_source_size < 0:
-            raise ValueError("invalid cached HIGGS source size")
-        if source_size is not None and cached_source_size != source_size:
-            raise ValueError("cached HIGGS source size does not match the input")
-
-        expected_sizes = {
-            FEATURES_FILE: cached_layout.rows
-            * NUM_FEATURES
-            * np.dtype(np.float32).itemsize,
-            LABELS_FILE: cached_layout.rows * np.dtype(np.uint8).itemsize,
-        }
-        for filename, expected in expected_sizes.items():
-            actual = (cache_dir / filename).stat().st_size
-            if actual != expected:
-                raise ValueError(
-                    f"expected {filename} to contain {expected} bytes; got {actual}"
-                )
-
-        feature_mean = np.asarray(metadata["feature_mean"], dtype=np.float64)
-        feature_scale = np.asarray(metadata["feature_scale"], dtype=np.float64)
-        if feature_mean.shape != (NUM_FEATURES,) or not np.isfinite(
-            feature_mean
-        ).all():
-            raise ValueError("invalid cached HIGGS feature means")
-        if (
-            feature_scale.shape != (NUM_FEATURES,)
-            or not np.isfinite(feature_scale).all()
-            or np.any(feature_scale <= 0.0)
-        ):
-            raise ValueError("invalid cached HIGGS feature scales")
 
         return cls(
             cache_dir=cache_dir,
             layout=cached_layout,
-            source_size=cached_source_size,
-            feature_mean=tuple(map(float, feature_mean)),
-            feature_scale=tuple(map(float, feature_scale)),
+            feature_mean=tuple(metadata["feature_mean"]),
+            feature_scale=tuple(metadata["feature_scale"]),
         )
 
     @property
@@ -388,9 +271,6 @@ class HiggsCorpus:
             shape=(self.rows,),
         )
 
-    def order_path(self, seed: int) -> Path:
-        return self.shuffled_epochs(seed).prepare(1)[0]
-
     def shuffled_epochs(self, seed: int) -> ShuffledEpochs:
         return ShuffledEpochs(self.cache_dir, self.train_stop, seed)
 
@@ -407,12 +287,6 @@ class HiggsTask:
     _labels: np.memmap | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
-        try:
-            self.batch_size = index(self.batch_size)
-        except TypeError as error:
-            raise TypeError("batch_size must be an integer") from error
-        if self.batch_size <= 0:
-            raise ValueError(f"batch_size must be positive; got {self.batch_size}")
         self._shuffled_epochs = self.corpus.shuffled_epochs(self.data_seed)
         self._mean = np.asarray(self.corpus.feature_mean, dtype=np.float32)
         self._scale = np.asarray(self.corpus.feature_scale, dtype=np.float32)

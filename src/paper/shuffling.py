@@ -1,6 +1,5 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from operator import index
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,22 +10,6 @@ _CACHE_VERSION = 1
 _ORDER_DTYPE = np.dtype(np.uint32)
 
 
-def _integer(name: str, value: int) -> int:
-    if isinstance(value, (bool, np.bool_)):
-        raise TypeError(f"{name} must be an integer")
-    try:
-        return index(value)
-    except TypeError as error:
-        raise TypeError(f"{name} must be an integer") from error
-
-
-def _positive(name: str, value: int) -> int:
-    value = _integer(name, value)
-    if value <= 0:
-        raise ValueError(f"{name} must be positive; got {value}")
-    return value
-
-
 @dataclass(frozen=True)
 class ShuffledEpochs:
     cache_dir: Path
@@ -35,14 +18,8 @@ class ShuffledEpochs:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cache_dir", Path(self.cache_dir))
-        size = _positive("size", self.size)
-        if size > np.iinfo(_ORDER_DTYPE).max + 1:
-            raise ValueError("size does not fit in uint32 row ids")
-        object.__setattr__(self, "size", size)
-        seed = _integer("seed", self.seed)
-        if seed < 0:
-            raise ValueError(f"seed must be nonnegative; got {seed}")
-        object.__setattr__(self, "seed", seed)
+        if self.size > np.iinfo(_ORDER_DTYPE).max + 1:
+            raise ValueError("shuffle size does not fit in uint32 row ids")
 
     @property
     def _root(self) -> Path:
@@ -50,13 +27,6 @@ class ShuffledEpochs:
 
     def _path(self, pass_index: int) -> Path:
         return self._root / (f"n{self.size}_seed{self.seed}_pass{pass_index}.npy")
-
-    def _valid(self, path: Path) -> bool:
-        try:
-            order = np.load(path, mmap_mode="r", allow_pickle=False)
-        except (EOFError, OSError, ValueError):
-            return False
-        return order.dtype == _ORDER_DTYPE and order.shape == (self.size,)
 
     def _save(self, path: Path, order: np.ndarray) -> None:
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -68,25 +38,20 @@ class ShuffledEpochs:
             temporary.unlink(missing_ok=True)
 
     def prepare(self, passes: int) -> tuple[Path, ...]:
-        passes = _positive("passes", passes)
         paths = tuple(self._path(pass_index) for pass_index in range(passes))
         self._root.mkdir(parents=True, exist_ok=True)
-        if all(self._valid(path) for path in paths):
+        if all(path.exists() for path in paths):
             return paths
 
         rng = np.random.default_rng(self.seed)
         order = np.arange(self.size, dtype=_ORDER_DTYPE)
         for path in paths:
             rng.shuffle(order)
-            if not self._valid(path):
+            if not path.exists():
                 self._save(path, order)
         return paths
 
     def batches(self, stop: int, batch_size: int) -> Iterator[np.ndarray]:
-        stop = _integer("stop", stop)
-        if stop < 0:
-            raise ValueError(f"stop must be nonnegative; got {stop}")
-        batch_size = _positive("batch_size", batch_size)
         if stop == 0:
             return
 
@@ -120,13 +85,16 @@ def resolve_train_sizes(
     *,
     batch_size: int,
 ) -> tuple[int, ...]:
-    requested = tuple(_positive("requested train size", size) for size in requested)
-    if not requested or requested != tuple(sorted(set(requested))):
+    requested = tuple(requested)
+    if (
+        not requested
+        or requested[0] <= 0
+        or requested != tuple(sorted(set(requested)))
+    ):
         raise ValueError(
             "requested train sizes must be positive, unique, and increasing"
         )
 
-    batch_size = _positive("batch_size", batch_size)
     if any(size % batch_size for size in requested[:-1]):
         raise ValueError("nonterminal train sizes must be divisible by batch_size")
     return requested

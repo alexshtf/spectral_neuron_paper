@@ -12,7 +12,6 @@ from paper.experiments.higgs_scaling import (
     HiggsModelSpec,
     Profile,
     SeedGrid,
-    _best_lrs,
     _make_mlp,
     _make_seeded_model,
     default_raw_path,
@@ -27,6 +26,7 @@ from paper.experiments.higgs_scaling import (
 )
 from paper.higgs import NUM_FEATURES, HiggsLayout
 from paper.models import KthEigval
+from paper.tuning import best_lrs
 
 
 def _write_tiny_higgs(path: Path, rows: int) -> None:
@@ -84,31 +84,6 @@ def test_matched_width_uses_smaller_width_to_break_ties():
     assert mlp_parameter_count(2, 2, 1) == 9
     assert matched_mlp_width(2, 1, 7) == 1
     assert matched_mlp_width(28, 3, 1) == 1
-
-
-@pytest.mark.parametrize(
-    ("function", "args"),
-    [
-        (spectral_parameter_count, (0, 3)),
-        (spectral_parameter_count, (28, 0)),
-        (mlp_parameter_count, (0, 4, 2)),
-        (mlp_parameter_count, (28, 0, 2)),
-        (mlp_parameter_count, (28, 4, 0)),
-        (matched_mlp_width, (0, 2, 100)),
-        (matched_mlp_width, (28, 0, 100)),
-        (matched_mlp_width, (28, 2, 0)),
-    ],
-)
-def test_parameter_helpers_reject_nonpositive_inputs(function, args):
-    with pytest.raises(ValueError, match="positive"):
-        function(*args)
-
-
-def test_parameter_helpers_reject_nonintegral_inputs():
-    with pytest.raises(TypeError, match="integer"):
-        matched_mlp_width(28.0, 2, 100)
-    with pytest.raises(TypeError, match="integer"):
-        matched_mlp_width(True, 2, 100)
 
 
 @pytest.mark.parametrize(
@@ -201,66 +176,6 @@ def test_seeded_model_construction_does_not_change_global_rng(spec):
         torch.testing.assert_close(first_parameter, second_parameter)
 
 
-def test_model_spec_validation():
-    with pytest.raises(ValueError, match="linear model requires dim=0"):
-        HiggsModelSpec("linear", 3)
-    with pytest.raises(ValueError, match="positive dim"):
-        HiggsModelSpec("mlp-1")
-    with pytest.raises(ValueError, match="positive dim"):
-        HiggsModelSpec("spectral")
-
-
-def _tuning_row(*, lr: float, score: float, init_seed: int) -> dict[str, object]:
-    return {
-        "protocol": "repeated_shuffle",
-        "optimizer": "adam",
-        "train_pool_size": 100,
-        "phase": "tuning",
-        "train_size": 100,
-        "data_seed": 0,
-        "model": "mlp-1",
-        "dim": 3,
-        "width": 6,
-        "num_parameters": 181,
-        "lr": lr,
-        "init_seed": init_seed,
-        "val_logloss": score,
-    }
-
-
-def test_lr_selection_filters_nonfinite_scores_and_breaks_ties_toward_lower_lr():
-    tuning = pd.DataFrame(
-        [
-            _tuning_row(lr=1e-3, score=0.4, init_seed=0),
-            _tuning_row(lr=1e-3, score=0.6, init_seed=1),
-            _tuning_row(lr=1e-2, score=0.5, init_seed=0),
-            _tuning_row(lr=1e-2, score=0.5, init_seed=1),
-            _tuning_row(lr=1e-1, score=np.nan, init_seed=0),
-            _tuning_row(lr=1e-1, score=np.inf, init_seed=1),
-        ]
-    )
-
-    with pytest.warns(RuntimeWarning, match="2 nonfinite"):
-        best = _best_lrs(tuning)
-
-    assert best[["selected_lr", "median_val_logloss"]].to_dict("records") == [
-        {"selected_lr": 1e-3, "median_val_logloss": 0.5}
-    ]
-
-
-def test_lr_selection_rejects_a_family_without_finite_validation():
-    tuning = pd.DataFrame(
-        [
-            _tuning_row(lr=1e-2, score=np.nan, init_seed=0),
-            _tuning_row(lr=1e-1, score=np.inf, init_seed=1),
-        ]
-    )
-
-    with pytest.warns(RuntimeWarning, match="2 nonfinite"):
-        with pytest.raises(ValueError, match="no finite validation"):
-            _best_lrs(tuning)
-
-
 def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_raw):
     raw = complete_raw
     summary = summarize_raw(raw)
@@ -280,7 +195,11 @@ def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_r
     assert set(evaluation["train_size"]) == {8, 16}
     assert evaluation["val_logloss"].isna().all()
     assert evaluation[["test_logloss", "test_brier"]].notna().all().all()
-    winners = _best_lrs(tuning).set_index(CURVE_COLUMNS)["selected_lr"]
+    winners = best_lrs(
+        tuning,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_logloss",
+    ).set_index(CURVE_COLUMNS)["selected_lr"]
     actual = evaluation.set_index(CURVE_COLUMNS)["lr"]
     assert np.allclose(actual, winners.loc[actual.index])
     identity = [
@@ -330,7 +249,7 @@ def test_validate_raw_rejects_schema_identity_and_capacity_errors(complete_raw):
 
     mixed_pool_sizes = complete_raw.copy()
     mixed_pool_sizes.loc[0, "train_pool_size"] = 8
-    with pytest.raises(ValueError, match="one positive integer train_pool_size"):
+    with pytest.raises(ValueError, match="one train_pool_size"):
         validate_raw(mixed_pool_sizes, _tiny_profile())
 
     duplicate = pd.concat((complete_raw, complete_raw.iloc[[0]]), ignore_index=True)

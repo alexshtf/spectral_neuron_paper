@@ -53,21 +53,6 @@ def test_preparing_more_passes_preserves_cached_prefix(tmp_path: Path):
         np.testing.assert_array_equal(np.load(path, allow_pickle=False), expected)
 
 
-def test_invalid_cached_order_is_replaced_atomically(tmp_path: Path):
-    shuffled = ShuffledEpochs(tmp_path, size=11, seed=2)
-    path = shuffled.prepare(1)[0]
-    with path.open("wb") as file:
-        np.save(file, np.arange(10, dtype=np.uint32), allow_pickle=False)
-
-    assert shuffled.prepare(1) == (path,)
-
-    np.testing.assert_array_equal(
-        np.load(path, allow_pickle=False),
-        _successive_orders(11, seed=2, passes=1)[0],
-    )
-    assert not tuple(path.parent.glob(".*.tmp"))
-
-
 def test_batches_are_global_across_pass_boundaries(tmp_path: Path):
     shuffled = ShuffledEpochs(tmp_path, size=5, seed=4)
     stream = np.concatenate(_successive_orders(5, seed=4, passes=3))
@@ -94,20 +79,3 @@ def test_resolve_train_sizes_preserves_explicit_batch_aligned_checkpoints():
 def test_resolve_train_sizes_rejects_unaligned_nonterminal_checkpoints():
     with pytest.raises(ValueError, match="nonterminal train sizes"):
         resolve_train_sizes((1, 2, 5), batch_size=4)
-
-
-@pytest.mark.parametrize(
-    ("factory", "match"),
-    [
-        (lambda path: ShuffledEpochs(path, True, 0), "size"),
-        (lambda path: ShuffledEpochs(path, 3, True), "seed"),
-        (lambda path: list(ShuffledEpochs(path, 3, 0).batches(True, 1)), "stop"),
-        (
-            lambda _: resolve_train_sizes((True,), batch_size=1),
-            "requested train size",
-        ),
-    ],
-)
-def test_shuffle_counts_reject_booleans(tmp_path: Path, factory, match: str):
-    with pytest.raises(TypeError, match=match):
-        factory(tmp_path)

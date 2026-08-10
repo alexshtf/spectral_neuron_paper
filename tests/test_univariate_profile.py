@@ -4,13 +4,13 @@ import pandas as pd
 import pytest
 import torch
 
+from paper.experiments.results import write_csv
 from paper.experiments.synthetic import (
     RAW_COLUMNS,
     Profile,
     RunGrid,
     _make_seeded_model,
     build_arg_parser,
-    write_csv,
 )
 from paper.experiments.univariate import run_profile
 from paper.models import ModelSpec

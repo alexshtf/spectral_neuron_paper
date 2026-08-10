@@ -1,8 +1,6 @@
 import argparse
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Literal, TextIO
@@ -11,7 +9,6 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from tqdm.auto import tqdm
 
 from paper.criteo import (
     NUM_FIELDS,
@@ -22,19 +19,18 @@ from paper.criteo import (
     prepare_corpus,
     prepare_encoded_data,
 )
-from paper.experiments import run_many
+from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.scaling import (
     PROTOCOL,
     RunConfig,
     SeedGrid,
     SelectedRun,
-    best_lrs,
+    run_tuning_and_evaluation,
     select_lr as select_scaling_lr,
     selected_runs,
     summarize_scaling,
     tuning_configs,
 )
-from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
 from paper.shuffling import ShuffledEpochs, resolve_train_sizes
 from paper.training import (
@@ -42,6 +38,7 @@ from paper.training import (
     fit_and_test_scaling,
     tune_scaling_stream,
 )
+from paper.tuning import best_lrs, same_lrs
 
 
 type Variant = Literal[
@@ -115,18 +112,6 @@ class Profile:
     preprocessor_seed: int = 0
     min_count: int = 10
 
-    def __post_init__(self) -> None:
-        if not self.train_sizes or self.train_sizes != tuple(
-            sorted(set(self.train_sizes))
-        ):
-            raise ValueError("train_sizes must be non-empty, unique, and increasing")
-        if not self.tuning_seeds or not self.evaluation_seeds:
-            raise ValueError("tuning and evaluation seed grids must be non-empty")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        if not 0 < self.preprocessor_fraction <= 1:
-            raise ValueError("preprocessor_fraction must be in (0, 1]")
-
 
 PROFILES: dict[str, Profile] = {
     "sanity": Profile(
@@ -185,12 +170,6 @@ def _model_specs(
         for variant in ("fm", "spectral-bucketed", "spectral-continuous")
     )
     return tuple(spec for spec in specs if spec.variant in variants)
-
-
-def _tuning_configs(
-    profile: Profile, model_specs: tuple[CriteoModelSpec, ...]
-) -> tuple[RunConfig[CriteoModelSpec], ...]:
-    return tuning_configs(model_specs, profile.lrs, profile.tuning_seeds)
 
 
 @dataclass(frozen=True)
@@ -274,25 +253,6 @@ def _format_result(
     ).reindex(columns=RAW_COLUMNS + _TIMING_COLUMNS)
 
 
-def _report_timings(
-    phase: str,
-    evaluation_prefix: str,
-    results: list[pd.DataFrame],
-    progress_file: TextIO | None,
-) -> None:
-    train_seconds = sum(result["train_seconds"].iloc[-1] for result in results)
-    evaluation_seconds = sum(
-        result[f"{evaluation_prefix}_seconds"].iloc[-1] for result in results
-    )
-    evaluation = "validation" if evaluation_prefix == "val" else "test"
-    tqdm.write(
-        f"{phase} aggregate trajectory time: "
-        f"training={timedelta(seconds=round(train_seconds))}, "
-        f"{evaluation}={timedelta(seconds=round(evaluation_seconds))}",
-        file=sys.stderr if progress_file is None else progress_file,
-    )
-
-
 def run_config(
     config: RunConfig[CriteoModelSpec], settings: RunSettings
 ) -> pd.DataFrame:
@@ -360,8 +320,6 @@ def run_profile(
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> pd.DataFrame:
-    if workers < 1:
-        raise ValueError(f"workers must be positive; got {workers}")
     if variant is not None and variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
 
@@ -380,7 +338,7 @@ def run_profile(
     sample_size = max(1, round(profile.preprocessor_fraction * corpus.train_stop))
     variants = (variant,) if variant is not None else VARIANTS
     model_specs = _model_specs(profile, variants)
-    configs = _tuning_configs(profile, model_specs)
+    configs = tuning_configs(model_specs, profile.lrs, profile.tuning_seeds)
     preprocessing_kinds = tuple(
         dict.fromkeys(spec.preprocessing for spec in model_specs)
     )
@@ -423,46 +381,19 @@ def run_profile(
         preprocessor_seed=profile.preprocessor_seed,
         threads_per_worker=1 if workers > 1 else None,
     )
-    tune = partial(run_config, settings=settings)
-    tuning_results = run_many(
-        tune,
+    results = run_tuning_and_evaluation(
         configs,
+        tune=partial(run_config, settings=settings),
+        select_evaluation_runs=partial(
+            _selected_runs,
+            evaluation_seeds=profile.evaluation_seeds,
+        ),
+        evaluate=partial(run_selected, settings=settings),
         workers=workers,
-        desc="Tuning (train + validation)",
-        unit="trajectory",
         progress=progress,
         progress_file=progress_file,
     )
-
-    if not tuning_results:
-        return pd.DataFrame(columns=RAW_COLUMNS)
-    if progress:
-        _report_timings("Tuning", "val", tuning_results, progress_file)
-    tuning = pd.concat(tuning_results, ignore_index=True)
-
-    test = partial(run_selected, settings=settings)
-    test_results = run_many(
-        test,
-        _selected_runs(tuning, profile.evaluation_seeds),
-        workers=workers,
-        desc="Evaluation (retrain + test)",
-        unit="trajectory",
-        progress=progress,
-        progress_file=progress_file,
-    )
-    if progress:
-        _report_timings("Evaluation", "test", test_results, progress_file)
-
-    evaluation = pd.concat(test_results, ignore_index=True)
-    return pd.concat((tuning, evaluation), ignore_index=True).loc[:, RAW_COLUMNS]
-
-
-def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
-    return best_lrs(
-        tuning,
-        curve_columns=CURVE_COLUMNS,
-        validation_metric="val_logloss",
-    )
+    return results.reindex(columns=RAW_COLUMNS)
 
 
 def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
@@ -479,13 +410,6 @@ def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
         curve_columns=CURVE_COLUMNS,
         validation_metric="val_logloss",
         quantile_metrics=("test_logloss", "test_brier"),
-    )
-
-
-def _same_lrs(actual: pd.Series, expected: tuple[float, ...]) -> bool:
-    values = np.sort(actual.unique())
-    return len(values) == len(expected) and np.allclose(
-        values, expected, rtol=1e-12, atol=0
     )
 
 
@@ -507,13 +431,8 @@ def validate_raw(
         raise ValueError(f"expected optimizer={OPTIMIZER!r}")
 
     train_pool_sizes = raw["train_pool_size"].unique()
-    if (
-        len(train_pool_sizes) != 1
-        or isinstance(train_pool_sizes[0], (bool, np.bool_))
-        or not isinstance(train_pool_sizes[0], (int, np.integer))
-        or train_pool_sizes[0] <= 0
-    ):
-        raise ValueError("results must contain one positive integer train_pool_size")
+    if len(train_pool_sizes) != 1:
+        raise ValueError("results must contain one train_pool_size")
     train_pool_size = int(train_pool_sizes[0])
     sample_size = max(1, round(profile.preprocessor_fraction * train_pool_size))
     if set(raw["preprocessor_sample_size"]) != {sample_size}:
@@ -571,11 +490,11 @@ def validate_raw(
     ).all():
         raise ValueError("evaluation test metrics must be finite")
 
-    if not _same_lrs(tuning["lr"], profile.lrs):
+    if not same_lrs(tuning["lr"], profile.lrs):
         raise ValueError("tuning learning-rate grid does not match the profile")
     tuning_seeds = set(profile.tuning_seeds)
     for curve, rows in tuning.groupby(CURVE_COLUMNS):
-        if not _same_lrs(rows["lr"], profile.lrs):
+        if not same_lrs(rows["lr"], profile.lrs):
             raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
         for lr, lr_rows in rows.groupby("lr"):
             seeds = set(
@@ -586,7 +505,11 @@ def validate_raw(
 
     selected_lrs = {
         tuple(getattr(row, column) for column in CURVE_COLUMNS): row.selected_lr
-        for row in _best_lrs(tuning).itertuples(index=False)
+        for row in best_lrs(
+            tuning,
+            curve_columns=CURVE_COLUMNS,
+            validation_metric="val_logloss",
+        ).itertuples(index=False)
     }
     evaluation_seeds = set(profile.evaluation_seeds)
     for curve, rows in evaluation.groupby(CURVE_COLUMNS):

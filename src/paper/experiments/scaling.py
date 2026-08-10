@@ -1,10 +1,15 @@
-import warnings
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from itertools import product
+from typing import TextIO
 
-import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
+
+from paper.experiments import run_many
+from paper.tuning import best_lrs
 
 
 PROTOCOL = "repeated_shuffle"
@@ -52,53 +57,62 @@ def tuning_configs[T](
     )
 
 
-def best_lrs(
-    tuning: pd.DataFrame,
+def _report_timings(
+    phase: str,
+    evaluation_prefix: str,
+    results: list[pd.DataFrame],
+    progress_file: TextIO | None,
+) -> None:
+    train_seconds = sum(result["train_seconds"].iloc[-1] for result in results)
+    evaluation_seconds = sum(
+        result[f"{evaluation_prefix}_seconds"].iloc[-1] for result in results
+    )
+    evaluation = "validation" if evaluation_prefix == "val" else "test"
+    tqdm.write(
+        f"{phase} aggregate trajectory time: "
+        f"training={timedelta(seconds=round(train_seconds))}, "
+        f"{evaluation}={timedelta(seconds=round(evaluation_seconds))}",
+        file=sys.stderr if progress_file is None else progress_file,
+    )
+
+
+def run_tuning_and_evaluation[T](
+    configs: Sequence[RunConfig[T]],
     *,
-    curve_columns: Sequence[str],
-    validation_metric: str,
+    tune: Callable[[RunConfig[T]], pd.DataFrame],
+    select_evaluation_runs: Callable[[pd.DataFrame], Sequence[SelectedRun[T]]],
+    evaluate: Callable[[SelectedRun[T]], pd.DataFrame],
+    workers: int,
+    progress: bool,
+    progress_file: TextIO | None,
 ) -> pd.DataFrame:
-    if tuning.empty:
-        raise ValueError("tuning results must not be empty")
+    tuning_results = run_many(
+        tune,
+        configs,
+        workers=workers,
+        desc="Tuning (train + validation)",
+        unit="trajectory",
+        progress=progress,
+        progress_file=progress_file,
+    )
+    if progress:
+        _report_timings("Tuning", "val", tuning_results, progress_file)
+    tuning = pd.concat(tuning_results, ignore_index=True)
 
-    curve_columns = list(curve_columns)
-    median_metric = f"median_{validation_metric}"
-    curves = tuning[curve_columns].drop_duplicates()
-    finite_mask = np.isfinite(tuning[validation_metric])
-    if not finite_mask.all():
-        warnings.warn(
-            f"{(~finite_mask).sum()} nonfinite {validation_metric} values ignored",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    finite = tuning.loc[finite_mask]
-    scores = (
-        finite.groupby(curve_columns + ["lr"], as_index=False)[validation_metric]
-        .median()
-        .rename(columns={validation_metric: median_metric})
+    evaluation_results = run_many(
+        evaluate,
+        select_evaluation_runs(tuning),
+        workers=workers,
+        desc="Evaluation (retrain + test)",
+        unit="trajectory",
+        progress=progress,
+        progress_file=progress_file,
     )
-    missing = curves.merge(
-        scores[curve_columns].drop_duplicates(),
-        on=curve_columns,
-        how="left",
-        indicator=True,
-    )
-    missing = missing.loc[missing["_merge"] == "left_only", curve_columns]
-    if not missing.empty:
-        raise ValueError(
-            "no finite validation metric for " + repr(missing.to_dict("records"))
-        )
+    if progress:
+        _report_timings("Evaluation", "test", evaluation_results, progress_file)
 
-    best = (
-        scores.sort_values(
-            curve_columns + [median_metric, "lr"],
-            kind="mergesort",
-        )
-        .groupby(curve_columns, as_index=False, sort=False)
-        .head(1)
-        .rename(columns={"lr": "selected_lr"})
-    )
-    return best[curve_columns + ["selected_lr", median_metric]]
+    evaluation = pd.concat(evaluation_results, ignore_index=True)
+    return pd.concat((tuning, evaluation), ignore_index=True)
 
 
 def selected_runs[T](
@@ -165,9 +179,6 @@ def summarize_scaling(
     quantile_metrics: Sequence[str],
 ) -> pd.DataFrame:
     quantile_metrics = tuple(quantile_metrics)
-    if not quantile_metrics:
-        raise ValueError("at least one quantile metric is required")
-
     selected = select_lr(
         raw,
         curve_columns=curve_columns,

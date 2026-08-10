@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from functools import partial
 from itertools import product
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import TextIO
 
 import pandas as pd
 import torch
 
 from paper.experiments import run_many
+from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
 from paper.tasks import Task
@@ -18,7 +19,6 @@ from paper.training import run_one_stream
 type TargetFactory = Callable[[TargetSpec], ArrayTarget]
 type TaskFactory = Callable[..., Task]
 type ProfileRunner = Callable[..., pd.DataFrame]
-type WriteMode = Literal["overwrite", "append"]
 
 
 RAW_COLUMNS = [
@@ -37,8 +37,6 @@ RAW_COLUMNS = [
     "test_rmse",
 ]
 
-DEFAULT_RUNS_DIR = Path("notebooks") / "runs"
-WRITE_MODES: tuple[WriteMode, ...] = ("overwrite", "append")
 FITS: tuple[tuple[TargetKind, ModelKind], ...] = (
     ("general", "unconstrained"),
     ("monotone", "unconstrained"),
@@ -224,18 +222,11 @@ def run_profile(
     return pd.concat(dfs, ignore_index=True)
 
 
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
-
-
 def build_arg_parser(profiles: Mapping[str, Profile]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--workers", type=_positive_int, default=1)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--write-mode", choices=WRITE_MODES, default="overwrite")
     return parser
@@ -243,35 +234,6 @@ def build_arg_parser(profiles: Mapping[str, Profile]) -> argparse.ArgumentParser
 
 def default_raw_path(experiment_name: str, profile_name: str) -> Path:
     return DEFAULT_RUNS_DIR / f"{experiment_name}_{profile_name}.csv"
-
-
-def write_csv(
-    df: pd.DataFrame,
-    path: Path,
-    *,
-    write_mode: WriteMode = "overwrite",
-) -> None:
-    if write_mode not in WRITE_MODES:
-        raise ValueError(f"unknown write mode: {write_mode}")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    append = write_mode == "append"
-    has_content = path.exists() and path.stat().st_size > 0
-    if append and has_content:
-        existing_columns = pd.read_csv(path, nrows=0).columns.tolist()
-        new_columns = df.columns.tolist()
-        if existing_columns != new_columns:
-            raise ValueError(
-                f"cannot append to {path}: CSV header {existing_columns} "
-                f"does not match columns {new_columns}"
-            )
-
-    df.to_csv(
-        path,
-        mode="a" if append else "w",
-        header=not append or not has_content,
-        index=False,
-    )
 
 
 def run_cli(

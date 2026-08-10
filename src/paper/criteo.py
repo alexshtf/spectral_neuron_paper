@@ -1,7 +1,6 @@
 import fcntl
 import json
 import pickle
-import shutil
 import sys
 import tempfile
 from compression import zstd
@@ -104,7 +103,7 @@ def prepare_corpus(
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> "CriteoCorpus":
-    """Convert the headerless challenge TSV to compact memory-mapped arrays."""
+    """Convert the TSV to memory-mapped arrays, trusting an existing cache."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = cache_dir / METADATA_FILE
     with _exclusive_lock(cache_dir / ".corpus.lock"):
@@ -456,29 +455,9 @@ def _save_preprocessor(preprocessor: FittedPreprocessor, path: Path) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _compress_preprocessor(source: Path, path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    with _exclusive_lock(path.with_name(f".{path.name}.lock")):
-        if path.exists():
-            return
-        try:
-            with (
-                source.open("rb") as source_file,
-                zstd.open(temporary, "wb", level=ZSTD_LEVEL) as compressed_file,
-            ):
-                shutil.copyfileobj(source_file, compressed_file)
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-
 def load_preprocessor(path: Path) -> FittedPreprocessor:
-    # These files are trusted, local artifacts created by this module.
     with zstd.open(path, "rb") as file:
-        preprocessor = pickle.load(file)
-    if not isinstance(preprocessor, BucketPreprocessor | HybridPreprocessor):
-        raise TypeError(f"{path} does not contain a fitted Criteo preprocessor")
-    return preprocessor
+        return pickle.load(file)
 
 
 def fit_preprocessors(
@@ -492,14 +471,6 @@ def fit_preprocessors(
     progress_file: TextIO | None = None,
 ) -> dict[PreprocessingKind, Path]:
     kinds = tuple(dict.fromkeys(kinds))
-    if not kinds:
-        return {}
-    if not set(kinds) <= {"bucket", "hybrid"}:
-        raise ValueError(f"unknown preprocessing kind in {kinds}")
-    if not 0 < sample_size <= corpus.train_stop:
-        raise ValueError(
-            f"sample_size must be in [1, {corpus.train_stop}]; got {sample_size}"
-        )
     paths = {
         kind: _preprocessor_path(
             corpus,
@@ -510,10 +481,6 @@ def fit_preprocessors(
         )
         for kind in kinds
     }
-    for path in paths.values():
-        legacy = path.with_suffix("")
-        if not path.exists() and legacy.exists():
-            _compress_preprocessor(legacy, path)
     missing = [kind for kind, path in paths.items() if not path.exists()]
     if progress:
         output = sys.stderr if progress_file is None else progress_file
@@ -628,45 +595,6 @@ class EncodedData:
     validation_rows: int
 
 
-def _valid_encoded_split(
-    path: Path,
-    *,
-    row_count: int,
-    kind: PreprocessingKind,
-) -> bool:
-    if not (path / "complete").exists():
-        return False
-    try:
-        feature_ids = np.load(
-            path / "feature_ids.npy", mmap_mode="r", allow_pickle=False
-        )
-        labels = np.load(path / "labels.npy", mmap_mode="r", allow_pickle=False)
-        values_path = path / "feature_values.npy"
-        feature_values = (
-            np.load(values_path, mmap_mode="r", allow_pickle=False)
-            if values_path.exists()
-            else None
-        )
-    except EOFError, OSError, ValueError:
-        return False
-
-    shape = (row_count, NUM_FIELDS)
-    valid_values = feature_values is None
-    if kind == "hybrid":
-        valid_values = (
-            feature_values is not None
-            and feature_values.dtype == np.float32
-            and feature_values.shape == shape
-        )
-    return (
-        feature_ids.dtype == FEATURE_ID_DTYPE
-        and feature_ids.shape == shape
-        and labels.dtype == np.uint8
-        and labels.shape == (row_count,)
-        and valid_values
-    )
-
-
 def _write_encoded_split(
     corpus: CriteoCorpus,
     preprocessor: FittedPreprocessor,
@@ -727,7 +655,6 @@ def _write_encoded_split(
     for output in (feature_ids, feature_values, encoded_labels):
         if output is not None:
             output.flush()
-    (path / "complete").touch()
 
 
 def _prepare_encoded_split(
@@ -743,17 +670,9 @@ def _prepare_encoded_split(
     progress_file: TextIO | None,
 ) -> Path:
     row_count = len(rows)
-
-    def validity(candidate: Path) -> bool:
-        return _valid_encoded_split(
-            candidate,
-            row_count=row_count,
-            kind=preprocessor.kind,
-        )
-
     path.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_lock(path.with_name(f".{path.name}.lock")):
-        if validity(path):
+        if path.exists():
             if progress:
                 tqdm.write(
                     f"{description}: {row_count:,} rows (cached)",
@@ -761,11 +680,10 @@ def _prepare_encoded_split(
                 )
             return path
 
-        if path.exists():
-            shutil.rmtree(path)
-
-        temporary = Path(tempfile.mkdtemp(prefix=f".{path.name}-", dir=path.parent))
-        try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".{path.name}-", dir=path.parent
+        ) as tmp:
+            temporary = Path(tmp)
             _write_encoded_split(
                 corpus,
                 preprocessor,
@@ -779,8 +697,6 @@ def _prepare_encoded_split(
             )
             temporary.replace(path)
             return path
-        finally:
-            shutil.rmtree(temporary, ignore_errors=True)
 
 
 def prepare_encoded_data(

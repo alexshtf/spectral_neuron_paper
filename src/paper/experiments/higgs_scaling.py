@@ -1,11 +1,8 @@
 import argparse
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
 from functools import partial
 from itertools import pairwise
-from operator import index
 from pathlib import Path
 from typing import Literal, TextIO
 
@@ -13,21 +10,19 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from tqdm.auto import tqdm
 
-from paper.experiments import run_many
+from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.scaling import (
     PROTOCOL,
     RunConfig,
     SeedGrid,
     SelectedRun,
-    best_lrs,
+    run_tuning_and_evaluation,
     select_lr as select_scaling_lr,
     selected_runs,
     summarize_scaling,
     tuning_configs,
 )
-from paper.experiments.synthetic import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.higgs import (
     NUM_FEATURES,
     OFFICIAL_LAYOUT,
@@ -44,6 +39,7 @@ from paper.training import (
     fit_and_test_scaling,
     tune_scaling_stream,
 )
+from paper.tuning import best_lrs, same_lrs
 
 
 type Variant = Literal["linear", "mlp-1", "mlp-2", "mlp-3", "spectral"]
@@ -96,29 +92,12 @@ MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
 CURVE_COLUMNS = MODEL_COLUMNS + ["train_size"]
 
 
-def _positive(name: str, value: int) -> int:
-    if isinstance(value, (bool, np.bool_)):
-        raise TypeError(f"{name} must be an integer")
-    try:
-        value = index(value)
-    except TypeError as error:
-        raise TypeError(f"{name} must be an integer") from error
-    if value < 1:
-        raise ValueError(f"{name} must be positive; got {value}")
-    return value
-
-
 def spectral_parameter_count(input_dim: int, dim: int) -> int:
-    input_dim = _positive("input_dim", input_dim)
-    dim = _positive("dim", dim)
     coordinates = dim * (dim + 1) // 2
     return (input_dim + 1) * coordinates
 
 
 def mlp_parameter_count(input_dim: int, width: int, depth: int) -> int:
-    input_dim = _positive("input_dim", input_dim)
-    width = _positive("width", width)
-    depth = _positive("depth", depth)
     return (depth - 1) * width**2 + (input_dim + depth + 1) * width + 1
 
 
@@ -128,10 +107,6 @@ def matched_mlp_width(
     target_parameters: int,
 ) -> int:
     """Return the positive width closest to a target parameter count."""
-    input_dim = _positive("input_dim", input_dim)
-    depth = _positive("depth", depth)
-    target_parameters = _positive("target_parameters", target_parameters)
-
     if mlp_parameter_count(input_dim, 1, depth) >= target_parameters:
         return 1
 
@@ -165,31 +140,6 @@ class Profile:
     tuning_seeds: SeedGrid
     evaluation_seeds: SeedGrid
     batch_size: int = 4096
-
-    def __post_init__(self) -> None:
-        if (
-            not self.train_sizes
-            or self.train_sizes != tuple(sorted(set(self.train_sizes)))
-            or self.train_sizes[0] <= 0
-        ):
-            raise ValueError("train_sizes must be positive, unique, and increasing")
-        if (
-            not self.dims
-            or self.dims != tuple(sorted(set(self.dims)))
-            or self.dims[0] <= 0
-        ):
-            raise ValueError("dims must be positive, unique, and increasing")
-        if (
-            not self.lrs
-            or self.lrs != tuple(sorted(set(self.lrs)))
-            or not np.isfinite(self.lrs).all()
-            or self.lrs[0] <= 0
-        ):
-            raise ValueError("lrs must be finite, positive, unique, and increasing")
-        if not self.tuning_seeds or not self.evaluation_seeds:
-            raise ValueError("tuning and evaluation seed grids must be non-empty")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
 
 
 PROFILES: dict[str, Profile] = {
@@ -241,15 +191,6 @@ class HiggsModelSpec:
     variant: Variant
     dim: int = 0
 
-    def __post_init__(self) -> None:
-        if self.variant not in VARIANTS:
-            raise ValueError(f"unknown variant {self.variant!r}")
-        if self.variant == "linear":
-            if self.dim != 0:
-                raise ValueError("linear model requires dim=0")
-        elif self.dim <= 0:
-            raise ValueError(f"{self.variant} model requires a positive dim")
-
     @property
     def depth(self) -> int | None:
         return MLP_DEPTHS.get(self.variant)
@@ -282,12 +223,6 @@ def _model_specs(
     return tuple(spec for spec in specs if spec.variant in variants)
 
 
-def _tuning_configs(
-    profile: Profile, model_specs: tuple[HiggsModelSpec, ...]
-) -> tuple[RunConfig[HiggsModelSpec], ...]:
-    return tuning_configs(model_specs, profile.lrs, profile.tuning_seeds)
-
-
 def _make_mlp(input_dim: int, width: int, depth: int) -> nn.Sequential:
     dimensions = (input_dim,) + (width,) * depth + (1,)
     layers: list[nn.Module] = []
@@ -309,10 +244,7 @@ def make_model(spec: HiggsModelSpec, input_dim: int = NUM_FEATURES) -> nn.Module
         )
     if spec.variant == "spectral":
         return KthEigval(input_dim, spec.dim, eig_idx=spec.dim // 2)
-    try:
-        depth = MLP_DEPTHS[spec.variant]
-    except KeyError as error:
-        raise ValueError(spec.variant) from error
+    depth = MLP_DEPTHS[spec.variant]
     return _make_mlp(input_dim, spec.width(input_dim), depth)
 
 
@@ -369,25 +301,6 @@ def _format_result(
     ).reindex(columns=RAW_COLUMNS + _TIMING_COLUMNS)
 
 
-def _report_timings(
-    phase: str,
-    evaluation_prefix: str,
-    results: list[pd.DataFrame],
-    progress_file: TextIO | None,
-) -> None:
-    train_seconds = sum(result["train_seconds"].iloc[-1] for result in results)
-    evaluation_seconds = sum(
-        result[f"{evaluation_prefix}_seconds"].iloc[-1] for result in results
-    )
-    evaluation = "validation" if evaluation_prefix == "val" else "test"
-    tqdm.write(
-        f"{phase} aggregate trajectory time: "
-        f"training={timedelta(seconds=round(train_seconds))}, "
-        f"{evaluation}={timedelta(seconds=round(evaluation_seconds))}",
-        file=sys.stderr if progress_file is None else progress_file,
-    )
-
-
 def run_config(
     config: RunConfig[HiggsModelSpec], settings: RunSettings
 ) -> pd.DataFrame:
@@ -433,14 +346,6 @@ def run_selected(
     )
 
 
-def _best_lrs(tuning: pd.DataFrame) -> pd.DataFrame:
-    return best_lrs(
-        tuning,
-        curve_columns=CURVE_COLUMNS,
-        validation_metric="val_logloss",
-    )
-
-
 def _selected_runs(
     tuning: pd.DataFrame,
     evaluation_seeds: SeedGrid,
@@ -467,8 +372,6 @@ def run_profile(
     progress: bool = False,
     progress_file: TextIO | None = None,
 ) -> pd.DataFrame:
-    if workers < 1:
-        raise ValueError(f"workers must be positive; got {workers}")
     if variant is not None and variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
 
@@ -487,7 +390,7 @@ def run_profile(
 
     variants = (variant,) if variant is not None else VARIANTS
     model_specs = _model_specs(profile, variants)
-    configs = _tuning_configs(profile, model_specs)
+    configs = tuning_configs(model_specs, profile.lrs, profile.tuning_seeds)
     data_seeds = sorted(
         set(profile.tuning_seeds.data_seeds)
         | set(profile.evaluation_seeds.data_seeds)
@@ -502,37 +405,19 @@ def run_profile(
         corpus=corpus,
         threads_per_worker=1 if workers > 1 else None,
     )
-    tune = partial(run_config, settings=settings)
-    tuning_results = run_many(
-        tune,
+    results = run_tuning_and_evaluation(
         configs,
+        tune=partial(run_config, settings=settings),
+        select_evaluation_runs=partial(
+            _selected_runs,
+            evaluation_seeds=profile.evaluation_seeds,
+        ),
+        evaluate=partial(run_selected, settings=settings),
         workers=workers,
-        desc="Tuning (train + validation)",
-        unit="trajectory",
         progress=progress,
         progress_file=progress_file,
     )
-    if not tuning_results:
-        return pd.DataFrame(columns=RAW_COLUMNS)
-    if progress:
-        _report_timings("Tuning", "val", tuning_results, progress_file)
-    tuning = pd.concat(tuning_results, ignore_index=True)
-
-    evaluate = partial(run_selected, settings=settings)
-    evaluation_results = run_many(
-        evaluate,
-        _selected_runs(tuning, profile.evaluation_seeds),
-        workers=workers,
-        desc="Evaluation (retrain + test)",
-        unit="trajectory",
-        progress=progress,
-        progress_file=progress_file,
-    )
-    if progress:
-        _report_timings("Evaluation", "test", evaluation_results, progress_file)
-
-    evaluation = pd.concat(evaluation_results, ignore_index=True)
-    return pd.concat((tuning, evaluation), ignore_index=True).loc[:, RAW_COLUMNS]
+    return results.reindex(columns=RAW_COLUMNS)
 
 
 def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
@@ -562,13 +447,6 @@ def _expected_capacity(spec: HiggsModelSpec) -> tuple[int, int]:
     return width, mlp_parameter_count(NUM_FEATURES, width, depth)
 
 
-def _same_lrs(actual: pd.Series, expected: tuple[float, ...]) -> bool:
-    values = np.sort(actual.unique())
-    return len(values) == len(expected) and np.allclose(
-        values, expected, rtol=1e-12, atol=0
-    )
-
-
 def validate_raw(
     raw: pd.DataFrame,
     profile: Profile,
@@ -586,13 +464,8 @@ def validate_raw(
     if set(raw["optimizer"]) != {OPTIMIZER}:
         raise ValueError(f"expected optimizer={OPTIMIZER!r}")
     train_pool_sizes = raw["train_pool_size"].unique()
-    if (
-        len(train_pool_sizes) != 1
-        or isinstance(train_pool_sizes[0], (bool, np.bool_))
-        or not isinstance(train_pool_sizes[0], (int, np.integer))
-        or train_pool_sizes[0] <= 0
-    ):
-        raise ValueError("results must contain one positive integer train_pool_size")
+    if len(train_pool_sizes) != 1:
+        raise ValueError("results must contain one train_pool_size")
     train_pool_size = int(train_pool_sizes[0])
     if set(raw["phase"]) != {"tuning", "evaluation"}:
         raise ValueError("results must contain tuning and evaluation phases")
@@ -653,11 +526,11 @@ def validate_raw(
     ).all():
         raise ValueError("evaluation test metrics must be finite")
 
-    if not _same_lrs(tuning["lr"], profile.lrs):
+    if not same_lrs(tuning["lr"], profile.lrs):
         raise ValueError("tuning learning-rate grid does not match the profile")
     tuning_seeds = set(profile.tuning_seeds)
     for curve, rows in tuning.groupby(CURVE_COLUMNS):
-        if not _same_lrs(rows["lr"], profile.lrs):
+        if not same_lrs(rows["lr"], profile.lrs):
             raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
         for lr, lr_rows in rows.groupby("lr"):
             seeds = set(
@@ -668,7 +541,11 @@ def validate_raw(
             if seeds != tuning_seeds:
                 raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
 
-    selected_lrs = _best_lrs(tuning).set_index(CURVE_COLUMNS)["selected_lr"]
+    selected_lrs = best_lrs(
+        tuning,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_logloss",
+    ).set_index(CURVE_COLUMNS)["selected_lr"]
     evaluation_seeds = set(profile.evaluation_seeds)
     for curve, rows in evaluation.groupby(CURVE_COLUMNS):
         seeds = set(
@@ -712,7 +589,6 @@ def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     profile = PROFILES[args.profile]
     cache_dir = args.cache_dir or default_cache_dir(args.data)
-    print(cache_dir)
     raw = run_profile(
         profile,
         raw_path=args.data,

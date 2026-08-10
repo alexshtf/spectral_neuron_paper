@@ -1,4 +1,3 @@
-import json
 import pickle
 from compression import zstd
 from io import StringIO
@@ -8,7 +7,6 @@ import numpy as np
 import pytest
 import torch
 
-import paper.higgs as higgs
 from paper.higgs import (
     FEATURES_FILE,
     LABELS_FILE,
@@ -71,13 +69,8 @@ def test_layout_requires_strict_nonempty_boundaries(values):
         HiggsLayout(*values)
 
 
-def test_layout_requires_integer_boundaries():
-    with pytest.raises(TypeError, match="integers"):
-        HiggsLayout(12.0, 8, 10)
-
-
 def test_prepare_corpus_preserves_data_and_training_statistics(tmp_path):
-    raw_path, cache_dir, corpus, values = _prepare(tmp_path)
+    _, cache_dir, corpus, values = _prepare(tmp_path)
 
     expected_features = values[:, 1:].astype(np.float32)
     np.testing.assert_array_equal(corpus.features(), expected_features)
@@ -86,15 +79,10 @@ def test_prepare_corpus_preserves_data_and_training_statistics(tmp_path):
     np.testing.assert_allclose(corpus.feature_mean, expected_training.mean(axis=0))
     np.testing.assert_allclose(corpus.feature_scale, expected_training.std(axis=0))
     assert corpus.layout == TINY_LAYOUT
-    assert corpus.source_size == raw_path.stat().st_size
     assert (cache_dir / FEATURES_FILE).stat().st_size == values.shape[0] * 28 * 4
     assert (cache_dir / LABELS_FILE).stat().st_size == values.shape[0]
 
-    reopened = HiggsCorpus.open(
-        cache_dir,
-        layout=TINY_LAYOUT,
-        source_size=raw_path.stat().st_size,
-    )
+    reopened = HiggsCorpus.open(cache_dir, layout=TINY_LAYOUT)
     assert reopened == corpus
 
 
@@ -178,7 +166,7 @@ def test_prepare_rejects_wrong_shapes_without_publishing_cache(
         prepare_corpus(raw_path, cache_dir, layout=TINY_LAYOUT, chunk_size=3)
 
     assert not (cache_dir / METADATA_FILE).exists()
-    assert not list(cache_dir.glob(".*.tmp"))
+    assert not any(cache_dir.iterdir())
 
 
 @pytest.mark.parametrize(
@@ -198,52 +186,14 @@ def test_prepare_rejects_invalid_values_without_publishing_cache(
         prepare_corpus(raw_path, cache_dir, layout=TINY_LAYOUT, chunk_size=3)
 
     assert not (cache_dir / METADATA_FILE).exists()
-    assert not list(cache_dir.glob(".*.tmp"))
+    assert not any(cache_dir.iterdir())
 
 
-def test_open_validates_backing_file_sizes(tmp_path):
+def test_open_rejects_a_different_layout(tmp_path):
     _, cache_dir, _, _ = _prepare(tmp_path)
-    with (cache_dir / LABELS_FILE).open("ab") as file:
-        file.write(b"\0")
-
-    with pytest.raises(ValueError, match="labels.dat"):
-        HiggsCorpus.open(cache_dir)
-
-
-def test_open_validates_layout_source_size_and_dtype_metadata(tmp_path):
-    raw_path, cache_dir, _, _ = _prepare(tmp_path)
 
     with pytest.raises(ValueError, match="layout"):
         HiggsCorpus.open(cache_dir, layout=HiggsLayout(12, 7, 10))
-    with pytest.raises(ValueError, match="source size"):
-        HiggsCorpus.open(cache_dir, source_size=raw_path.stat().st_size + 1)
-
-    metadata_path = cache_dir / METADATA_FILE
-    metadata = json.loads(metadata_path.read_text())
-    metadata["feature_dtype"] = "float64"
-    metadata_path.write_text(json.dumps(metadata))
-    with pytest.raises(ValueError, match="float32"):
-        HiggsCorpus.open(cache_dir)
-
-
-def test_interrupted_conversion_closes_and_removes_temporary_files(
-    tmp_path, monkeypatch
-):
-    raw_path = tmp_path / "HIGGS.csv"
-    cache_dir = tmp_path / "cache"
-    _write_csv(raw_path, _tiny_data())
-
-    def interrupt(*args, **kwargs):
-        raise RuntimeError("interrupted")
-
-    monkeypatch.setattr(higgs, "_combine_moments", interrupt)
-    with pytest.raises(RuntimeError, match="interrupted"):
-        prepare_corpus(raw_path, cache_dir, layout=TINY_LAYOUT, chunk_size=3)
-
-    assert not (cache_dir / METADATA_FILE).exists()
-    assert not (cache_dir / FEATURES_FILE).exists()
-    assert not (cache_dir / LABELS_FILE).exists()
-    assert not list(cache_dir.glob(".*.tmp"))
 
 
 def test_task_emits_sorted_training_batches_without_mutating_order(tmp_path):
@@ -315,14 +265,6 @@ def test_task_uses_exact_sequential_holdout_boundaries(tmp_path):
         val_labels, values[TINY_LAYOUT.train_stop : TINY_LAYOUT.val_stop, 0]
     )
     np.testing.assert_array_equal(test_labels, values[TINY_LAYOUT.val_stop :, 0])
-
-
-def test_task_rejects_negative_training_size(tmp_path):
-    _, _, corpus, _ = _prepare(tmp_path)
-    task = HiggsTask(corpus, data_seed=0, batch_size=3)
-
-    with pytest.raises(ValueError, match="nonnegative"):
-        list(task.train_batches(-1))
 
 
 def test_task_drops_open_memmaps_when_pickled(tmp_path):

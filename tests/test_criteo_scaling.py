@@ -25,7 +25,6 @@ from paper.experiments.criteo_scaling import (
     RAW_COLUMNS,
     Profile,
     SeedGrid,
-    _best_lrs,
     build_arg_parser,
     default_raw_path,
     run_profile,
@@ -255,37 +254,6 @@ def test_preprocessing_reports_progress(tmp_path, monkeypatch):
     np.testing.assert_allclose(hybrid.positive_scale[0], scale if scale > 0 else 1.0)
 
 
-def test_legacy_preprocessor_cache_is_migrated_to_zstd(tmp_path):
-    raw_path = tmp_path / "train.txt"
-    cache_dir = tmp_path / "cache"
-    _write_tiny_criteo(raw_path)
-    corpus = prepare_corpus(raw_path, cache_dir)
-    path = fit_preprocessors(
-        corpus,
-        ("bucket",),
-        sample_size=8,
-        sample_seed=7,
-        min_count=2,
-    )["bucket"]
-    with zstd.open(path, "rb") as file:
-        pickle_bytes = file.read()
-    legacy = path.with_suffix("")
-    legacy.write_bytes(pickle_bytes)
-    path.unlink()
-
-    migrated = fit_preprocessors(
-        corpus,
-        ("bucket",),
-        sample_size=8,
-        sample_seed=7,
-        min_count=2,
-    )["bucket"]
-
-    assert migrated == path
-    assert path.read_bytes().startswith(b"\x28\xb5\x2f\xfd")
-    assert isinstance(load_preprocessor(path), BucketPreprocessor)
-
-
 def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
@@ -372,19 +340,6 @@ def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path
 
             repeated = prepare_encoded_data(corpus, path, chunk_size=3)
             assert repeated.train == data.train
-            assert (data.train / "complete").exists()
-            assert data.train.with_name(f".{data.train.name}.lock").exists()
-            assert not list(data.train.parent.glob(f".{data.train.name}-*"))
-
-            (data.train / "labels.npy").write_bytes(b"corrupt")
-            recovered = prepare_encoded_data(corpus, path, chunk_size=3)
-            np.testing.assert_array_equal(
-                load_encoded(recovered.train)[2],
-                corpus.labels()[: corpus.train_stop],
-            )
-            (recovered.train / "complete").unlink()
-            recovered = prepare_encoded_data(corpus, path, chunk_size=3)
-            assert (recovered.train / "complete").exists()
 
 
 def test_profile_evaluates_only_its_requested_train_sizes(tmp_path):
@@ -470,8 +425,6 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     _write_tiny_criteo(raw_path)
-    legacy = cache_dir / "encoded-v3" / "legacy"
-    legacy.mkdir(parents=True)
 
     raw = run_profile(
         _tiny_profile(),
@@ -482,7 +435,6 @@ def test_variant_run_uses_only_its_preprocessor(tmp_path):
 
     assert set(raw["model"]) == {"linear-continuous"}
     assert len(list(cache_dir.glob("preprocessor-v*_*.pkl.zstd"))) == 1
-    assert legacy.exists()
     assert len(list((cache_dir / "encoded-v4").iterdir())) == 1
 
 
@@ -497,13 +449,6 @@ def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw)
 def test_validate_raw_rejects_identity_and_incomplete_grids(complete_raw):
     with pytest.raises(ValueError, match="schema"):
         validate_raw(complete_raw.drop(columns="test_brier"), _tiny_profile())
-
-    noninteger_pool = complete_raw.copy()
-    noninteger_pool["train_pool_size"] = noninteger_pool["train_pool_size"].astype(
-        float
-    )
-    with pytest.raises(ValueError, match="positive integer train_pool_size"):
-        validate_raw(noninteger_pool, _tiny_profile())
 
     duplicate = pd.concat((complete_raw, complete_raw.iloc[[0]]), ignore_index=True)
     with pytest.raises(ValueError, match="duplicate"):
@@ -535,35 +480,6 @@ def test_validate_raw_checks_metrics_and_checkpoint_selected_lrs(complete_raw):
     wrong_lr.loc[mask, "lr"] = alternate_lr
     with pytest.raises(ValueError, match="selected LR"):
         validate_raw(wrong_lr, _tiny_profile())
-
-
-def test_best_lrs_filters_nonfinite_and_requires_one_per_checkpoint(complete_raw):
-    tuning = complete_raw.loc[complete_raw["phase"] == "tuning"].copy()
-    row = tuning.iloc[0]
-    curve = (
-        (tuning["model"] == row["model"])
-        & (tuning["dim"] == row["dim"])
-        & (tuning["train_size"] == row["train_size"])
-    )
-    lr = tuning.loc[curve, "lr"].iloc[0]
-    tuning.loc[curve & (tuning["lr"] == lr), "val_logloss"] = np.inf
-
-    with pytest.warns(RuntimeWarning, match="nonfinite"):
-        best = _best_lrs(tuning)
-    selected = best.loc[
-        (best["model"] == row["model"])
-        & (best["dim"] == row["dim"])
-        & (best["train_size"] == row["train_size"]),
-        "selected_lr",
-    ]
-    assert selected.item() != lr
-
-    tuning.loc[curve, "val_logloss"] = np.nan
-    with (
-        pytest.warns(RuntimeWarning, match="nonfinite"),
-        pytest.raises(ValueError, match="no finite validation"),
-    ):
-        _best_lrs(tuning)
 
 
 def test_parallel_profile_matches_serial_results(tmp_path):

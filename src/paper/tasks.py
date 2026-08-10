@@ -54,8 +54,7 @@ def _make_task(
         while True:
             x_np = batch_rng.uniform(lower, upper, size=(batch_size, input_dim))
             y_np = np.asarray(target(x_np), dtype=float)
-            if noise_std > 0:
-                y_np = y_np + batch_rng.normal(0.0, noise_std, size=y_np.shape)
+            y_np = y_np + batch_rng.normal(0.0, noise_std, size=y_np.shape)
             yield _to_x_tensor(x_np), _to_y_tensor(y_np)
 
     return Task(
