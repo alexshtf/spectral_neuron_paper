@@ -6,7 +6,7 @@ from itertools import product
 from typing import TextIO
 
 import pandas as pd
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from paper.experiments import run_many
 from paper.tuning import best_lrs

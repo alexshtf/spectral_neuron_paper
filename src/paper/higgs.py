@@ -9,7 +9,7 @@ from typing import Any, TextIO
 import numpy as np
 import pandas as pd
 import torch
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from paper.compression import open_dataset_file
 from paper.shuffling import ShuffledEpochs

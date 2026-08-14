@@ -65,20 +65,8 @@ HIGGS_MODEL_DASHES = {
     "MLP-3": (4, 2, 1, 2),
 }
 
-HIGGS_DEVIATION_COLUMNS = {
-    "dim",
-    "data_seed",
-    "init_seed",
-    "noise_level",
-    "feature_index",
-    "feature_name",
-    "magnitude_bin_index",
-    "magnitude_left",
-    "magnitude_right",
-    "total_count",
-    "zero_bound_count",
-}
 HIGGS_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
+_MONOTONE_MODEL_PAIR = ("unconstrained", "monotone")
 
 type FigureContainer = Figure | SubFigure
 
@@ -179,14 +167,12 @@ def _plot_curve(
     ax.fill_between(x, q25, q75, **fill_kwargs)
 
 
-def _use_pairwise_scaling(
-    summary: pd.DataFrame, model_pair: tuple[str, str]
-) -> bool:
+def _use_pairwise_scaling(summary: pd.DataFrame) -> bool:
     if "target_kind" not in summary or "model" not in summary:
         return False
     target_kinds = set(summary["target_kind"].dropna().unique())
     models = set(summary["model"].dropna().unique())
-    return target_kinds == {"monotone"} and set(model_pair).issubset(models)
+    return target_kinds == {"monotone"} and set(_MONOTONE_MODEL_PAIR) <= models
 
 
 def _add_shared_legend(fig, axes, *, borderaxespad: float = 0.5) -> None:
@@ -232,7 +218,9 @@ def _check_single_target_kind(summary: pd.DataFrame) -> None:
 def _noise_stds(summary: pd.DataFrame) -> list[float]:
     if "noise_std" not in summary:
         return []
-    return sorted(summary["noise_std"].dropna().unique().tolist())
+    if summary["noise_std"].isna().any():
+        raise ValueError("noise_std must not contain missing values")
+    return sorted(summary["noise_std"].unique().tolist())
 
 
 def _noise_title(noise_std: float) -> str:
@@ -241,11 +229,9 @@ def _noise_title(noise_std: float) -> str:
     return f"Noisy training (σ = {noise_std:g})"
 
 
-def _scaling_figure_size(
-    summary: pd.DataFrame, *, pair_by_dim: bool
-) -> tuple[float, float]:
+def _scaling_figure_size(summary: pd.DataFrame) -> tuple[float, float]:
     complexities = summary["complexity"].nunique()
-    if pair_by_dim:
+    if _use_pairwise_scaling(summary):
         return 4.0 * summary["dim"].nunique(), 3.0 * complexities
 
     n_cols = int(math.ceil(math.sqrt(complexities)))
@@ -293,7 +279,12 @@ def _plot_scaling_grid(
         if (sub["median_test_rmse"] > 0).all():
             ax.set_yscale("log")
         ax.grid(True, alpha=0.25)
-        ax.legend(fontsize="small")
+
+    _add_shared_legend(
+        fig,
+        axes,
+        borderaxespad=2 if isinstance(fig, SubFigure) else 0.5,
+    )
 
     return fig
 
@@ -301,10 +292,9 @@ def _plot_scaling_grid(
 def _plot_pairwise_scaling(
     summary: pd.DataFrame,
     *,
-    model_pair: tuple[str, str],
     container: FigureContainer | None = None,
 ) -> FigureContainer:
-    paired = summary.loc[summary["model"].isin(model_pair)].copy()
+    paired = summary.loc[summary["model"].isin(_MONOTONE_MODEL_PAIR)].copy()
     complexities = sorted(paired["complexity"].unique())
     dims = sorted(paired["dim"].unique())
     fig, axs = _subplot_matrix(
@@ -325,10 +315,15 @@ def _plot_pairwise_scaling(
                 ax.set_visible(False)
                 continue
 
-            for model in model_pair:
+            for model in _MONOTONE_MODEL_PAIR:
                 group = sub.loc[sub["model"] == model]
                 if not group.empty:
-                    _plot_curve(ax, group, label=model)
+                    _plot_curve(
+                        ax,
+                        group,
+                        label=model,
+                        linestyle=MODEL_LINESTYLES[model],
+                    )
 
             ax.set_title(f"complexity={complexity}, dim={dim}")
             ax.set_xlabel(SYNTHETIC_TRAIN_SIZE_LABEL)
@@ -347,32 +342,23 @@ def _plot_pairwise_scaling(
     return fig
 
 
-def _plot_noise_subfigures(
-    summary: pd.DataFrame,
-    *,
-    pair_by_dim: bool,
-    model_pair: tuple[str, str],
-) -> Figure:
+def _plot_noise_subfigures(summary: pd.DataFrame) -> Figure:
     noise_stds = _noise_stds(summary)
-    width, height = _scaling_figure_size(summary, pair_by_dim=pair_by_dim)
+    pairwise = _use_pairwise_scaling(summary)
+    width, height = _scaling_figure_size(summary)
     fig = plt.figure(
-        figsize=(width * len(noise_stds), height),
+        figsize=(width, height * len(noise_stds)),
         layout="constrained",
     )
     fig.get_layout_engine().set(h_pad=0.12)
-    subfigures = fig.subfigures(1, len(noise_stds), squeeze=False).ravel()
-
-    # 5. Add a vertical line in the exact middle of the main figure canvas
-    line = Line2D([0.5, 0.5], [0.02, 0.98], transform=fig.transFigure, color='gray', linestyle='--', linewidth=3)
-    fig.add_artist(line)
+    subfigures = fig.subfigures(len(noise_stds), 1, squeeze=False).ravel()
 
     for noise_std, subfigure in zip(noise_stds, subfigures):
         noise_summary = summary.loc[summary["noise_std"] == noise_std]
         subfigure.suptitle(_noise_title(noise_std), y=1, fontsize="x-large")
-        if pair_by_dim:
+        if pairwise:
             _plot_pairwise_scaling(
                 noise_summary,
-                model_pair=model_pair,
                 container=subfigure,
             )
         else:
@@ -381,24 +367,13 @@ def _plot_noise_subfigures(
     return fig
 
 
-def plot_scaling(
-    summary: pd.DataFrame,
-    *,
-    pair_by_dim: bool | None = None,
-    model_pair: tuple[str, str] = ("unconstrained", "monotone"),
-):
+def plot_scaling(summary: pd.DataFrame):
     _check_scaling_columns(summary)
     _check_single_target_kind(summary)
-    if pair_by_dim is None:
-        pair_by_dim = _use_pairwise_scaling(summary, model_pair)
     if len(_noise_stds(summary)) > 1:
-        return _plot_noise_subfigures(
-            summary,
-            pair_by_dim=pair_by_dim,
-            model_pair=model_pair,
-        )
-    if pair_by_dim:
-        return _plot_pairwise_scaling(summary, model_pair=model_pair)
+        return _plot_noise_subfigures(summary)
+    if _use_pairwise_scaling(summary):
+        return _plot_pairwise_scaling(summary)
     return _plot_scaling_grid(summary)
 
 
@@ -669,8 +644,6 @@ def plot_criteo_spectral_dimensions(
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
     """Compare all dimensions of one spectral preprocessing variant."""
-    if variant not in ("spectral-bucketed", "spectral-continuous"):
-        raise ValueError(f"unknown spectral variant {variant!r}")
     spectral = results.loc[results["model"] == variant]
     dimensions = _spectral_dimensions(spectral)
     palette, markers = _dimension_styles(dimensions)
@@ -726,7 +699,7 @@ def _higgs_ratio_count_columns(results: pd.DataFrame) -> list[str]:
         f"ratio_bin_{bin_index:03d}_count"
         for bin_index in range(len(columns))
     ]
-    if columns != expected:
+    if not columns or columns != expected:
         raise ValueError("ratio count columns must be contiguous and ordered")
     return columns
 
@@ -736,28 +709,13 @@ def _mean_higgs_deviation_shells(
     *,
     shell_count: int,
 ) -> tuple[float, list[str], pd.DataFrame]:
-    missing = HIGGS_DEVIATION_COLUMNS.difference(results.columns)
-    if missing:
-        raise ValueError(f"results are missing columns: {sorted(missing)}")
     ratio_columns = _higgs_ratio_count_columns(results)
-    required = list(HIGGS_DEVIATION_COLUMNS) + ratio_columns
-    if (
-        results.empty
-        or not ratio_columns
-        or results[required].isna().any().any()
-    ):
-        raise ValueError("HIGGS deviation histograms must be complete")
-
     noise_levels = results["noise_level"].unique()
     if len(noise_levels) != 1:
         raise ValueError(
             "plot_higgs_deviation_shell_grid expects one noise_level; "
             f"got {sorted(map(float, noise_levels))}"
         )
-    if isinstance(shell_count, (bool, np.bool_)) or not isinstance(
-        shell_count, (int, np.integer)
-    ):
-        raise TypeError("shell_count must be an integer")
     magnitude_bins = sorted(map(int, results["magnitude_bin_index"].unique()))
     if magnitude_bins != list(range(len(magnitude_bins))):
         raise ValueError("magnitude bins must be contiguous and zero-based")
@@ -784,8 +742,6 @@ def _mean_higgs_deviation_shells(
         .sum()
     )
     defined_count = sums["total_count"] - sums["zero_bound_count"]
-    if (defined_count < 0).any():
-        raise ValueError("zero-bound counts exceed total counts")
     probabilities = sums[ratio_columns].div(
         defined_count.where(defined_count > 0), axis=0
     )
@@ -810,8 +766,6 @@ def plot_higgs_deviation_shell_grid(
     noise_level, ratio_columns, averaged = _mean_higgs_deviation_shells(
         results, shell_count=shell_count
     )
-    if feature_row_height_mm <= 0:
-        raise ValueError("feature_row_height_mm must be positive")
 
     cell_peaks = (
         averaged.groupby(["feature_index", "shell_index"], sort=False)[
@@ -820,8 +774,6 @@ def plot_higgs_deviation_shell_grid(
         .max()
         .max(axis="columns")
     )
-    if not np.isfinite(cell_peaks).all() or (cell_peaks <= 0).any():
-        raise ValueError("some grid cells contain no ratios in [0, 1]")
 
     dimensions = sorted(map(int, averaged["dim"].unique()))
     colors, _ = _dimension_styles(dimensions)
@@ -971,54 +923,11 @@ def _check_higgs_results(results: pd.DataFrame, metric: str) -> tuple[str, list[
     missing = capacity_columns.difference(results.columns)
     if missing:
         raise ValueError(f"results are missing columns: {sorted(missing)}")
-    if results[list(capacity_columns)].isna().any().any():
-        raise ValueError("HIGGS plotting columns must not contain missing values")
-
-    models = set(results["model"])
-    unknown = models.difference(HIGGS_MODEL_LABELS)
-    if unknown:
-        raise ValueError(f"unknown HIGGS models: {sorted(unknown)}")
-    if "linear" not in models:
-        raise ValueError("results contain no linear model")
-
     dimensions = sorted(
         map(int, results.loc[results["model"] == "spectral", "dim"].unique())
     )
     if not dimensions:
         raise ValueError("results contain no spectral models")
-
-    nonlinear_models = set(HIGGS_MODEL_LABELS).difference({"linear"})
-    expected = {(model, dim) for model in nonlinear_models for dim in dimensions}
-    actual = set(
-        results.loc[results["model"] != "linear", ["model", "dim"]]
-        .drop_duplicates()
-        .itertuples(index=False, name=None)
-    )
-    missing_models = expected.difference(actual)
-    extra_models = actual.difference(expected)
-    if missing_models or extra_models:
-        raise ValueError(
-            "nonlinear model/dimension grid is incomplete: "
-            f"missing={sorted(missing_models)}, extra={sorted(extra_models)}"
-        )
-
-    linear = results.loc[results["model"] == "linear"]
-    spectral = results.loc[results["model"] == "spectral"]
-    mlps = results.loc[results["model"].str.startswith("mlp-")]
-    if set(linear["dim"]) != {0} or set(linear["width"]) != {0}:
-        raise ValueError("linear rows must use dim=0 and width=0")
-    if set(spectral["width"]) != {0}:
-        raise ValueError("spectral rows must use width=0")
-    if (mlps["width"] <= 0).any():
-        raise ValueError("MLP widths must be positive")
-    if (results["num_parameters"] <= 0).any():
-        raise ValueError("num_parameters must be positive")
-
-    capacity_counts = results.groupby(["model", "dim"])[
-        ["width", "num_parameters"]
-    ].nunique()
-    if (capacity_counts > 1).any().any():
-        raise ValueError("each model/dimension must have one recorded capacity")
     return value, dimensions
 
 

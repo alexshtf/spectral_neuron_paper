@@ -1,5 +1,5 @@
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import numpy as np
 import pandas as pd
@@ -28,28 +28,34 @@ SELECTION_COLUMNS = [
 ]
 
 
-def _lowest_validation_rows(
-    df: pd.DataFrame, group_cols: list[str]
-) -> pd.DataFrame:
-    ordered = df.sort_values(
-        group_cols + ["val_rmse", "step"], kind="mergesort"
-    )
-    return ordered.groupby(group_cols, as_index=False, sort=False).head(1)
+def _best_checkpoints_by_budget(
+    raw: pd.DataFrame, train_sizes: Sequence[int]
+) -> Iterator[pd.DataFrame]:
+    groups = raw.groupby(RUN_COLUMNS, sort=True, dropna=False).ngroup().to_numpy()
+    actual_train_sizes = raw["train_size"].to_numpy()
+    val_rmse = raw["val_rmse"].to_numpy()
+    steps = raw["step"].to_numpy()
+
+    for train_size in train_sizes:
+        eligible = np.flatnonzero(actual_train_sizes <= train_size)
+        if not eligible.size:
+            continue
+
+        order = np.lexsort(
+            (steps[eligible], val_rmse[eligible], groups[eligible])
+        )
+        ranked = eligible[order]
+        ranked_groups = groups[ranked]
+        first_in_run = np.r_[True, ranked_groups[1:] != ranked_groups[:-1]]
+        selected = raw.iloc[ranked[first_in_run]].copy()
+        selected["train_size"] = train_size
+        yield selected
 
 
 def best_checkpoints(
     raw: pd.DataFrame, train_sizes: list[int] | tuple[int, ...]
 ) -> pd.DataFrame:
-    selected = []
-
-    for train_size in train_sizes:
-        eligible = raw.loc[raw["train_size"] <= train_size].copy()
-        if eligible.empty:
-            continue
-        eligible["train_size"] = train_size
-        selected.append(
-            _lowest_validation_rows(eligible, RUN_COLUMNS + ["train_size"])
-        )
+    selected = list(_best_checkpoints_by_budget(raw, train_sizes))
 
     if not selected:
         return raw.head(0)
@@ -158,6 +164,12 @@ def _common_train_sizes(raw: pd.DataFrame) -> tuple[int, ...]:
 
 
 def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    return summarize_selected(
-        select_lr(best_checkpoints(raw, _common_train_sizes(raw)))
+    summaries = (
+        summarize_selected(select_lr(best))
+        for best in _best_checkpoints_by_budget(raw, _common_train_sizes(raw))
+    )
+    return (
+        pd.concat(summaries, ignore_index=True)
+        .sort_values(SELECTION_COLUMNS + ["selected_lr"], kind="mergesort")
+        .reset_index(drop=True)
     )

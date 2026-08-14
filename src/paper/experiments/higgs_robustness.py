@@ -580,7 +580,7 @@ def default_result_path(
 ) -> Path:
     return DEFAULT_RUNS_DIR / (
         f"higgs_robustness_{profile_name}_noise_{_float_label(_noise_level(noise_level))}"
-        "_repeated_shuffle.csv.gz"
+        "_repeated_shuffle.csv.zst"
     )
 
 

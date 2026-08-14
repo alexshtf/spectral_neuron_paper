@@ -45,6 +45,28 @@ def test_checkpoint_selection_uses_validation_not_test():
     assert selected["step"].tolist() == [1]
 
 
+def test_checkpoint_selection_is_per_run_and_keeps_the_earliest_tie():
+    raw = pd.DataFrame(
+        [
+            _row(
+                step=step,
+                train_size=4 * step,
+                target_seed=seed,
+                val_rmse=score,
+                test_rmse=0.0,
+            )
+            for seed, scores in enumerate(((0.5, 0.5), (0.6, 0.4)))
+            for step, score in enumerate(scores, start=1)
+        ]
+    ).sample(frac=1, random_state=0)
+
+    selected = best_checkpoints(raw, [4, 8]).sort_values(
+        ["train_size", "target_seed"]
+    )
+
+    assert selected["step"].tolist() == [1, 1, 1, 2]
+
+
 def test_lr_selection_uses_validation_not_test():
     best = pd.DataFrame(
         [
@@ -122,6 +144,31 @@ def test_summary_uses_the_checkpoint_grid_in_the_raw_results():
     summary = summarize_raw(raw)
 
     assert summary["train_size"].tolist() == [4, 8]
+
+
+def test_summary_orders_each_curve_by_training_budget():
+    raw = pd.DataFrame(
+        [
+            _row(
+                step=step,
+                train_size=4 * step,
+                val_rmse=1 / step,
+                test_rmse=1 / step,
+            )
+            | {"model": model}
+            for model in ("unconstrained", "monotone")
+            for step in (1, 2)
+        ]
+    ).sample(frac=1, random_state=0)
+
+    summary = summarize_raw(raw)
+
+    assert list(zip(summary["model"], summary["train_size"])) == [
+        ("monotone", 4),
+        ("monotone", 8),
+        ("unconstrained", 4),
+        ("unconstrained", 8),
+    ]
 
 
 def test_summary_rejects_inconsistent_checkpoint_grids():

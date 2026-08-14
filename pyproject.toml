@@ -1,20 +1,29 @@
 [project]
 name = "spectral-neuron-paper"
 version = "0.1.0"
-description = "Add your description here"
+description = "Research code for spectral neurons: scalar models defined by selected eigenvalues of affine symmetric matrix pencils."
 readme = "README.md"
 requires-python = ">=3.14"
+license = "BSD-3-Clause"
 dependencies = [
     "fitstream>=0.3.1,<0.4.0",
-    "jupyterlab>=4.6.0,<5.0.0",
     "matplotlib>=3.11.0,<4.0.0",
     "numpy>=2.4.6,<3.0.0",
-    "pandas>=3.0.4",
-    "pytest>=9.1.1",
+    "pandas>=3.0.5,<4.0.0",
     "scipy>=1.18.0,<2.0.0",
     "seaborn>=0.13.2",
     "torch>=2.12.0,<3.0.0",
     "tqdm>=4.67.1,<5.0.0",
+    "zstandard>=0.25.0,<0.26.0",
+]
+
+[project.urls]
+Repository = "https://github.com/alexshtf/spectral_neuron_paper"
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.6.0,<5.0.0",
+    "pytest>=9.1.1",
 ]
 
 [[tool.uv.index]]

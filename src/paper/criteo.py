@@ -15,7 +15,7 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 import torch
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from paper.compression import ZSTD_LEVEL, open_dataset_file
 from paper.shuffling import ShuffledEpochs

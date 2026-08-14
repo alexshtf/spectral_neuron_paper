@@ -1,194 +1,213 @@
-# spectral_neuron_paper
+# Spectral neuron experiments
 
-Research code for the spectral neuron paper.
+This repository contains the experiments for spectral neurons: scalar models of
+the form
 
-## Real-data scaling protocol
-
-The HIGGS and Criteo runners use the `repeated_shuffle` protocol.
-Within one trajectory, `data_seed` initializes a deterministic stream of successive
-fresh permutations of the fixed training pool. The permutations are concatenated and
-batched as one stream rather than batched separately; a minibatch may therefore cross a
-pass boundary. The first permutation preserves the earlier seeded one-pass order, while
-later permutations are fresh and deterministic. The profile's explicit `train_sizes`
-are the only evaluation checkpoints, and their maximum is the final training budget.
-The runner automatically creates as many permutations as that budget requires; dataset
-pass boundaries do not add checkpoints or change the endpoint. Nonterminal checkpoint
-requests must lie on global minibatch boundaries; the final checkpoint may end with a
-partial minibatch. Result rows report the explicit `train_size` counts together with the
-fixed `train_pool_size`. Thus the x-axis is examples seen by the optimizer, not the
-number of distinct available rows.
-
-At every resolved `train_size`, each model-capacity configuration selects the learning
-rate with the best median validation log loss across tuning seeds. Evaluation then
-starts fresh trajectories and reports test metrics only at the checkpoints assigned to
-their selected rate. Checkpoints that
-select the same rate share one evaluation trajectory; when the selected rate changes,
-the plotted curve stitches checkpoints from different trajectories. The result is a
-validation-selected performance envelope over exact examples-seen budgets, not one
-coherent optimization path or independently fitted dataset-size scaling.
-
-When running model-family shards, point every command at the same explicit
-repeated-shuffle output. Use `--write-mode overwrite` for the first shard and
-`--write-mode append` only for later shards. Append mode checks that a nonempty CSV's
-header exactly matches the new result columns. Repeated-shuffle rows include
-`train_pool_size`, so do not append them to legacy one-pass results. Existing locally
-generated repeated-shuffle files with injected pass-boundary checkpoints use the old
-contract and must be overwritten before analysis. The committed unsuffixed CSVs under
-`notebooks/runs/` are retained as historical provenance and are unsuitable for claims
-that rely on the aligned protocol.
-
-## HIGGS scaling experiment
-
-The HIGGS experiment consumes the headerless 11-million-row CSV, either directly or
-Zstandard-compressed with a `.zstd` suffix. Compressed input is decompressed as the CSV
-stream is read; no expanded source file is written. It preserves the published
-convention of reserving the final 500,000 rows for test. This repo defines its own
-validation slice as the preceding 500,000 rows and uses the first 10 million for
-training; the published convention does not define that validation boundary. This is a
-row-order split, not a chronological split.
-
-The first run converts the CSV into float32 feature and uint8 label memory maps and
-stores training-only means and standard deviations. The fixed standardizer is then
-applied to every model and checkpoint. All 28 inputs remain numeric, including the
-four ternary b-tag fields; there is no binning, one-hot encoding, or imputation. By
-default this roughly 1.25 GB base cache lives in `.HIGGS.csv.cache-v1` beside the input.
-Use `--cache-dir` to place it elsewhere. Existing base caches remain valid; repeated
-shuffling adds versioned order caches separately.
-
-The shared per-checkpoint validation-selection contract applies. The full profile
-evaluates its explicit power-of-two grid through `2**26` and stops there. Because that
-budget exceeds the 10-million-row training pool, the stream continues through
-successive deterministic shuffles.
-
-The comparison contains linear and spectral models plus one-, two-, and three-hidden-
-layer ReLU MLP families. Hidden layers within an MLP have constant width. Widths are
-computed from the requested spectral parameter budget and recorded with the actual
-trainable parameter count in every result row.
-
-```bash
-uv run python -m paper.experiments.higgs_scaling \
-  --data ~/datasets/HIGGS.csv \
-  --profile sanity \
-  --workers 2
+```text
+x ↦ λₖ(A₀ + x₁A₁ + ⋯ + xₙAₙ),
 ```
 
-The full profile is intentionally substantial. Run it in model-family shards and
-append them to one explicitly named result file, for example:
+where the learned matrices are symmetric and `λₖ` selects one ordered
+eigenvalue. The experiments study whether these models are straightforward to
+train and improve with scale while retaining useful spectral structure, such as
+shape control and explicit feature-sensitivity bounds. They are not intended as
+state-of-the-art benchmark submissions.
+
+## Setup
+
+The project requires Python 3.14 and uses [uv](https://docs.astral.sh/uv/) for a
+locked environment. From the repository root:
 
 ```bash
-uv run python -m paper.experiments.higgs_scaling \
-  --data ~/datasets/HIGGS.csv \
-  --profile full \
-  --variant linear \
-  --out notebooks/runs/higgs_scaling_full_repeated_shuffle.csv \
-  --write-mode overwrite
-uv run python -m paper.experiments.higgs_scaling \
-  --data ~/datasets/HIGGS.csv \
-  --profile full \
-  --variant mlp-1 \
-  --out notebooks/runs/higgs_scaling_full_repeated_shuffle.csv \
-  --write-mode append
+uv sync --locked
+uv run pytest
 ```
 
-Append `mlp-2`, `mlp-3`, and `spectral` in the same way. The
-`notebooks/higgs_scaling.ipynb` companion validates the merged raw schema and run
-completeness, derives its capacity table from recorded widths and parameter counts,
-performs validation selection, and plots median test log loss or Brier score with
-interquartile bands. The experiment deliberately focuses on log loss and Brier rather
-than leaderboard-oriented AUC reporting.
-
-### HIGGS feature-sensitivity bounds
-
-The robustness runner loads a completed scaling profile, takes each spectral
-dimension's validation-selected learning rate at the final checkpoint, and retrains
-the profile's evaluation seeds to that budget using the same corpus and shuffle
-caches. For the CLI-selected maximum magnitude `ε`, it draws one deterministic signed
-perturbation `δ ~ Uniform(-ε, ε)` per standardized test row and feature, then compares
-the logit change with the corresponding spectral-norm bound using the realized `|δ|`.
+Launch the notebooks from the repository root so their relative result paths
+resolve correctly:
 
 ```bash
+uv run jupyter lab
+```
+
+## Repository layout
+
+- `src/paper/models.py` implements the spectral and comparison models.
+- `src/paper/targets.py`, `tasks.py`, `training.py`, and `tuning.py` contain the
+  reusable synthetic-data and training components.
+- `src/paper/experiments/` contains the executable experiment modules.
+- `notebooks/` loads saved results, summarizes them, and produces the figures.
+- `notebooks/runs/` contains the retained paper results and their
+  [provenance manifest](notebooks/runs/README.md).
+- `plots/` and `visuals/` contain manuscript-ready figure exports.
+- `tests/` protects the model mathematics and experiment-selection contracts.
+
+## Synthetic experiments
+
+The univariate and bivariate experiments compare unconstrained and
+shape-constrained spectral models on randomly generated target functions. The
+test inputs are fixed grids and the test targets are noiseless.
+
+Quick checks:
+
+```bash
+mkdir -p local-runs
+uv run python -m paper.experiments.univariate --profile sanity \
+  --out local-runs/univariate_sanity.csv.zst
+uv run python -m paper.experiments.bivariate --profile sanity \
+  --out local-runs/bivariate_sanity.csv.zst
+```
+
+Paper profiles:
+
+```bash
+uv run python -m paper.experiments.univariate --profile full \
+  --out local-runs/univariate_full.csv.zst
+uv run python -m paper.experiments.bivariate --profile full \
+  --out local-runs/bivariate_full.csv.zst
+```
+
+Pandas reads these Zstandard-compressed `.csv.zst` files directly. Explicit
+local output paths keep reruns separate from the frozen paper results.
+
+## Real-data experiments
+
+Set the two source paths before using the commands below:
+
+```bash
+HIGGS=/path/to/higgs.csv.zstd
+CRITEO=/path/to/train.txt.zstd
+```
+
+Both inputs must be headerless and may be either uncompressed or compressed
+with the `.zstd` suffix. The first run streams each source into memory-mapped
+arrays and stores its cache beside the source. Pass `--cache-dir` to put the
+cache elsewhere.
+
+Download [`HIGGS.csv.gz` from UCI](https://archive.ics.uci.edu/dataset/280/higgs),
+then decompress it to `HIGGS.csv` or recompress the CSV stream as `.zstd`.
+Download `kaggle-display-advertising-challenge-dataset.tar.gz` from
+[Criteo's dataset page](https://ailab.criteo.com/ressources/) under its terms,
+extract the headerless TSV `train.txt`, and use it directly or recompress it as
+`.zstd`. The similarly named Criteo 1-TB dataset is different.
+
+HIGGS uses the first 10 million rows for training, the next 500,000 for
+validation, and the final 500,000 for test. All 28 fields remain numeric and
+are standardized using training-only statistics.
+
+Criteo uses the first 80% of rows for training, the next 10% for validation,
+and the final 10% for test. Its 13 numeric and 26 categorical fields are fitted
+on a reproducible sample of the training split. Categorical values receive
+exact field-local IDs; numeric fields use either buckets or a hybrid continuous
+representation.
+
+Quick checks:
+
+```bash
+uv run python -m paper.experiments.higgs_scaling \
+  --data "$HIGGS" --profile sanity \
+  --out local-runs/higgs_scaling_sanity.csv
+
+uv run python -m paper.experiments.criteo_scaling \
+  --data "$CRITEO" --profile sanity \
+  --out local-runs/criteo_scaling_sanity.csv
+```
+
+The full scaling experiments can be run in model-family shards. Start each
+result with `overwrite`, then append the remaining families:
+
+```bash
+HIGGS_RESULTS=local-runs/higgs_scaling_full_repeated_shuffle.csv
+
+uv run python -m paper.experiments.higgs_scaling \
+  --data "$HIGGS" --profile full --variant linear \
+  --out "$HIGGS_RESULTS" --write-mode overwrite
+
+for variant in mlp-1 mlp-2 mlp-3 spectral; do
+  uv run python -m paper.experiments.higgs_scaling \
+    --data "$HIGGS" --profile full --variant "$variant" \
+    --out "$HIGGS_RESULTS" --write-mode append
+done
+```
+
+```bash
+CRITEO_RESULTS=local-runs/criteo_scaling_full_repeated_shuffle.csv
+
+uv run python -m paper.experiments.criteo_scaling \
+  --data "$CRITEO" --profile full --variant linear-bucketed \
+  --out "$CRITEO_RESULTS" --write-mode overwrite
+
+for variant in linear-continuous fm spectral-bucketed spectral-continuous; do
+  uv run python -m paper.experiments.criteo_scaling \
+    --data "$CRITEO" --profile full --variant "$variant" \
+    --out "$CRITEO_RESULTS" --write-mode append
+done
+```
+
+After the full HIGGS scaling run, reproduce the feature-sensitivity experiment:
+
+```bash
+HIGGS_RESULTS=local-runs/higgs_scaling_full_repeated_shuffle.csv
+
 uv run python -m paper.experiments.higgs_robustness \
-  --data ~/datasets/HIGGS.csv \
+  --data "$HIGGS" \
   --profile full \
+  --scaling-results "$HIGGS_RESULTS" \
   --noise-level 0.5 \
-  --workers 4
+  --out local-runs/higgs_robustness_full_noise_0p5_repeated_shuffle.csv.zst
 ```
 
-The compressed result stores a `16 × 100` joint histogram over `|δ| ∈ [0, ε]` and
-deviation ratio in `[0, 1]` for every seed, feature, and dimension, together with
-zero-bound, above-bound, and maximum-ratio diagnostics.
-`notebooks/higgs_robustness.ipynb` validates that file, reports the diagnostics, and
-exports a publication PDF and PNG.
-Its `shell_count` parameter merges adjacent magnitude bins into disjoint ranges; it
-never interprets a shell as a cumulative upper bound. Any divisor of 16 is supported
-(`1`, `2`, `4`, `8`, or `16`). Each feature-by-shell cell plots the raw histogram
-probabilities and chooses its own y-axis limit; dimensions within a cell share that
-limit. `feature_row_height_mm` controls the vertical space per feature and defaults to
-12 mm.
+This measures the observed change in each test logit against its spectral-norm
+feature bound over the complete 500,000-row test split. The default result is a
+compressed `.csv.zst` histogram artifact under `notebooks/runs/`.
 
-## Criteo scaling experiment
+## Scaling protocol
 
-The experiment expects the headerless, tab-separated training file from the Criteo
-Display Advertising Challenge, either directly or Zstandard-compressed with a `.zstd`
-suffix. Compressed input is decompressed as the TSV stream is read; no expanded source
-file is written. The first run builds memory-mapped raw and encoded caches beside the
-data; later trajectories reuse the encoded features directly. Fitted preprocessors are
-stored as `.pkl.zstd` at Zstandard level 3 because they are loaded wholly into memory.
-Memory-mapped data caches remain uncompressed.
-The canonical train encoding for repeated shuffling is the seed- and pass-independent
-`encoded-v4` cache. It stores field-local feature IDs as uint16 values and restores
-their fixed global field offsets in each int32 training batch.
+HIGGS and Criteo use the `repeated_shuffle` protocol. A `data_seed` defines a
+deterministic sequence of fresh permutations of the fixed training pool. These
+permutations form one continuous minibatch stream, so `train_size` means the
+exact number of examples seen by the optimizer rather than the number of
+distinct rows.
 
-Feature preprocessing is fitted once on a reproducible 10% sample of the chronological
-training split. Retained categorical values receive exact field-local IDs; missing
-values and rare or unseen values use separate reserved IDs. Bucket numerics retain
-their winner-style log-squared transformation, then use exact IDs over each field's
-fitted transformed range, with separate missing and out-of-range IDs. Each model then
-consumes the repeated-shuffle stream using Adam, with validation measurements taken at
-every requested examples-seen checkpoint. Dense parameters use Adam and sparse
-embedding tables use SparseAdam.
-The full profile evaluates its explicit power-of-two grid through `2**28` and stops
-there; the stream automatically creates however many training-pool permutations that
-budget requires. Its four evaluation data-order seeds are held out from tuning.
-Evaluation initialization seeds are 3 through 8: seeds 3 through 7 overlap tuning,
-while only seed 8 is new.
-The default run compares five variants: linear, FM, and spectral models with bucketed
-numerics, plus linear and spectral models with hybrid numerical preprocessing. In the
-hybrid representation, missing, zero, and negative values are indicators while positive
-values use standardized `log1p` magnitudes. Bucket features have implicit unit weights,
-so their cached representation stores IDs only.
+At each requested `train_size`, each model and capacity selects the learning
+rate with the lowest median validation loss across tuning seeds. Fresh
+evaluation trajectories then report test metrics only for the selected rate.
+Learning rates, checkpoints, and summaries are therefore selected without test
+data. Reported curves aggregate evaluation seeds with medians and interquartile
+ranges.
 
-With progress enabled, the runner separately reports aggregate trajectory time spent in
-training, validation, and test evaluation. These diagnostics are not written to the
-result table.
+The full profiles are substantial. `--workers` runs independent trajectories
+in parallel, while `--quiet` suppresses progress output. Each module exposes
+all available options through `--help`.
 
-Result rows use one `dim` column for the matched nonlinear capacity: it is the spectral
-matrix dimension, and the corresponding FM rank is `dim * (dim + 1) // 2 - 1` (`0` for
-the dimensionless linear baselines). Other capacity and preprocessing labels are derived
-from `model` and `dim` rather than duplicated in the table.
+## Results and notebooks
+
+The committed result manifest records each retained artifact, profile,
+producing commit, row count, and source dataset identity. Generated local runs
+are not evidence for the paper unless they satisfy the same profile and are
+recorded there. For byte-for-byte reproduction of a frozen artifact, check out
+its listed producing commit; later implementation improvements can change rerun
+values without changing the experiment protocol.
+
+The notebooks are deliberately analysis-only: they read the retained results,
+validate the expected experiment grid, summarize across seeds, and plot. To
+execute and save one from the repository root, run for example:
 
 ```bash
-uv run python -m paper.experiments.criteo_scaling \
-  --data /path/to/train.txt \
-  --profile sanity \
-  --workers 2
+uv run jupyter execute --inplace notebooks/univariate_fitting.ipynb
 ```
 
-Use `--cache-dir` to place the cache elsewhere and `--out` to set the result CSV path.
-For a sharded full run, start with `linear-bucketed`, then append
-`linear-continuous` to the same output:
+The retained notebooks are:
 
-```bash
-uv run python -m paper.experiments.criteo_scaling \
-  --data /path/to/train.txt --profile full --variant linear-bucketed \
-  --out notebooks/runs/criteo_scaling_full_repeated_shuffle.csv \
-  --write-mode overwrite
-uv run python -m paper.experiments.criteo_scaling \
-  --data /path/to/train.txt --profile full --variant linear-continuous \
-  --out notebooks/runs/criteo_scaling_full_repeated_shuffle.csv \
-  --write-mode append
-```
+- `math_props.ipynb` — elementary spectral properties;
+- `univariate_fitting.ipynb` and `bivariate_fitting.ipynb` — synthetic scaling;
+- `higgs_scaling.ipynb` and `criteo_scaling.ipynb` — real-data scaling;
+- `higgs_robustness.ipynb` — feature-sensitivity histograms.
 
-Append `fm`, `spectral-bucketed`, and `spectral-continuous` in the same way. The
-notebook performs validation selection and aggregation directly from this raw result
-table.
+## Citation and license
+
+Formal citation metadata will be added with the public paper record. Until then,
+identify reproduced results by the repository URL and the producing commit in
+the result manifest.
+
+The code is released under the [BSD 3-Clause License](LICENSE).

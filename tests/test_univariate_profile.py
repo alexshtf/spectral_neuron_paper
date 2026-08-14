@@ -11,6 +11,8 @@ from paper.experiments.synthetic import (
     RunGrid,
     _make_seeded_model,
     build_arg_parser,
+    default_raw_path,
+    validate_raw,
 )
 from paper.experiments.univariate import run_profile
 from paper.models import ModelSpec
@@ -40,6 +42,7 @@ def test_tiny_profile_produces_raw_logs_and_summary():
     profile = tiny_profile()
 
     raw = run_profile(profile, val_size=16, test_size=16)
+    validate_raw(raw, profile)
     summary = summarize_raw(raw)
 
     assert not raw.empty
@@ -60,6 +63,14 @@ def test_tiny_profile_produces_raw_logs_and_summary():
         "q75_test_rmse",
         "n",
     }.issubset(summary.columns)
+
+
+def test_synthetic_validation_rejects_an_incomplete_profile():
+    profile = tiny_profile()
+    raw = run_profile(profile, val_size=8, test_size=8)
+
+    with pytest.raises(ValueError, match="checkpoint grids"):
+        validate_raw(raw.iloc[:-1], profile)
 
 
 def test_run_grid_declares_the_scientific_fit_pairs():
@@ -83,6 +94,16 @@ def test_write_mode_appends_or_replaces_results(tmp_path):
 
     write_csv(pd.DataFrame({"value": [3]}), path)
     assert pd.read_csv(path)["value"].tolist() == [3]
+
+
+def test_zstandard_result_path_round_trips_through_pandas(tmp_path):
+    path = tmp_path / "results.csv.zst"
+    expected = pd.DataFrame({"value": [1, 2, 3]})
+
+    write_csv(expected, path)
+
+    pd.testing.assert_frame_equal(pd.read_csv(path), expected)
+    assert default_raw_path("univariate", "full").name == "univariate_full.csv.zst"
 
 
 def test_append_rejects_an_incompatible_csv_schema(tmp_path):

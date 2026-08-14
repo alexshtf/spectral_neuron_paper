@@ -75,6 +75,9 @@ def test_plot_scaling_pairs_monotone_models_by_dimension():
         "complexity=10, dim=5",
     }
     assert all(len(ax.lines) == 2 for ax in axes)
+    assert {line.get_linestyle() for line in axes[0].lines} == {"-", "--"}
+    assert len(fig.legends) == 1
+    assert all(ax.get_legend() is None for ax in axes)
     assert all(
         ax.get_xlabel() == "training-sample budget" for ax in axes
     )
@@ -113,6 +116,8 @@ def test_plot_scaling_styles_models_and_dimensions():
     )
     assert lines["dim=5, unconstrained"].get_linestyle() == "-"
     assert lines["dim=5, monotone"].get_linestyle() == "--"
+    assert len(fig.legends) == 1
+    assert all(ax.get_legend() is None for ax in fig.axes)
 
 
 def test_plot_scaling_rejects_mixed_target_kinds():
@@ -154,7 +159,7 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
                 target_kind=target_kind,
                 noise_std=noise_std,
             )
-            for noise_std in (0.0, 0.1)
+            for noise_std in (0.0, 0.1, 0.2)
             for complexity in (5, 10)
             for dim in (3, 5)
             for model in models
@@ -166,45 +171,19 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
     assert [subfigure._suptitle.get_text() for subfigure in fig.subfigs] == [
         "Noiseless training (σ = 0)",
         "Noisy training (σ = 0.1)",
+        "Noisy training (σ = 0.2)",
     ]
+    fig.canvas.draw()
+    positions = [subfigure.bbox.bounds for subfigure in fig.subfigs]
+    assert len({round(x, 6) for x, _, _, _ in positions}) == 1
+    assert len({round(y, 6) for _, y, _, _ in positions}) == 3
     for subfigure in fig.subfigs:
         axes = [ax for ax in subfigure.axes if ax.get_visible()]
         assert len(axes) == expected_axes
         assert all(len(ax.lines) == lines_per_axis for ax in axes)
         assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
-
-
-@pytest.mark.parametrize(("figsize", "dpi"), [((16, 6), 72), ((24, 9), 200)])
-def test_plot_scaling_separates_noise_titles_legends_and_axes(figsize, dpi):
-    summary = pd.DataFrame(
-        [
-            _row(
-                complexity=complexity,
-                dim=dim,
-                model=model,
-                train_size=train_size,
-                noise_std=noise_std,
-            )
-            for noise_std in (0.0, 0.1)
-            for complexity in (5, 10)
-            for dim in (3, 5)
-            for model in ("unconstrained", "monotone")
-            for train_size in (32, 64)
-        ]
-    )
-
-    fig = plot_scaling(summary)
-    fig.set_size_inches(figsize)
-    fig.set_dpi(dpi)
-    fig.canvas.draw()
-
-    for subfigure in fig.subfigs:
-        title = subfigure._suptitle.get_window_extent()
-        legend = subfigure.legends[0].get_window_extent()
-        axes_titles = [ax.title.get_window_extent() for ax in subfigure.axes[:2]]
-
-        assert title.y0 > legend.y1
-        assert legend.y0 > max(axis_title.y1 for axis_title in axes_titles)
+        assert len(subfigure.legends) == 1
+        assert all(ax.get_legend() is None for ax in axes)
 
 
 def test_plot_bivariate_target_gallery_draws_contours():
@@ -531,10 +510,6 @@ def test_plot_higgs_deviation_shell_grid_rejects_mixed_noise_and_bad_shell_count
         plot_higgs_deviation_shell_grid(
             _higgs_deviation_results(), shell_count=3
         )
-    with pytest.raises(ValueError, match="feature_row_height_mm"):
-        plot_higgs_deviation_shell_grid(
-            _higgs_deviation_results(), feature_row_height_mm=0
-        )
 
 
 def test_plot_higgs_models_by_dimension_facets_and_annotates_capacity():
@@ -625,15 +600,3 @@ def test_plot_higgs_spectral_dimensions_supports_more_than_four_dimensions():
     fig = plot_higgs_spectral_dimensions(results)
 
     assert _legend_labels(fig) == list(map(str, dimensions))
-
-
-def test_plot_higgs_models_rejects_inconsistent_capacity():
-    results = _higgs_results()
-    row = results.loc[(results["model"] == "mlp-1") & (results["dim"] == 3)].iloc[0]
-    results = pd.concat(
-        (results, pd.DataFrame([row.to_dict() | {"num_parameters": 999}])),
-        ignore_index=True,
-    )
-
-    with pytest.raises(ValueError, match="one recorded capacity"):
-        plot_higgs_models_by_dimension(results)

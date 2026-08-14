@@ -3,8 +3,7 @@
 from collections.abc import Callable, Iterable, Sized
 from typing import TextIO
 
-from tqdm.auto import tqdm
-from tqdm.contrib.concurrent import process_map
+from tqdm import tqdm
 
 
 def run_many[T, R](
@@ -30,6 +29,8 @@ def run_many[T, R](
     }
     if workers == 1:
         return [function(item) for item in tqdm(items, **progress_options)]
+
+    from tqdm.contrib.concurrent import process_map
 
     return process_map(
         function,

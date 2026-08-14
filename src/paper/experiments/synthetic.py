@@ -6,6 +6,7 @@ from itertools import product
 from pathlib import Path
 from typing import TextIO
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -15,6 +16,7 @@ from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
 from paper.tasks import Task
 from paper.training import run_one_stream
+from paper.tuning import same_lrs
 
 type TargetFactory = Callable[[TargetSpec], ArrayTarget]
 type TaskFactory = Callable[..., Task]
@@ -42,6 +44,18 @@ FITS: tuple[tuple[TargetKind, ModelKind], ...] = (
     ("monotone", "unconstrained"),
     ("monotone", "monotone"),
 )
+
+RUN_ID_COLUMNS = [
+    "target_kind",
+    "complexity",
+    "target_seed",
+    "noise_std",
+    "model",
+    "dim",
+    "lr",
+    "init_seed",
+    "batch_size",
+]
 
 
 @dataclass(frozen=True)
@@ -222,6 +236,50 @@ def run_profile(
     return pd.concat(dfs, ignore_index=True)
 
 
+def validate_raw(raw: pd.DataFrame, profile: Profile) -> None:
+    """Validate that raw results are a complete run of a synthetic profile."""
+    if raw.columns.tolist() != RAW_COLUMNS:
+        raise ValueError("synthetic result columns do not match the raw schema")
+
+    base_columns = [column for column in RUN_ID_COLUMNS if column != "lr"]
+    expected_configs = {
+        (
+            config.target_spec.kind,
+            config.target_spec.complexity,
+            config.target_spec.seed,
+            config.noise_std,
+            config.model_spec.kind,
+            config.model_spec.dim,
+            config.init_seed,
+            profile.batch_size,
+        )
+        for config in RunGrid(profile)
+    }
+    actual_configs = set(
+        raw[base_columns].drop_duplicates().itertuples(index=False, name=None)
+    )
+    if actual_configs != expected_configs:
+        raise ValueError("synthetic run grid does not match the profile")
+    lr_grids = raw.groupby(base_columns, sort=False, dropna=False)["lr"].agg(
+        lambda values: same_lrs(values, profile.lrs)
+    )
+    if not lr_grids.all():
+        raise ValueError("synthetic learning-rate grids do not match the profile")
+
+    keys = RUN_ID_COLUMNS + ["train_size"]
+    if raw.duplicated(keys).any():
+        raise ValueError("synthetic results contain duplicate checkpoints")
+    checkpoints = raw.groupby(RUN_ID_COLUMNS, sort=False, dropna=False)[
+        "train_size"
+    ].agg(lambda values: tuple(sorted(values)))
+    if not checkpoints.isin([profile.train_sizes]).all():
+        raise ValueError("synthetic checkpoint grids do not match the profile")
+    if not (raw["train_size"] == raw["step"] * raw["batch_size"]).all():
+        raise ValueError("synthetic train sizes do not match their steps")
+    if not np.isfinite(raw[["val_rmse", "test_rmse"]]).all().all():
+        raise ValueError("synthetic metrics must be finite")
+
+
 def build_arg_parser(profiles: Mapping[str, Profile]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
@@ -233,7 +291,7 @@ def build_arg_parser(profiles: Mapping[str, Profile]) -> argparse.ArgumentParser
 
 
 def default_raw_path(experiment_name: str, profile_name: str) -> Path:
-    return DEFAULT_RUNS_DIR / f"{experiment_name}_{profile_name}.csv"
+    return DEFAULT_RUNS_DIR / f"{experiment_name}_{profile_name}.csv.zst"
 
 
 def run_cli(

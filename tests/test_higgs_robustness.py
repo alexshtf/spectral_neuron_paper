@@ -419,6 +419,6 @@ def test_cli_and_default_path_include_the_noise_level():
 
     assert args.noise_level == 0.25
     assert default_result_path("full", 0.25).name == (
-        "higgs_robustness_full_noise_0p25_repeated_shuffle.csv.gz"
+        "higgs_robustness_full_noise_0p25_repeated_shuffle.csv.zst"
     )
     assert default_cache_dir(Path("HIGGS.csv")).name == ".HIGGS.csv.cache-v1"
