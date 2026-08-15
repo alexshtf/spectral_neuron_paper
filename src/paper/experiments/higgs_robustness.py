@@ -131,8 +131,10 @@ def selected_configs(
             evaluation_seeds=profile.evaluation_seeds,
             model_columns=("model", "dim"),
             model_specs={
-                ("spectral", dim): HiggsModelSpec("spectral", dim)
-                for dim in profile.dims
+                ("spectral", capacity_dim): HiggsModelSpec(
+                    "spectral", capacity_dim
+                )
+                for capacity_dim in profile.capacity_dims
             },
         )
     )
@@ -369,7 +371,7 @@ def run_config(
         train_pool_size=settings.corpus.train_stop,
         train_size=train_size,
         model=config.model_spec.variant,
-        dim=config.model_spec.dim,
+        dim=config.model_spec.result_dim,
         lr=config.lr,
         data_seed=config.data_seed,
         init_seed=config.init_seed,
@@ -502,7 +504,7 @@ def validate_results(
     expected_histograms = {
         (dim, data_seed, init_seed, feature_index, magnitude_bin_index)
         for dim, (data_seed, init_seed), feature_index, magnitude_bin_index in product(
-            profile.dims,
+            profile.capacity_dims,
             profile.evaluation_seeds,
             range(NUM_FEATURES),
             range(magnitude_bins),

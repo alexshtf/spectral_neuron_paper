@@ -41,12 +41,33 @@ def _write_tiny_higgs(path: Path, rows: int) -> None:
 def _tiny_profile() -> Profile:
     return Profile(
         train_sizes=(8, 16),
-        dims=(3,),
+        capacity_dims=(3,),
         lrs=(1e-2, 1e-1),
         tuning_seeds=SeedGrid(),
         evaluation_seeds=SeedGrid(data_seeds=range(1, 2), init_seeds=range(1, 2)),
         batch_size=8,
     )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        HiggsModelSpec("linear"),
+        HiggsModelSpec("spectral", 3),
+        HiggsModelSpec("mlp-1", 3),
+    ],
+)
+def test_model_spec_separates_capacity_from_persisted_dimension(spec):
+    assert spec.result_dim == (spec.capacity_dim or 0)
+
+
+@pytest.mark.parametrize(
+    "variant, capacity_dim",
+    [("linear", 3), ("spectral", None), ("mlp-1", 0)],
+)
+def test_model_spec_rejects_incoherent_capacity(variant, capacity_dim):
+    with pytest.raises(ValueError, match="capacity_dim"):
+        HiggsModelSpec(variant, capacity_dim)
 
 
 @pytest.fixture(scope="module")

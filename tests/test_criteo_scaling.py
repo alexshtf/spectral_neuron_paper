@@ -23,6 +23,7 @@ from paper.criteo import (
 )
 from paper.experiments.criteo_scaling import (
     RAW_COLUMNS,
+    CriteoModelSpec,
     Profile,
     SeedGrid,
     build_arg_parser,
@@ -63,13 +64,34 @@ def _compress_zstd(path: Path) -> Path:
 def _tiny_profile() -> Profile:
     return Profile(
         train_sizes=(16, 32),
-        dims=(3,),
+        capacity_dims=(3,),
         lrs=(1e-3, 1e-2),
         tuning_seeds=SeedGrid(),
         evaluation_seeds=SeedGrid(),
         batch_size=16,
         min_count=2,
     )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        CriteoModelSpec("linear-bucketed"),
+        CriteoModelSpec("fm", 3),
+        CriteoModelSpec("spectral-continuous", 3),
+    ],
+)
+def test_model_spec_separates_capacity_from_persisted_dimension(spec):
+    assert spec.result_dim == (spec.capacity_dim or 0)
+
+
+@pytest.mark.parametrize(
+    "variant, capacity_dim",
+    [("linear-continuous", 3), ("fm", None), ("spectral-bucketed", 0)],
+)
+def test_model_spec_rejects_incoherent_capacity(variant, capacity_dim):
+    with pytest.raises(ValueError, match="capacity_dim"):
+        CriteoModelSpec(variant, capacity_dim)
 
 
 @pytest.fixture(scope="module")
@@ -348,7 +370,7 @@ def test_profile_evaluates_only_its_requested_train_sizes(tmp_path):
     _write_tiny_criteo(raw_path)
     profile = Profile(
         train_sizes=(16, 161),
-        dims=(3,),
+        capacity_dims=(3,),
         lrs=(1e-3,),
         tuning_seeds=SeedGrid(),
         evaluation_seeds=SeedGrid(),

@@ -101,7 +101,7 @@ CURVE_COLUMNS = MODEL_COLUMNS + ["train_size"]
 @dataclass(frozen=True)
 class Profile:
     train_sizes: tuple[int, ...]
-    dims: tuple[int, ...]
+    capacity_dims: tuple[int, ...]
     lrs: tuple[float, ...]
     tuning_seeds: SeedGrid
     evaluation_seeds: SeedGrid
@@ -114,7 +114,7 @@ class Profile:
 PROFILES: dict[str, Profile] = {
     "sanity": Profile(
         train_sizes=(2**10,),
-        dims=(3,),
+        capacity_dims=(3,),
         lrs=(1e-2,),
         tuning_seeds=SeedGrid(),
         evaluation_seeds=SeedGrid(),
@@ -123,7 +123,7 @@ PROFILES: dict[str, Profile] = {
     ),
     "small": Profile(
         train_sizes=(2**14, 2**18, 2**22),
-        dims=(3, 5),
+        capacity_dims=(3, 5),
         lrs=(1e-3, 1e-2, 1e-1),
         tuning_seeds=SeedGrid(init_seeds=range(2)),
         evaluation_seeds=SeedGrid(init_seeds=range(2)),
@@ -131,7 +131,7 @@ PROFILES: dict[str, Profile] = {
     ),
     "full": Profile(
         train_sizes=tuple(2**power for power in range(12, 29, 2)),
-        dims=(3, 7, 11),
+        capacity_dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-3, 1e-1, 8).tolist()),
         tuning_seeds=SeedGrid(init_seeds=range(8)),
         evaluation_seeds=SeedGrid(
@@ -146,7 +146,19 @@ PROFILES: dict[str, Profile] = {
 @dataclass(frozen=True)
 class CriteoModelSpec:
     variant: Variant
-    dim: int = 0
+    capacity_dim: int | None = None
+
+    def __post_init__(self) -> None:
+        linear = self.variant in ("linear-bucketed", "linear-continuous")
+        if linear != (self.capacity_dim is None):
+            raise ValueError("only linear models omit capacity_dim")
+        if self.capacity_dim is not None and self.capacity_dim <= 0:
+            raise ValueError("capacity_dim must be positive")
+
+    @property
+    def result_dim(self) -> int:
+        """Return the dimension used by the persisted result schema."""
+        return 0 if self.capacity_dim is None else self.capacity_dim
 
     @property
     def preprocessing(self) -> PreprocessingKind:
@@ -163,8 +175,8 @@ def _model_specs(
         CriteoModelSpec("linear-continuous"),
     ]
     specs.extend(
-        CriteoModelSpec(variant, dim)
-        for dim in profile.dims
+        CriteoModelSpec(variant, capacity_dim)
+        for capacity_dim in profile.capacity_dims
         for variant in ("fm", "spectral-bucketed", "spectral-continuous")
     )
     return tuple(spec for spec in specs if spec.variant in variants)
@@ -187,10 +199,16 @@ def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
         case "linear-bucketed" | "linear-continuous":
             return SparseLinear(num_features, NUM_FIELDS)
         case "fm":
-            rank = spec.dim * (spec.dim + 1) // 2 - 1
+            assert spec.capacity_dim is not None
+            rank = spec.capacity_dim * (spec.capacity_dim + 1) // 2 - 1
             return FactorizationMachine(num_features, NUM_FIELDS, rank)
         case "spectral-bucketed" | "spectral-continuous":
-            return SparseMiddleEigval(num_features, NUM_FIELDS, spec.dim)
+            assert spec.capacity_dim is not None
+            return SparseMiddleEigval(
+                num_features,
+                NUM_FIELDS,
+                spec.capacity_dim,
+            )
         case _:
             raise ValueError(spec.variant)
 
@@ -232,7 +250,7 @@ def _metadata(
         "train_pool_size": settings.train_pool_size,
         "data_seed": config.data_seed,
         "model": config.model_spec.variant,
-        "dim": config.model_spec.dim,
+        "dim": config.model_spec.result_dim,
         "lr": config.lr,
         "init_seed": config.init_seed,
     }
@@ -305,7 +323,7 @@ def _select_evaluation_runs(
         validation_metric="val_logloss",
         evaluation_seeds=evaluation_seeds,
         model_columns=("model", "dim"),
-        model_specs={(spec.variant, spec.dim): spec for spec in model_specs},
+        model_specs={(spec.variant, spec.result_dim): spec for spec in model_specs},
     )
 
 
@@ -446,7 +464,7 @@ def validate_raw(
 
     variants = (variant,) if variant is not None else VARIANTS
     specs = _model_specs(profile, variants)
-    expected_specs = {(spec.variant, spec.dim) for spec in specs}
+    expected_specs = {(spec.variant, spec.result_dim) for spec in specs}
     observed_specs = set(
         raw[["model", "dim"]].drop_duplicates().itertuples(index=False, name=None)
     )
@@ -468,7 +486,7 @@ def validate_raw(
         train_pool_size,
     )
     expected_curves = {
-        (*experiment, spec.variant, spec.dim, train_size)
+        (*experiment, spec.variant, spec.result_dim, train_size)
         for spec in specs
         for train_size in train_sizes
     }

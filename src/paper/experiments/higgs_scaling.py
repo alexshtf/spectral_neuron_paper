@@ -133,7 +133,7 @@ def matched_mlp_width(
 @dataclass(frozen=True)
 class Profile:
     train_sizes: tuple[int, ...]
-    dims: tuple[int, ...]
+    capacity_dims: tuple[int, ...]
     lrs: tuple[float, ...]
     tuning_seeds: SeedGrid
     evaluation_seeds: SeedGrid
@@ -143,7 +143,7 @@ class Profile:
 PROFILES: dict[str, Profile] = {
     "sanity": Profile(
         train_sizes=(2**10,),
-        dims=(3,),
+        capacity_dims=(3,),
         lrs=(1e-2,),
         tuning_seeds=SeedGrid(),
         evaluation_seeds=SeedGrid(data_seeds=range(1, 2), init_seeds=range(1, 2)),
@@ -151,7 +151,7 @@ PROFILES: dict[str, Profile] = {
     ),
     "small": Profile(
         train_sizes=(2**14, 2**18, 2**22),
-        dims=(3, 7),
+        capacity_dims=(3, 7),
         lrs=(1e-3, 1e-2, 1e-1),
         tuning_seeds=SeedGrid(init_seeds=range(2)),
         evaluation_seeds=SeedGrid(
@@ -172,7 +172,7 @@ PROFILES: dict[str, Profile] = {
             2**25,
             2**26,
         ),
-        dims=(3, 7, 11),
+        capacity_dims=(3, 7, 11),
         lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
         tuning_seeds=SeedGrid(init_seeds=range(8)),
         evaluation_seeds=SeedGrid(
@@ -187,7 +187,18 @@ PROFILES: dict[str, Profile] = {
 @dataclass(frozen=True)
 class HiggsModelSpec:
     variant: Variant
-    dim: int = 0
+    capacity_dim: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.variant == "linear") != (self.capacity_dim is None):
+            raise ValueError("only linear models omit capacity_dim")
+        if self.capacity_dim is not None and self.capacity_dim <= 0:
+            raise ValueError("capacity_dim must be positive")
+
+    @property
+    def result_dim(self) -> int:
+        """Return the dimension used by the persisted result schema."""
+        return 0 if self.capacity_dim is None else self.capacity_dim
 
     @property
     def depth(self) -> int | None:
@@ -196,7 +207,8 @@ class HiggsModelSpec:
     def width(self, input_dim: int) -> int:
         if self.depth is None:
             return 0
-        target = spectral_parameter_count(input_dim, self.dim)
+        assert self.capacity_dim is not None
+        target = spectral_parameter_count(input_dim, self.capacity_dim)
         return matched_mlp_width(input_dim, self.depth, target)
 
 
@@ -213,8 +225,8 @@ def _model_specs(
 ) -> tuple[HiggsModelSpec, ...]:
     specs = [HiggsModelSpec("linear")]
     specs.extend(
-        HiggsModelSpec(variant, dim)
-        for dim in profile.dims
+        HiggsModelSpec(variant, capacity_dim)
+        for capacity_dim in profile.capacity_dims
         for variant in VARIANTS
         if variant != "linear"
     )
@@ -241,7 +253,12 @@ def make_model(spec: HiggsModelSpec, input_dim: int = NUM_FEATURES) -> nn.Module
             nn.Flatten(start_dim=-2, end_dim=-1),
         )
     if spec.variant == "spectral":
-        return KthEigval(input_dim, spec.dim, eig_idx=spec.dim // 2)
+        assert spec.capacity_dim is not None
+        return KthEigval(
+            input_dim,
+            spec.capacity_dim,
+            eig_idx=spec.capacity_dim // 2,
+        )
     depth = MLP_DEPTHS[spec.variant]
     return _make_mlp(input_dim, spec.width(input_dim), depth)
 
@@ -276,7 +293,7 @@ def _metadata(
         "optimizer": OPTIMIZER,
         "data_seed": config.data_seed,
         "model": config.model_spec.variant,
-        "dim": config.model_spec.dim,
+        "dim": config.model_spec.result_dim,
         "width": config.model_spec.width(NUM_FEATURES),
         "num_parameters": trainable_parameter_count(model),
         "lr": config.lr,
@@ -356,7 +373,7 @@ def _select_evaluation_runs(
         validation_metric="val_logloss",
         evaluation_seeds=evaluation_seeds,
         model_columns=("model", "dim"),
-        model_specs={(spec.variant, spec.dim): spec for spec in model_specs},
+        model_specs={(spec.variant, spec.result_dim): spec for spec in model_specs},
     )
 
 
@@ -442,7 +459,8 @@ def _expected_capacity(spec: HiggsModelSpec) -> tuple[int, int]:
     if spec.variant == "linear":
         return width, NUM_FEATURES + 1
     if spec.variant == "spectral":
-        return width, spectral_parameter_count(NUM_FEATURES, spec.dim)
+        assert spec.capacity_dim is not None
+        return width, spectral_parameter_count(NUM_FEATURES, spec.capacity_dim)
     depth = MLP_DEPTHS[spec.variant]
     return width, mlp_parameter_count(NUM_FEATURES, width, depth)
 
@@ -474,7 +492,7 @@ def validate_raw(
 
     variants = (variant,) if variant is not None else VARIANTS
     specs = _model_specs(profile, variants)
-    expected_specs = {(spec.variant, spec.dim) for spec in specs}
+    expected_specs = {(spec.variant, spec.result_dim) for spec in specs}
     observed_specs = set(
         raw[["model", "dim"]].drop_duplicates().itertuples(index=False, name=None)
     )
@@ -486,13 +504,14 @@ def validate_raw(
 
     for spec in specs:
         rows = raw.loc[
-            (raw["model"] == spec.variant) & (raw["dim"] == spec.dim),
+            (raw["model"] == spec.variant) & (raw["dim"] == spec.result_dim),
             ["width", "num_parameters"],
         ].drop_duplicates()
         expected = _expected_capacity(spec)
         if len(rows) != 1 or tuple(rows.iloc[0]) != expected:
             raise ValueError(
-                f"inconsistent capacity metadata for {(spec.variant, spec.dim)}; "
+                "inconsistent capacity metadata for "
+                f"{(spec.variant, spec.result_dim)}; "
                 f"expected width={expected[0]}, parameters={expected[1]}"
             )
 
@@ -504,7 +523,13 @@ def validate_raw(
     )
     experiment = (PROTOCOL, OPTIMIZER, train_pool_size)
     expected_curves = {
-        (*experiment, spec.variant, spec.dim, *_expected_capacity(spec), train_size)
+        (
+            *experiment,
+            spec.variant,
+            spec.result_dim,
+            *_expected_capacity(spec),
+            train_size,
+        )
         for spec in specs
         for train_size in train_sizes
     }

@@ -37,7 +37,7 @@ TINY_LAYOUT = HiggsLayout(rows=16, train_stop=8, val_stop=12)
 def _profile() -> Profile:
     return Profile(
         train_sizes=(4, 8),
-        dims=(1, 2),
+        capacity_dims=(1, 2),
         lrs=(1e-2, 1e-1),
         tuning_seeds=SeedGrid(init_seeds=range(2)),
         evaluation_seeds=SeedGrid(
@@ -56,7 +56,7 @@ def _scaling_results(profile: Profile) -> pd.DataFrame:
     }
     rows = []
     for dim, train_size, lr, (data_seed, init_seed) in product(
-        profile.dims,
+        profile.capacity_dims,
         profile.train_sizes,
         profile.lrs,
         profile.tuning_seeds,
@@ -82,7 +82,7 @@ def _scaling_results(profile: Profile) -> pd.DataFrame:
             }
         )
     for dim, train_size, (data_seed, init_seed) in product(
-        profile.dims,
+        profile.capacity_dims,
         profile.train_sizes,
         profile.evaluation_seeds,
     ):
@@ -120,9 +120,11 @@ def test_selected_configs_use_final_validation_lrs_and_evaluation_seed_grid():
     profile = _profile()
     configs = selected_configs(_scaling_results(profile), profile)
 
-    assert len(configs) == len(profile.dims) * len(profile.evaluation_seeds)
+    assert len(configs) == len(profile.capacity_dims) * len(
+        profile.evaluation_seeds
+    )
     assert {
-        (config.model_spec.dim, config.lr) for config in configs
+        (config.model_spec.capacity_dim, config.lr) for config in configs
     } == {(1, 1e-1), (2, 1e-2)}
     assert {
         (config.data_seed, config.init_seed) for config in configs
@@ -328,7 +330,9 @@ def test_tiny_profile_runs_end_to_end_and_validates(tiny_run):
     )
     assert list(results.columns) == result_columns(5)
     assert RESULT_COLUMNS == result_columns()
-    assert len(results) == len(profile.dims) * len(profile.evaluation_seeds) * 28 * 4
+    assert len(results) == (
+        len(profile.capacity_dims) * len(profile.evaluation_seeds) * 28 * 4
+    )
     totals = results.groupby(
         ["dim", "data_seed", "init_seed", "feature_index"]
     )["total_count"].sum()
@@ -363,7 +367,7 @@ def test_result_validation_rejects_a_truncated_model_run(tiny_run):
     profile, results = tiny_run
     truncated = results.copy()
     run = (
-        (truncated["dim"] == profile.dims[0])
+        (truncated["dim"] == profile.capacity_dims[0])
         & (truncated["data_seed"] == profile.evaluation_seeds.data_seeds[0])
         & (truncated["init_seed"] == profile.evaluation_seeds.init_seeds[0])
     )
