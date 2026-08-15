@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from paper.experiments import run_many
 from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
+from paper.experiments.runner import run_many
 from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
 from paper.tasks import SyntheticTask

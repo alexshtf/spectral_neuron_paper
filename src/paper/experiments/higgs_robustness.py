@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-from paper.experiments import run_many
 from paper.experiments.higgs_scaling import (
     CURVE_COLUMNS,
     EXPERIMENT_COLUMNS,
@@ -25,6 +24,7 @@ from paper.experiments.higgs_scaling import (
     validate_raw,
 )
 from paper.experiments.results import DEFAULT_RUNS_DIR, write_csv
+from paper.experiments.runner import run_many
 from paper.experiments.scaling import PROTOCOL, RunConfig, selected_runs
 from paper.higgs import (
     FEATURE_NAMES,

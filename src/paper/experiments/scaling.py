@@ -8,7 +8,7 @@ from typing import TextIO
 import pandas as pd
 from tqdm import tqdm
 
-from paper.experiments import run_many
+from paper.experiments.runner import run_many
 from paper.tuning import best_lrs
 
 
