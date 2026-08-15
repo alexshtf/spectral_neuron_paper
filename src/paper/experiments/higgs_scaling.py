@@ -34,7 +34,6 @@ from paper.higgs import (
 from paper.models import KthEigval
 from paper.shuffling import resolve_train_sizes
 from paper.training import BINARY_OBJECTIVE
-from paper.tuning import same_learning_rates, select_learning_rates
 
 
 type Variant = Literal["linear", "mlp-1", "mlp-2", "mlp-3", "spectral"]
@@ -375,116 +374,36 @@ def validate_raw(
     """Validate that raw results are a complete run of a HIGGS profile."""
     if variant is not None and variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    if tuple(raw.columns) != RESULT_SCHEMA.raw_columns:
-        raise ValueError("incompatible HIGGS result schema")
-    if raw[list(RESULT_SCHEMA.identity_columns)].isna().any().any():
-        raise ValueError("HIGGS run identity columns must not contain missing values")
-    if set(raw["protocol"]) != {PROTOCOL}:
-        raise ValueError(f"expected protocol={PROTOCOL!r}")
-    if set(raw["optimizer"]) != {OPTIMIZER}:
-        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
-    train_pool_sizes = raw["train_pool_size"].unique()
-    if len(train_pool_sizes) != 1:
-        raise ValueError("results must contain one train_pool_size")
-    train_pool_size = int(train_pool_sizes[0])
-    if set(raw["phase"]) != {"tuning", "evaluation"}:
-        raise ValueError("results must contain tuning and evaluation phases")
-    if raw.duplicated(list(RESULT_SCHEMA.identity_columns)).any():
-        raise ValueError("results contain duplicate trajectory checkpoints")
-
     variants = (variant,) if variant is not None else VARIANTS
     specs = _model_specs(profile, variants)
-    expected_specs = {(spec.variant, spec.result_dim) for spec in specs}
-    observed_specs = set(
-        raw[["model", "dim"]].drop_duplicates().itertuples(index=False, name=None)
-    )
-    if observed_specs != expected_specs:
-        raise ValueError(
-            f"model/capacity grid mismatch: expected {sorted(expected_specs)}, "
-            f"got {sorted(observed_specs)}"
-        )
-
+    expected_models = []
     for spec in specs:
-        rows = raw.loc[
-            (raw["model"] == spec.variant) & (raw["dim"] == spec.result_dim),
-            ["width", "num_parameters"],
-        ].drop_duplicates()
-        expected = _expected_capacity(spec)
-        if len(rows) != 1 or tuple(rows.iloc[0]) != expected:
-            raise ValueError(
-                "inconsistent capacity metadata for "
-                f"{(spec.variant, spec.result_dim)}; "
-                f"expected width={expected[0]}, parameters={expected[1]}"
-            )
+        width, num_parameters = _expected_capacity(spec)
+        expected_models.append(
+            {
+                "model": spec.variant,
+                "dim": spec.result_dim,
+                "width": width,
+                "num_parameters": num_parameters,
+            }
+        )
 
-    tuning = raw.loc[raw["phase"] == "tuning"]
-    evaluation = raw.loc[raw["phase"] == "evaluation"]
-    train_sizes = resolve_train_sizes(
-        profile.train_sizes,
-        batch_size=profile.batch_size,
+    experiment = scaling.validate_results(
+        raw,
+        schema=RESULT_SCHEMA,
+        expected_model_rows=expected_models,
+        train_sizes=resolve_train_sizes(
+            profile.train_sizes,
+            batch_size=profile.batch_size,
+        ),
+        learning_rates=profile.lrs,
+        tuning_seeds=profile.tuning_seeds,
+        evaluation_seeds=profile.evaluation_seeds,
     )
-    experiment = (PROTOCOL, OPTIMIZER, train_pool_size)
-    expected_curves = {
-        (
-            *experiment,
-            spec.variant,
-            spec.result_dim,
-            *_expected_capacity(spec),
-            train_size,
-        )
-        for spec in specs
-        for train_size in train_sizes
-    }
-    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
-        observed_curves = set(
-            rows[list(RESULT_SCHEMA.curve_columns)]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
-        )
-        if observed_curves != expected_curves:
-            raise ValueError(f"{phase} has an incomplete model/checkpoint grid")
-
-    if tuning[list(RESULT_SCHEMA.test_metrics)].notna().any().any():
-        raise ValueError("tuning rows must not contain test metrics")
-    if evaluation[RESULT_SCHEMA.validation_metric].notna().any():
-        raise ValueError("evaluation rows must not contain validation metrics")
-    if not np.isfinite(
-        evaluation[list(RESULT_SCHEMA.test_metrics)].to_numpy(dtype=float)
-    ).all():
-        raise ValueError("evaluation test metrics must be finite")
-
-    if not same_learning_rates(tuning["lr"], profile.lrs):
-        raise ValueError("tuning learning-rate grid does not match the profile")
-    tuning_seeds = set(profile.tuning_seeds)
-    for curve, rows in tuning.groupby(list(RESULT_SCHEMA.curve_columns)):
-        if not same_learning_rates(rows["lr"], profile.lrs):
-            raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
-        for lr, lr_rows in rows.groupby("lr"):
-            seeds = set(
-                lr_rows[["data_seed", "init_seed"]].itertuples(
-                    index=False, name=None
-                )
-            )
-            if seeds != tuning_seeds:
-                raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
-
-    selected_lrs = select_learning_rates(
-        tuning,
-        curve_columns=RESULT_SCHEMA.curve_columns,
-        validation_metric=RESULT_SCHEMA.validation_metric,
-    ).set_index(list(RESULT_SCHEMA.curve_columns))["selected_lr"]
-    evaluation_seeds = set(profile.evaluation_seeds)
-    for curve, rows in evaluation.groupby(list(RESULT_SCHEMA.curve_columns)):
-        seeds = set(
-            rows[["data_seed", "init_seed"]].itertuples(index=False, name=None)
-        )
-        if seeds != evaluation_seeds:
-            raise ValueError(f"incomplete evaluation seeds for {curve}")
-        lrs = rows["lr"].unique()
-        if len(lrs) != 1 or not np.isclose(
-            lrs[0], selected_lrs.loc[curve], rtol=1e-12, atol=0
-        ):
-            raise ValueError(f"evaluation does not use the selected LR for {curve}")
+    if experiment["protocol"] != PROTOCOL:
+        raise ValueError(f"expected protocol={PROTOCOL!r}")
+    if experiment["optimizer"] != OPTIMIZER:
+        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
 
 
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:

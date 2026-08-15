@@ -33,7 +33,6 @@ from paper.experiments.scaling import (
 from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
 from paper.shuffling import ShuffledEpochs, resolve_train_sizes
 from paper.training import BINARY_OBJECTIVE
-from paper.tuning import same_learning_rates, select_learning_rates
 
 
 type Variant = Literal[
@@ -339,110 +338,32 @@ def validate_raw(
     """Validate that raw results are a complete Criteo profile run."""
     if variant is not None and variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    if tuple(raw.columns) != RESULT_SCHEMA.raw_columns:
-        raise ValueError("incompatible Criteo result schema")
-    if raw[list(RESULT_SCHEMA.identity_columns)].isna().any().any():
-        raise ValueError("Criteo run identity columns must not contain missing values")
-    if set(raw["protocol"]) != {PROTOCOL}:
-        raise ValueError(f"expected protocol={PROTOCOL!r}")
-    if set(raw["optimizer"]) != {OPTIMIZER}:
-        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
-
-    train_pool_sizes = raw["train_pool_size"].unique()
-    if len(train_pool_sizes) != 1:
-        raise ValueError("results must contain one train_pool_size")
-    train_pool_size = int(train_pool_sizes[0])
-    sample_size = max(1, round(profile.preprocessor_fraction * train_pool_size))
-    if set(raw["preprocessor_sample_size"]) != {sample_size}:
-        raise ValueError("preprocessor sample size does not match the profile")
-    if set(raw["preprocessor_seed"]) != {profile.preprocessor_seed}:
-        raise ValueError("preprocessor seed does not match the profile")
-    if set(raw["phase"]) != {"tuning", "evaluation"}:
-        raise ValueError("results must contain tuning and evaluation phases")
-    if raw.duplicated(list(RESULT_SCHEMA.identity_columns)).any():
-        raise ValueError("results contain duplicate trajectory checkpoints")
-
     variants = (variant,) if variant is not None else VARIANTS
     specs = _model_specs(profile, variants)
-    expected_specs = {(spec.variant, spec.result_dim) for spec in specs}
-    observed_specs = set(
-        raw[["model", "dim"]].drop_duplicates().itertuples(index=False, name=None)
+    experiment = scaling.validate_results(
+        raw,
+        schema=RESULT_SCHEMA,
+        expected_model_rows=[
+            {"model": spec.variant, "dim": spec.result_dim} for spec in specs
+        ],
+        train_sizes=resolve_train_sizes(
+            profile.train_sizes,
+            batch_size=profile.batch_size,
+        ),
+        learning_rates=profile.lrs,
+        tuning_seeds=profile.tuning_seeds,
+        evaluation_seeds=profile.evaluation_seeds,
     )
-    if observed_specs != expected_specs:
-        raise ValueError(
-            f"model/dimension grid mismatch: expected {sorted(expected_specs)}, "
-            f"got {sorted(observed_specs)}"
-        )
-
-    train_sizes = resolve_train_sizes(
-        profile.train_sizes,
-        batch_size=profile.batch_size,
-    )
-    experiment = (
-        PROTOCOL,
-        OPTIMIZER,
-        sample_size,
-        profile.preprocessor_seed,
-        train_pool_size,
-    )
-    expected_curves = {
-        (*experiment, spec.variant, spec.result_dim, train_size)
-        for spec in specs
-        for train_size in train_sizes
-    }
-    tuning = raw.loc[raw["phase"] == "tuning"]
-    evaluation = raw.loc[raw["phase"] == "evaluation"]
-    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
-        observed_curves = set(
-            rows[list(RESULT_SCHEMA.curve_columns)]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
-        )
-        if observed_curves != expected_curves:
-            raise ValueError(f"{phase} has an incomplete model/checkpoint grid")
-
-    if tuning[list(RESULT_SCHEMA.test_metrics)].notna().any().any():
-        raise ValueError("tuning rows must not contain test metrics")
-    if evaluation[RESULT_SCHEMA.validation_metric].notna().any():
-        raise ValueError("evaluation rows must not contain validation metrics")
-    if not np.isfinite(
-        evaluation[list(RESULT_SCHEMA.test_metrics)].to_numpy(dtype=float)
-    ).all():
-        raise ValueError("evaluation test metrics must be finite")
-
-    if not same_learning_rates(tuning["lr"], profile.lrs):
-        raise ValueError("tuning learning-rate grid does not match the profile")
-    tuning_seeds = set(profile.tuning_seeds)
-    for curve, rows in tuning.groupby(list(RESULT_SCHEMA.curve_columns)):
-        if not same_learning_rates(rows["lr"], profile.lrs):
-            raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
-        for lr, lr_rows in rows.groupby("lr"):
-            seeds = set(
-                lr_rows[["data_seed", "init_seed"]].itertuples(index=False, name=None)
-            )
-            if seeds != tuning_seeds:
-                raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
-
-    selected_lrs = {
-        tuple(getattr(row, column) for column in RESULT_SCHEMA.curve_columns): (
-            row.selected_lr
-        )
-        for row in select_learning_rates(
-            tuning,
-            curve_columns=RESULT_SCHEMA.curve_columns,
-            validation_metric=RESULT_SCHEMA.validation_metric,
-        ).itertuples(index=False)
-    }
-    evaluation_seeds = set(profile.evaluation_seeds)
-    for curve, rows in evaluation.groupby(list(RESULT_SCHEMA.curve_columns)):
-        seeds = set(rows[["data_seed", "init_seed"]].itertuples(index=False, name=None))
-        if seeds != evaluation_seeds:
-            raise ValueError(f"incomplete evaluation seeds for {curve}")
-        lrs = rows["lr"].unique()
-        if len(lrs) != 1 or not np.isclose(
-            lrs[0], selected_lrs[curve], rtol=1e-12, atol=0
-        ):
-            raise ValueError(f"evaluation does not use the selected LR for {curve}")
+    if experiment["protocol"] != PROTOCOL:
+        raise ValueError(f"expected protocol={PROTOCOL!r}")
+    if experiment["optimizer"] != OPTIMIZER:
+        raise ValueError(f"expected optimizer={OPTIMIZER!r}")
+    train_pool_size = int(experiment["train_pool_size"])
+    sample_size = max(1, round(profile.preprocessor_fraction * train_pool_size))
+    if experiment["preprocessor_sample_size"] != sample_size:
+        raise ValueError("preprocessor sample size does not match the profile")
+    if experiment["preprocessor_seed"] != profile.preprocessor_seed:
+        raise ValueError("preprocessor seed does not match the profile")
 
 
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:

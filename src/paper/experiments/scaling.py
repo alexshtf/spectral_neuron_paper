@@ -5,6 +5,7 @@ from datetime import timedelta
 from itertools import product
 from typing import TextIO
 
+import numpy as np
 import pandas as pd
 from torch import nn
 from tqdm import tqdm
@@ -18,6 +19,7 @@ from paper.training import (
     fit_validation_trajectory,
 )
 from paper.tuning import (
+    same_learning_rates,
     select_learning_rates,
     select_rows_at_learning_rates,
 )
@@ -282,3 +284,95 @@ def summarize_evaluations(
         group_columns=(*schema.curve_columns, "selected_lr"),
         metrics=schema.test_metrics,
     )
+
+
+def _row_set(frame: pd.DataFrame, columns: Sequence[str]) -> set[tuple[object, ...]]:
+    return set(frame[list(columns)].itertuples(index=False, name=None))
+
+
+def validate_results(
+    raw: pd.DataFrame,
+    *,
+    schema: ScalingSchema,
+    expected_model_rows: Sequence[Mapping[str, object]],
+    train_sizes: Sequence[int],
+    learning_rates: Sequence[float],
+    tuning_seeds: SeedGrid,
+    evaluation_seeds: SeedGrid,
+) -> dict[str, object]:
+    """Validate one complete tuning-and-evaluation scaling experiment."""
+    if tuple(raw.columns) != schema.raw_columns:
+        raise ValueError("incompatible result schema")
+    if raw[list(schema.identity_columns)].isna().any().any():
+        raise ValueError("run identity columns must not contain missing values")
+    if raw.duplicated(list(schema.identity_columns)).any():
+        raise ValueError("results contain duplicate trajectory checkpoints")
+
+    experiments = raw[list(schema.experiment_columns)].drop_duplicates()
+    if len(experiments) != 1:
+        raise ValueError("results must contain exactly one experiment")
+    experiment = experiments.iloc[0].to_dict()
+
+    if set(raw["phase"]) != {"tuning", "evaluation"}:
+        raise ValueError("results must contain tuning and evaluation phases")
+
+    expected_models = {
+        tuple(row[column] for column in schema.model_columns)
+        for row in expected_model_rows
+    }
+    observed_models = _row_set(raw, schema.model_columns)
+    if observed_models != expected_models:
+        raise ValueError(
+            "model/capacity grid mismatch; capacity metadata must be consistent"
+        )
+
+    experiment_row = tuple(
+        experiment[column] for column in schema.experiment_columns
+    )
+    expected_curves = {
+        (*experiment_row, *model, train_size)
+        for model in expected_models
+        for train_size in train_sizes
+    }
+    tuning = raw.loc[raw["phase"] == "tuning"]
+    evaluation = raw.loc[raw["phase"] == "evaluation"]
+    for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
+        observed_curves = _row_set(rows, schema.curve_columns)
+        if observed_curves != expected_curves:
+            raise ValueError(f"{phase} has an incomplete model/checkpoint grid")
+
+    if tuning[list(schema.test_metrics)].notna().any().any():
+        raise ValueError("tuning rows must not contain test metrics")
+    if evaluation[schema.validation_metric].notna().any():
+        raise ValueError("evaluation rows must not contain validation metrics")
+    if not np.isfinite(
+        evaluation[list(schema.test_metrics)].to_numpy(dtype=float)
+    ).all():
+        raise ValueError("evaluation test metrics must be finite")
+
+    expected_tuning_seeds = set(tuning_seeds)
+    for curve, rows in tuning.groupby(list(schema.curve_columns)):
+        if not same_learning_rates(rows["lr"], learning_rates):
+            raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
+        for lr, lr_rows in rows.groupby("lr"):
+            seeds = _row_set(lr_rows, ("data_seed", "init_seed"))
+            if seeds != expected_tuning_seeds:
+                raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
+
+    selected_lrs = select_learning_rates(
+        tuning,
+        curve_columns=schema.curve_columns,
+        validation_metric=schema.validation_metric,
+    ).set_index(list(schema.curve_columns))["selected_lr"]
+    expected_evaluation_seeds = set(evaluation_seeds)
+    for curve, rows in evaluation.groupby(list(schema.curve_columns)):
+        seeds = _row_set(rows, ("data_seed", "init_seed"))
+        if seeds != expected_evaluation_seeds:
+            raise ValueError(f"incomplete evaluation seeds for {curve}")
+        lrs = rows["lr"].unique()
+        if len(lrs) != 1 or not np.isclose(
+            lrs[0], selected_lrs.loc[curve], rtol=1e-12, atol=0
+        ):
+            raise ValueError(f"evaluation does not use the selected LR for {curve}")
+
+    return experiment

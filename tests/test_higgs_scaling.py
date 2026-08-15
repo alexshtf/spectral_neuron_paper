@@ -249,6 +249,15 @@ def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw)
     validate_raw(linear, _tiny_profile(), variant="linear")
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("protocol", "other"), ("optimizer", "sgd")],
+)
+def test_validate_raw_checks_experiment_metadata(complete_raw, column, value):
+    with pytest.raises(ValueError, match=column):
+        validate_raw(complete_raw.assign(**{column: value}), _tiny_profile())
+
+
 def test_validate_raw_rejects_schema_identity_and_capacity_errors(complete_raw):
     with pytest.raises(ValueError, match="schema"):
         validate_raw(complete_raw.drop(columns="test_brier"), _tiny_profile())
@@ -260,7 +269,7 @@ def test_validate_raw_rejects_schema_identity_and_capacity_errors(complete_raw):
 
     mixed_pool_sizes = complete_raw.copy()
     mixed_pool_sizes.loc[0, "train_pool_size"] = 8
-    with pytest.raises(ValueError, match="one train_pool_size"):
+    with pytest.raises(ValueError, match="one experiment"):
         validate_raw(mixed_pool_sizes, _tiny_profile())
 
     duplicate = pd.concat((complete_raw, complete_raw.iloc[[0]]), ignore_index=True)
@@ -308,6 +317,12 @@ def test_validate_raw_rejects_incomplete_grids_and_invalid_phase_metrics(
     leaked_validation.loc[index, "val_logloss"] = 0.5
     with pytest.raises(ValueError, match="validation metrics"):
         validate_raw(leaked_validation, _tiny_profile())
+
+    leaked_test = complete_raw.copy()
+    index = leaked_test.index[leaked_test["phase"] == "tuning"][0]
+    leaked_test.loc[index, "test_logloss"] = 0.5
+    with pytest.raises(ValueError, match="test metrics"):
+        validate_raw(leaked_test, _tiny_profile())
 
 
 def test_validate_raw_warns_for_nonfinite_tuning_and_checks_selected_lr(

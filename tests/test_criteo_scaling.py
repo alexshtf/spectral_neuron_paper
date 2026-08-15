@@ -469,6 +469,22 @@ def test_validate_raw_accepts_complete_and_variant_sharded_results(complete_raw)
     validate_raw(linear, _tiny_profile(), variant="linear-bucketed")
 
 
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("protocol", "other", "protocol"),
+        ("optimizer", "sgd", "optimizer"),
+        ("preprocessor_sample_size", 7, "sample size"),
+        ("preprocessor_seed", 1, "seed"),
+    ],
+)
+def test_validate_raw_checks_experiment_metadata(
+    complete_raw, column, value, message
+):
+    with pytest.raises(ValueError, match=message):
+        validate_raw(complete_raw.assign(**{column: value}), _tiny_profile())
+
+
 def test_validate_raw_rejects_identity_and_incomplete_grids(complete_raw):
     with pytest.raises(ValueError, match="schema"):
         validate_raw(complete_raw.drop(columns="test_brier"), _tiny_profile())
