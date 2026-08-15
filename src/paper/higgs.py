@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from paper.compression import open_dataset_file
 from paper.shuffling import ShuffledEpochs
+from paper.tasks import Batch
 
 
 NUM_FEATURES = 28
@@ -51,9 +52,6 @@ FEATURE_NAMES = (
     "m(wbb)",
     "m(wwbb)",
 )
-
-type BinaryBatch = tuple[tuple[torch.Tensor, ...], torch.Tensor]
-
 
 def default_cache_dir(raw_path: Path) -> Path:
     raw_path = Path(raw_path)
@@ -94,7 +92,7 @@ def _combine_moments(
     mean = mean + delta * (batch_count / total)
     squared_deviations = (
         squared_deviations
-        + np.einsum("ij,ij->j", centered, centered)
+        + np.square(centered).sum(axis=0)
         + np.square(delta) * (count * batch_count / total)
     )
     return total, mean, squared_deviations
@@ -283,8 +281,11 @@ class HiggsTask:
     _shuffled_epochs: ShuffledEpochs = field(init=False, repr=False)
     _mean: np.ndarray = field(init=False, repr=False)
     _scale: np.ndarray = field(init=False, repr=False)
-    _features: np.memmap | None = field(init=False, default=None, repr=False)
-    _labels: np.memmap | None = field(init=False, default=None, repr=False)
+    _arrays_cache: tuple[np.memmap, np.memmap] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self._shuffled_epochs = self.corpus.shuffled_epochs(self.data_seed)
@@ -293,34 +294,32 @@ class HiggsTask:
 
     def __getstate__(self) -> dict[str, Any]:
         state = vars(self).copy()
-        state.update(_features=None, _labels=None)
+        state["_arrays_cache"] = None
         return state
 
-    def train_batches(self, max_examples: int) -> Iterator[BinaryBatch]:
+    def train_batches(self, max_examples: int) -> Iterator[Batch]:
         features, labels = self._arrays()
         for rows in self._shuffled_epochs.batches(max_examples, self.batch_size):
             yield self._batch(features, labels, rows)
 
-    def val_batches(self) -> Iterator[BinaryBatch]:
+    def val_batches(self) -> Iterator[Batch]:
         yield from self._sequential_batches(
             self.corpus.train_stop,
             self.corpus.val_stop,
         )
 
-    def test_batches(self) -> Iterator[BinaryBatch]:
+    def test_batches(self) -> Iterator[Batch]:
         yield from self._sequential_batches(
             self.corpus.val_stop,
             self.corpus.rows,
         )
 
     def _arrays(self) -> tuple[np.memmap, np.memmap]:
-        if self._features is None:
-            self._features = self.corpus.features()
-            self._labels = self.corpus.labels()
-        assert self._features is not None and self._labels is not None
-        return self._features, self._labels
+        if self._arrays_cache is None:
+            self._arrays_cache = (self.corpus.features(), self.corpus.labels())
+        return self._arrays_cache
 
-    def _sequential_batches(self, start: int, stop: int) -> Iterator[BinaryBatch]:
+    def _sequential_batches(self, start: int, stop: int) -> Iterator[Batch]:
         features, labels = self._arrays()
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
@@ -331,7 +330,7 @@ class HiggsTask:
         features: np.memmap,
         labels: np.memmap,
         rows: slice | np.ndarray,
-    ) -> BinaryBatch:
+    ) -> Batch:
         batch_features = np.array(features[rows], dtype=np.float32, copy=True)
         batch_features -= self._mean
         batch_features /= self._scale

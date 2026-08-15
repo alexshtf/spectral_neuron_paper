@@ -274,6 +274,5 @@ def test_task_drops_open_memmaps_when_pickled(tmp_path):
 
     restored = pickle.loads(pickle.dumps(task))
 
-    assert restored._features is None
-    assert restored._labels is None
+    assert restored._arrays_cache is None
     assert next(restored.val_batches())[0][0].shape == (2, NUM_FEATURES)
