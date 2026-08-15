@@ -2,19 +2,17 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import partial
 from time import perf_counter
-from typing import Any, Protocol
+from typing import Any
 
 import fitstream as fts
-import numpy as np
 import pandas as pd
 import torch
 from torch import nn
 
-from paper.tasks import Task
+from paper.tasks import Batch, ModelInputs, Task, TrainTask
+
 
 type Event = dict[str, Any]
-type ModelInputs = tuple[torch.Tensor, ...]
-type Batch = tuple[ModelInputs, torch.Tensor]
 type BatchFactory = Callable[[], Iterable[Batch]]
 type Loss = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 type Evaluator = Callable[[nn.Module, Iterable[Batch]], dict[str, float]]
@@ -27,14 +25,6 @@ class Objective:
     test_metrics: Evaluator
 
 
-class ScalingTask(Protocol):
-    def train_batches(self, max_examples: int) -> Iterable[Batch]: ...
-
-    def val_batches(self) -> Iterable[Batch]: ...
-
-    def test_batches(self) -> Iterable[Batch]: ...
-
-
 def _checkpoints(values: Iterable[int]) -> tuple[int, ...]:
     checkpoints = tuple(map(int, values))
     if not checkpoints or checkpoints != tuple(sorted(set(checkpoints))):
@@ -42,76 +32,6 @@ def _checkpoints(values: Iterable[int]) -> tuple[int, ...]:
     if checkpoints[0] <= 0:
         raise ValueError("checkpoints must be positive")
     return checkpoints
-
-
-def train_events(
-    task: Task,
-    model: nn.Module,
-    *,
-    lr: float,
-    train_seed: int,
-    checkpoints: Iterable[int],
-) -> Iterator[Event]:
-    torch.manual_seed(train_seed)
-    rng = np.random.default_rng(train_seed)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-    batches = task.train_batches(rng)
-    checkpoints = _checkpoints(checkpoints)
-    checkpoint_set = set(checkpoints)
-    for step in range(1, checkpoints[-1] + 1):
-        x, y = next(batches)
-
-        optimizer.zero_grad()
-        train_loss = loss_fn(model(x), y)
-        train_loss.backward()
-        optimizer.step()
-
-        if step in checkpoint_set:
-            yield {"step": step, "model": model}
-
-
-def evaluate_rmse(model: nn.Module, x: torch.Tensor, y: torch.Tensor) -> float:
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.inference_mode():
-            pred = model(x)
-            return torch.mean((pred - y) ** 2).sqrt().item()
-    finally:
-        model.train(was_training)
-
-
-def rmse_on(
-    name: str, x: torch.Tensor, y: torch.Tensor
-) -> Callable[[Event], dict[str, float]]:
-    def augment(ev: Event) -> dict[str, float]:
-        return {f"{name}_rmse": evaluate_rmse(ev["model"], x, y)}
-
-    return augment
-
-
-def run_one_stream(
-    task: Task,
-    model: nn.Module,
-    *,
-    lr: float,
-    train_seed: int,
-    checkpoints: Iterable[int],
-) -> pd.DataFrame:
-    events = fts.pipe(
-        train_events(
-            task,
-            model,
-            lr=lr,
-            train_seed=train_seed,
-            checkpoints=checkpoints,
-        ),
-        fts.augment(rmse_on("val", task.x_val, task.y_val)),
-        fts.augment(rmse_on("test", task.x_test, task.y_test)),
-    )
-    return fts.collect_pd(events)
 
 
 def _adam_optimizers(
@@ -149,18 +69,19 @@ def _predict(
     return predictions
 
 
-def train_scaling_events(
-    task: ScalingTask,
+def train_events(
+    task: TrainTask,
     model: nn.Module,
     *,
     lr: float,
     checkpoints: Iterable[int],
     loss: Loss,
-) -> Iterator[Event]:
+) -> Iterator[fts.Event]:
     checkpoints = _checkpoints(checkpoints)
 
     optimizers = _adam_optimizers(model, lr=lr)
     batches = iter(task.train_batches(checkpoints[-1]))
+    step = 0
     examples_seen = 0
     train_seconds = 0.0
 
@@ -175,6 +96,7 @@ def train_scaling_events(
             for optimizer in optimizers:
                 optimizer.step()
 
+            step += 1
             examples_seen += len(labels)
             if examples_seen >= checkpoint:
                 break
@@ -184,11 +106,12 @@ def train_scaling_events(
             f"training stream reached {examples_seen} examples; "
             f"expected checkpoint {checkpoint}"
         )
-        yield {
-            "train_size": examples_seen,
-            "train_seconds": train_seconds,
-            "model": model,
-        }
+        yield fts.Event(
+            step=step,
+            train_size=examples_seen,
+            train_seconds=train_seconds,
+            model=model,
+        )
 
     sentinel = object()
     assert next(batches, sentinel) is sentinel, (
@@ -236,20 +159,25 @@ def evaluate_regression(
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
-    squared_error = 0.0
+    squared_error: torch.Tensor | None = None
     samples = 0
     try:
         with torch.inference_mode():
             for model_inputs, labels in batches:
                 errors = _predict(model, model_inputs, labels) - labels
-                squared_error += errors.square().sum().item()
+                batch_error = errors.square().sum()
+                squared_error = (
+                    batch_error
+                    if squared_error is None
+                    else squared_error + batch_error
+                )
                 samples += labels.numel()
     finally:
         model.train(was_training)
 
-    if samples == 0:
+    if squared_error is None:
         raise ValueError("evaluation data must not be empty")
-    return {"rmse": (squared_error / samples) ** 0.5}
+    return {"rmse": (squared_error / samples).sqrt().item()}
 
 
 BINARY_OBJECTIVE = Objective(
@@ -264,14 +192,14 @@ REGRESSION_OBJECTIVE = Objective(
 )
 
 
-def metrics_on(
+def evaluate_on(
     name: str,
     batches: BatchFactory,
     evaluate: Evaluator,
-) -> Callable[[Event], Event]:
+) -> Callable[[Event], dict[str, float]]:
     elapsed_seconds = 0.0
 
-    def augment(event: Event) -> Event:
+    def augment(event: Event) -> dict[str, float]:
         nonlocal elapsed_seconds
         started = perf_counter()
         metrics = evaluate(event["model"], batches())
@@ -284,17 +212,45 @@ def metrics_on(
     return augment
 
 
-def _events_at_train_sizes(
-    events: Iterable[Event], train_sizes: Iterable[int]
-) -> Iterator[Event]:
+def fit_and_evaluate(
+    task: Task,
+    model: nn.Module,
+    *,
+    objective: Objective,
+    lr: float,
+    checkpoints: Iterable[int],
+) -> pd.DataFrame:
+    events = fts.pipe(
+        train_events(
+            task,
+            model,
+            lr=lr,
+            checkpoints=checkpoints,
+            loss=objective.loss,
+        ),
+        fts.augment(
+            evaluate_on("val", task.val_batches, objective.validation_metrics)
+        ),
+        fts.augment(evaluate_on("test", task.test_batches, objective.test_metrics)),
+    )
+    return fts.collect_pd(events)
+
+
+def at_train_sizes(
+    train_sizes: Iterable[int],
+) -> Callable[[Iterable[Event]], Iterator[Event]]:
     selected = frozenset(train_sizes)
-    for event in events:
-        if event["train_size"] in selected:
-            yield event
+
+    def transform(events: Iterable[Event]) -> Iterator[Event]:
+        for event in events:
+            if event["train_size"] in selected:
+                yield event
+
+    return transform
 
 
-def _scaling_results(
-    task: ScalingTask,
+def _metric_results(
+    task: Task,
     model: nn.Module,
     *,
     lr: float,
@@ -315,30 +271,28 @@ def _scaling_results(
         raise ValueError("metric checkpoints must be drawn from checkpoints")
 
     events = fts.pipe(
-        _events_at_train_sizes(
-            train_scaling_events(
-                task,
-                model,
-                lr=lr,
-                checkpoints=checkpoints,
-                loss=loss,
-            ),
-            selected,
+        train_events(
+            task,
+            model,
+            lr=lr,
+            checkpoints=checkpoints,
+            loss=loss,
         ),
-        fts.augment(metrics_on(metric_name, batches, evaluate)),
+        at_train_sizes(selected),
+        fts.augment(evaluate_on(metric_name, batches, evaluate)),
     )
     return fts.collect_pd(events)
 
 
 def tune_scaling_stream(
-    task: ScalingTask,
+    task: Task,
     model: nn.Module,
     *,
     objective: Objective,
     lr: float,
     checkpoints: Iterable[int],
 ) -> pd.DataFrame:
-    return _scaling_results(
+    return _metric_results(
         task,
         model,
         lr=lr,
@@ -352,7 +306,7 @@ def tune_scaling_stream(
 
 
 def fit_and_test_scaling(
-    task: ScalingTask,
+    task: Task,
     model: nn.Module,
     *,
     objective: Objective,
@@ -360,7 +314,7 @@ def fit_and_test_scaling(
     checkpoints: Iterable[int],
     test_checkpoints: Iterable[int],
 ) -> pd.DataFrame:
-    return _scaling_results(
+    return _metric_results(
         task,
         model,
         lr=lr,

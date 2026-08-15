@@ -14,12 +14,12 @@ from paper.experiments import run_many
 from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
-from paper.tasks import Task
-from paper.training import run_one_stream
+from paper.tasks import SyntheticTask
+from paper.training import REGRESSION_OBJECTIVE, fit_and_evaluate
 from paper.tuning import same_lrs
 
 type TargetFactory = Callable[[TargetSpec], ArrayTarget]
-type TaskFactory = Callable[..., Task]
+type TaskFactory = Callable[..., SyntheticTask]
 type ProfileRunner = Callable[..., pd.DataFrame]
 
 
@@ -153,16 +153,7 @@ def _with_metadata(
     return df.assign(
         **metadata,
         batch_size=batch_size,
-        train_size=lambda rows: rows["step"] * batch_size,
     ).loc[:, RAW_COLUMNS]
-
-
-def _steps_for_train_sizes(
-    train_sizes: tuple[int, ...], batch_size: int
-) -> tuple[int, ...]:
-    if any(train_size % batch_size for train_size in train_sizes):
-        raise ValueError("synthetic train sizes must be divisible by batch_size")
-    return tuple(train_size // batch_size for train_size in train_sizes)
 
 
 def run_config(
@@ -181,6 +172,7 @@ def run_config(
         val_size=settings.val_size,
         test_size=settings.test_size,
         seed=config.target_spec.seed,
+        train_seed=config.init_seed,
         noise_std=config.noise_std,
     )
     model = _make_seeded_model(
@@ -188,12 +180,14 @@ def run_config(
         input_dim=task.input_dim,
         init_seed=config.init_seed,
     )
-    df = run_one_stream(
+    if any(train_size % settings.batch_size for train_size in settings.train_sizes):
+        raise ValueError("synthetic train sizes must be divisible by batch_size")
+    df = fit_and_evaluate(
         task,
         model,
+        objective=REGRESSION_OBJECTIVE,
         lr=config.lr,
-        train_seed=config.init_seed,
-        checkpoints=_steps_for_train_sizes(settings.train_sizes, settings.batch_size),
+        checkpoints=settings.train_sizes,
     )
     return _with_metadata(df, config=config, batch_size=settings.batch_size)
 

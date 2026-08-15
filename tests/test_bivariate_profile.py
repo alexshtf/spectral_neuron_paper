@@ -15,6 +15,7 @@ def test_bivariate_task_uses_a_square_tensor_product_test_grid():
         val_size=3,
         test_size=9,
         seed=2,
+        train_seed=3,
     )
 
     grid = np.linspace(-1.0, 1.0, 3)
@@ -37,4 +38,5 @@ def test_bivariate_task_requires_a_perfect_square_test_size():
             val_size=3,
             test_size=8,
             seed=2,
+            train_seed=3,
         )

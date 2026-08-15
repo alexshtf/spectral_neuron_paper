@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 from paper.tasks import make_univariate_task
@@ -14,13 +13,14 @@ def test_training_inputs_match_across_noise_levels():
             val_size=3,
             test_size=5,
             seed=0,
+            train_seed=1,
             noise_std=noise_std,
         )
 
-    noiseless = make_task(0.0).train_batches(np.random.default_rng(1))
-    noisy = make_task(0.1).train_batches(np.random.default_rng(1))
+    noiseless = make_task(0.0).train_batches(12)
+    noisy = make_task(0.1).train_batches(12)
 
     for _ in range(3):
-        x_noiseless, _ = next(noiseless)
-        x_noisy, _ = next(noisy)
+        (x_noiseless,), _ = next(noiseless)
+        (x_noisy,), _ = next(noisy)
         torch.testing.assert_close(x_noiseless, x_noisy)

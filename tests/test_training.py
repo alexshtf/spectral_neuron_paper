@@ -1,21 +1,19 @@
-import numpy as np
+import fitstream as fts
 import pytest
 import torch
 from torch import nn
 
 from paper.models import SparseLinear
-from paper.tasks import Task
 from paper.training import (
     BINARY_OBJECTIVE,
     REGRESSION_OBJECTIVE,
     _adam_optimizers,
     evaluate_binary,
+    evaluate_on,
     evaluate_regression,
-    evaluate_rmse,
+    fit_and_evaluate,
     fit_and_test_scaling,
-    metrics_on,
-    run_one_stream,
-    train_scaling_events,
+    train_events,
     tune_scaling_stream,
 )
 
@@ -34,26 +32,28 @@ def test_checkpoint_metrics_describe_post_update_model():
     x = torch.ones(1, 1)
     y = torch.ones(1, 1)
 
-    def train_batches(_: np.random.Generator):
-        while True:
-            yield x, y
+    class Task:
+        @staticmethod
+        def train_batches(max_examples: int):
+            for _ in range(max_examples):
+                yield (x,), y
 
-    task = Task(
-        input_dim=1,
-        x_val=x,
-        y_val=y,
-        x_test=x,
-        y_test=y,
-        train_batches=train_batches,
-    )
+        @staticmethod
+        def val_batches():
+            yield (x,), y
+
+        @staticmethod
+        def test_batches():
+            yield (x,), y
+
     model = nn.Linear(1, 1, bias=False)
     nn.init.zeros_(model.weight)
 
-    result = run_one_stream(
-        task,
+    result = fit_and_evaluate(
+        Task(),
         model,
+        objective=REGRESSION_OBJECTIVE,
         lr=0.1,
-        train_seed=0,
         checkpoints=(1, 2),
     )
 
@@ -68,11 +68,6 @@ def test_evaluation_restores_model_mode(training):
     model = ModeRecorder()
     x = torch.zeros(2, 1)
     y = torch.zeros(2)
-
-    model.train(training)
-    evaluate_rmse(model, x, y)
-    assert model.modes.pop() is False
-    assert model.training is training
 
     model.train(training)
     evaluate_binary(model, [((x.long(), x), y)])
@@ -103,7 +98,7 @@ def test_binary_models_use_adam_and_sparse_adam():
     assert tuple(map(type, optimizers)) == (torch.optim.Adam, torch.optim.SparseAdam)
 
 
-def test_binary_scaling_consumes_each_nested_prefix_once():
+def test_training_consumes_each_nested_prefix_once():
     seen: list[int] = []
     calls: list[int] = []
 
@@ -124,7 +119,7 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
 
     model = SparseLinear(num_features=1, num_fields=1)
     events = list(
-        train_scaling_events(
+        train_events(
             RecordingTask(),
             model,
             lr=0.1,
@@ -135,7 +130,14 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
 
     assert calls == [7]
     assert seen == list(range(7))
-    assert [event["train_size"] for event in events] == [4, 7]
+    assert [(event["step"], event["train_size"]) for event in events] == [
+        (2, 4),
+        (4, 7),
+    ]
+    assert all(
+        "train_seconds" in event and event["model"] is model for event in events
+    )
+    assert all(isinstance(event, fts.Event) for event in events)
 
 
 @pytest.mark.parametrize(
@@ -146,7 +148,7 @@ def test_binary_scaling_consumes_each_nested_prefix_once():
         ((3, 1), "yielded more than 3 examples"),
     ],
 )
-def test_scaling_trainer_asserts_actual_example_count(batch_sizes, message):
+def test_trainer_asserts_actual_example_count(batch_sizes, message):
     class InvalidTask:
         @staticmethod
         def train_batches(max_examples: int):
@@ -155,7 +157,7 @@ def test_scaling_trainer_asserts_actual_example_count(batch_sizes, message):
 
     with pytest.raises(AssertionError, match=message):
         list(
-            train_scaling_events(
+            train_events(
                 InvalidTask(),
                 nn.Linear(1, 1),
                 lr=0.1,
@@ -190,7 +192,7 @@ def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
                 nn.Flatten(start_dim=-2, end_dim=-1),
             )
         list(
-            train_scaling_events(
+            train_events(
                 DenseTask(),
                 model,
                 lr=1e-2,
@@ -207,7 +209,7 @@ def test_checkpoint_on_minibatch_boundary_does_not_change_later_training():
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch):
+def test_training_time_is_cumulative_but_excludes_suspension(monkeypatch):
     ticks = iter((0.0, 2.0, 10.0, 13.0))
     monkeypatch.setattr("paper.training.perf_counter", lambda: next(ticks))
 
@@ -221,7 +223,7 @@ def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch)
                 )
 
     events = list(
-        train_scaling_events(
+        train_events(
             Task(),
             SparseLinear(num_features=1, num_fields=1),
             lr=0.1,
@@ -236,7 +238,7 @@ def test_binary_training_time_is_cumulative_but_excludes_suspension(monkeypatch)
 def test_evaluation_time_is_cumulative(monkeypatch):
     ticks = iter((0.0, 2.0, 10.0, 13.0))
     monkeypatch.setattr("paper.training.perf_counter", lambda: next(ticks))
-    augment = metrics_on("val", lambda: (), lambda *_: {"logloss": 0.5})
+    augment = evaluate_on("val", lambda: (), lambda *_: {"logloss": 0.5})
 
     first = augment({"model": object()})
     second = augment({"model": object()})

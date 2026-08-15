@@ -6,6 +6,7 @@ from operator import index
 from pathlib import Path
 from typing import TextIO
 
+import fitstream as fts
 import numpy as np
 import pandas as pd
 import torch
@@ -35,7 +36,8 @@ from paper.higgs import (
 )
 from paper.models import KthEigval
 from paper.shuffling import resolve_train_sizes
-from paper.training import BINARY_OBJECTIVE, Batch, train_scaling_events
+from paper.tasks import Batch
+from paper.training import BINARY_OBJECTIVE, train_events
 
 
 NOISE_LEVEL = 0.5
@@ -339,14 +341,16 @@ def run_config(
     if not isinstance(model, KthEigval):
         raise TypeError("HIGGS robustness requires a spectral model")
     train_size = settings.train_sizes[-1]
-    for _ in train_scaling_events(
-        task,
-        model,
-        lr=config.lr,
-        checkpoints=(train_size,),
-        loss=BINARY_OBJECTIVE.loss,
-    ):
-        pass
+    fts.collect(
+        train_events(
+            task,
+            model,
+            lr=config.lr,
+            checkpoints=(train_size,),
+            loss=BINARY_OBJECTIVE.loss,
+        ),
+        include=(),
+    )
 
     return deviation_histograms(
         model,

@@ -1,5 +1,6 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import torch
@@ -7,18 +8,52 @@ import torch
 from paper.targets import ArrayTarget
 
 
-BatchIterator = Iterator[tuple[torch.Tensor, torch.Tensor]]
-BatchStream = Callable[[np.random.Generator], BatchIterator]
+type ModelInputs = tuple[torch.Tensor, ...]
+type Batch = tuple[ModelInputs, torch.Tensor]
 
 
-@dataclass
-class Task:
+class TrainTask(Protocol):
+    def train_batches(self, max_examples: int) -> Iterator[Batch]: ...
+
+
+class Task(TrainTask, Protocol):
+    def val_batches(self) -> Iterator[Batch]: ...
+
+    def test_batches(self) -> Iterator[Batch]: ...
+
+
+@dataclass(frozen=True)
+class SyntheticTask:
+    target: ArrayTarget
     input_dim: int
+    lower: float
+    upper: float
+    batch_size: int
+    train_seed: int
     x_val: torch.Tensor
     y_val: torch.Tensor
     x_test: torch.Tensor
     y_test: torch.Tensor
-    train_batches: BatchStream
+    noise_std: float = 0.0
+
+    def train_batches(self, max_examples: int) -> Iterator[Batch]:
+        rng = np.random.default_rng(self.train_seed)
+        for batch_start in range(0, max_examples, self.batch_size):
+            size = min(self.batch_size, max_examples - batch_start)
+            x_np = rng.uniform(
+                self.lower,
+                self.upper,
+                size=(size, self.input_dim),
+            )
+            y_np = np.asarray(self.target(x_np), dtype=float)
+            y_np = y_np + rng.normal(0.0, self.noise_std, size=y_np.shape)
+            yield ((_to_x_tensor(x_np),), _to_y_tensor(y_np))
+
+    def val_batches(self) -> Iterator[Batch]:
+        yield ((self.x_val,), self.y_val)
+
+    def test_batches(self) -> Iterator[Batch]:
+        yield ((self.x_test,), self.y_test)
 
 
 def _to_x_tensor(x_np: np.ndarray) -> torch.Tensor:
@@ -39,10 +74,10 @@ def _make_task(
     batch_size: int,
     val_size: int,
     seed: int,
+    train_seed: int,
     noise_std: float = 0.0,
-) -> Task:
+) -> SyntheticTask:
     rng = np.random.default_rng(seed)
-
     x_val_np = rng.uniform(lower, upper, size=(val_size, input_dim))
 
     x_val = _to_x_tensor(x_val_np)
@@ -50,20 +85,18 @@ def _make_task(
     x_test = _to_x_tensor(x_test_np)
     y_test = _to_y_tensor(target(x_test_np))
 
-    def train_batches(batch_rng: np.random.Generator) -> BatchIterator:
-        while True:
-            x_np = batch_rng.uniform(lower, upper, size=(batch_size, input_dim))
-            y_np = np.asarray(target(x_np), dtype=float)
-            y_np = y_np + batch_rng.normal(0.0, noise_std, size=y_np.shape)
-            yield _to_x_tensor(x_np), _to_y_tensor(y_np)
-
-    return Task(
+    return SyntheticTask(
+        target=target,
         input_dim=input_dim,
+        lower=lower,
+        upper=upper,
+        batch_size=batch_size,
+        train_seed=train_seed,
+        noise_std=noise_std,
         x_val=x_val,
         y_val=y_val,
         x_test=x_test,
         y_test=y_test,
-        train_batches=train_batches,
     )
 
 
@@ -76,8 +109,9 @@ def make_univariate_task(
     val_size: int,
     test_size: int,
     seed: int,
+    train_seed: int,
     noise_std: float = 0.0,
-) -> Task:
+) -> SyntheticTask:
     return _make_task(
         target,
         input_dim=1,
@@ -87,6 +121,7 @@ def make_univariate_task(
         batch_size=batch_size,
         val_size=val_size,
         seed=seed,
+        train_seed=train_seed,
         noise_std=noise_std,
     )
 
@@ -100,8 +135,9 @@ def make_bivariate_task(
     val_size: int,
     test_size: int,
     seed: int,
+    train_seed: int,
     noise_std: float = 0.0,
-) -> Task:
+) -> SyntheticTask:
     if test_size < 1:
         raise ValueError(f"test_size must be positive; got {test_size}")
 
@@ -120,5 +156,6 @@ def make_bivariate_task(
         batch_size=batch_size,
         val_size=val_size,
         seed=seed,
+        train_seed=train_seed,
         noise_std=noise_std,
     )
