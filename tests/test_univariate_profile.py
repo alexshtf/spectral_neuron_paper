@@ -12,11 +12,11 @@ from paper.experiments.synthetic import (
     _make_seeded_model,
     build_arg_parser,
     default_raw_path,
+    summarize_results,
     validate_raw,
 )
 from paper.experiments.univariate import run_profile
 from paper.models import ModelSpec
-from paper.tuning import summarize_raw
 
 
 EXPECTED_FIT_PAIRS = {
@@ -43,7 +43,7 @@ def test_tiny_profile_produces_raw_logs_and_summary():
 
     raw = run_profile(profile, val_size=16, test_size=16)
     validate_raw(raw, profile)
-    summary = summarize_raw(raw)
+    summary = summarize_results(raw)
 
     assert not raw.empty
     assert not summary.empty

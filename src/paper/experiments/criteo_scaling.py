@@ -19,6 +19,7 @@ from paper.criteo import (
     prepare_corpus,
     prepare_encoded_data,
 )
+from paper.experiments import scaling
 from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.scaling import (
     PROTOCOL,
@@ -26,9 +27,6 @@ from paper.experiments.scaling import (
     SeedGrid,
     SelectedRun,
     run_tuning_and_evaluation,
-    select_lr as select_scaling_lr,
-    selected_runs,
-    summarize_scaling,
     tuning_configs,
 )
 from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
@@ -38,7 +36,7 @@ from paper.training import (
     fit_and_test_scaling,
     tune_scaling_stream,
 )
-from paper.tuning import best_lrs, same_lrs
+from paper.tuning import same_learning_rates, select_learning_rates
 
 
 type Variant = Literal[
@@ -295,17 +293,19 @@ def run_selected(
     )
 
 
-def _selected_runs(
+def _select_evaluation_runs(
     tuning: pd.DataFrame,
     evaluation_seeds: SeedGrid,
+    model_specs: tuple[CriteoModelSpec, ...],
 ) -> tuple[SelectedRun[CriteoModelSpec], ...]:
-    return selected_runs(
+    return scaling.select_evaluation_runs(
         tuning,
         experiment_columns=EXPERIMENT_COLUMNS,
         curve_columns=CURVE_COLUMNS,
         validation_metric="val_logloss",
         evaluation_seeds=evaluation_seeds,
-        make_model_spec=CriteoModelSpec,
+        model_columns=("model", "dim"),
+        model_specs={(spec.variant, spec.dim): spec for spec in model_specs},
     )
 
 
@@ -385,8 +385,9 @@ def run_profile(
         configs,
         tune=partial(run_config, settings=settings),
         select_evaluation_runs=partial(
-            _selected_runs,
+            _select_evaluation_runs,
             evaluation_seeds=profile.evaluation_seeds,
+            model_specs=model_specs,
         ),
         evaluate=partial(run_selected, settings=settings),
         workers=workers,
@@ -396,19 +397,18 @@ def run_profile(
     return results.reindex(columns=RAW_COLUMNS)
 
 
-def select_lr(raw: pd.DataFrame) -> pd.DataFrame:
-    return select_scaling_lr(
+def select_evaluations(raw: pd.DataFrame) -> pd.DataFrame:
+    return scaling.select_evaluations(
         raw,
         curve_columns=CURVE_COLUMNS,
         validation_metric="val_logloss",
     )
 
 
-def summarize_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    return summarize_scaling(
-        raw,
+def summarize_evaluations(evaluations: pd.DataFrame) -> pd.DataFrame:
+    return scaling.summarize_evaluations(
+        evaluations,
         curve_columns=CURVE_COLUMNS,
-        validation_metric="val_logloss",
         quantile_metrics=("test_logloss", "test_brier"),
     )
 
@@ -490,11 +490,11 @@ def validate_raw(
     ).all():
         raise ValueError("evaluation test metrics must be finite")
 
-    if not same_lrs(tuning["lr"], profile.lrs):
+    if not same_learning_rates(tuning["lr"], profile.lrs):
         raise ValueError("tuning learning-rate grid does not match the profile")
     tuning_seeds = set(profile.tuning_seeds)
     for curve, rows in tuning.groupby(CURVE_COLUMNS):
-        if not same_lrs(rows["lr"], profile.lrs):
+        if not same_learning_rates(rows["lr"], profile.lrs):
             raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
         for lr, lr_rows in rows.groupby("lr"):
             seeds = set(
@@ -505,7 +505,7 @@ def validate_raw(
 
     selected_lrs = {
         tuple(getattr(row, column) for column in CURVE_COLUMNS): row.selected_lr
-        for row in best_lrs(
+        for row in select_learning_rates(
             tuning,
             curve_columns=CURVE_COLUMNS,
             validation_metric="val_logloss",

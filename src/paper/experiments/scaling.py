@@ -1,5 +1,5 @@
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import product
@@ -9,7 +9,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from paper.experiments.runner import run_many
-from paper.tuning import best_lrs
+from paper.tuning import select_learning_rates, select_rows_at_learning_rates
 
 
 PROTOCOL = "repeated_shuffle"
@@ -115,29 +115,31 @@ def run_tuning_and_evaluation[T](
     return pd.concat((tuning, evaluation), ignore_index=True)
 
 
-def selected_runs[T](
+def select_evaluation_runs[T](
     tuning: pd.DataFrame,
     *,
     experiment_columns: Sequence[str],
     curve_columns: Sequence[str],
     validation_metric: str,
     evaluation_seeds: SeedGrid,
-    make_model_spec: Callable[[str, int], T],
+    model_columns: Sequence[str],
+    model_specs: Mapping[tuple[object, ...], T],
 ) -> tuple[SelectedRun[T], ...]:
     experiments = tuning[list(experiment_columns)].drop_duplicates()
     if len(experiments) != 1:
         raise ValueError("selected runs require exactly one experiment")
 
     train_sizes: dict[RunConfig[T], list[int]] = {}
-    for row in best_lrs(
+    for row in select_learning_rates(
         tuning,
         curve_columns=curve_columns,
         validation_metric=validation_metric,
     ).itertuples(index=False):
+        model_key = tuple(getattr(row, column) for column in model_columns)
         for data_seed, init_seed in evaluation_seeds:
             config = RunConfig(
                 data_seed=data_seed,
-                model_spec=make_model_spec(row.model, int(row.dim)),
+                model_spec=model_specs[model_key],
                 lr=row.selected_lr,
                 init_seed=init_seed,
             )
@@ -149,41 +151,32 @@ def selected_runs[T](
     )
 
 
-def select_lr(
+def select_evaluations(
     raw: pd.DataFrame,
     *,
     curve_columns: Sequence[str],
     validation_metric: str,
 ) -> pd.DataFrame:
     curve_columns = list(curve_columns)
-    best = best_lrs(
+    learning_rates = select_learning_rates(
         raw.loc[raw["phase"] == "tuning"],
         curve_columns=curve_columns,
         validation_metric=validation_metric,
     )
-    selected = raw.loc[raw["phase"] == "evaluation"].merge(
-        best,
-        on=curve_columns,
-        how="inner",
-    )
-    return selected.loc[selected["lr"] == selected["selected_lr"]].reset_index(
-        drop=True
+    return select_rows_at_learning_rates(
+        raw.loc[raw["phase"] == "evaluation"],
+        learning_rates,
+        curve_columns=curve_columns,
     )
 
 
-def summarize_scaling(
-    raw: pd.DataFrame,
+def summarize_evaluations(
+    evaluations: pd.DataFrame,
     *,
     curve_columns: Sequence[str],
-    validation_metric: str,
     quantile_metrics: Sequence[str],
 ) -> pd.DataFrame:
     quantile_metrics = tuple(quantile_metrics)
-    selected = select_lr(
-        raw,
-        curve_columns=curve_columns,
-        validation_metric=validation_metric,
-    )
     aggregations: dict[str, tuple[str, str | Callable]] = {}
     for metric in quantile_metrics:
         aggregations[f"median_{metric}"] = (metric, "median")
@@ -192,7 +185,7 @@ def summarize_scaling(
     aggregations["n"] = (quantile_metrics[0], "size")
 
     return (
-        selected.groupby([*curve_columns, "selected_lr"])
+        evaluations.groupby([*curve_columns, "selected_lr"])
         .agg(**aggregations)
         .reset_index()
     )

@@ -1,5 +1,5 @@
 import argparse
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
@@ -10,13 +10,18 @@ import numpy as np
 import pandas as pd
 import torch
 
+from paper.experiments import scaling
 from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.runner import run_many
 from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
 from paper.tasks import SyntheticTask
 from paper.training import REGRESSION_OBJECTIVE, fit_and_evaluate
-from paper.tuning import same_lrs
+from paper.tuning import (
+    same_learning_rates,
+    select_learning_rates,
+    select_rows_at_learning_rates,
+)
 
 type TargetFactory = Callable[[TargetSpec], ArrayTarget]
 type TaskFactory = Callable[..., SyntheticTask]
@@ -55,6 +60,16 @@ RUN_ID_COLUMNS = [
     "lr",
     "init_seed",
     "batch_size",
+]
+
+CURVE_COLUMNS = [
+    "target_kind",
+    "complexity",
+    "noise_std",
+    "model",
+    "dim",
+    "batch_size",
+    "train_size",
 ]
 
 
@@ -230,6 +245,78 @@ def run_profile(
     return pd.concat(dfs, ignore_index=True)
 
 
+def _checkpoint_selections(
+    raw: pd.DataFrame, budgets: Sequence[int]
+) -> Iterator[pd.DataFrame]:
+    ranked = raw.assign(_row_order=range(len(raw)))
+    for budget in budgets:
+        eligible = ranked.loc[ranked["train_size"] <= budget]
+        if eligible.empty:
+            continue
+
+        selected = (
+            eligible.sort_values(
+                [*RUN_ID_COLUMNS, "val_rmse", "step", "_row_order"],
+                na_position="last",
+            )
+            .drop_duplicates(RUN_ID_COLUMNS)
+            .drop(columns="_row_order")
+            .copy()
+        )
+        selected["train_size"] = budget
+        yield selected
+
+
+def select_checkpoints(
+    raw: pd.DataFrame, budgets: Sequence[int]
+) -> pd.DataFrame:
+    selected = list(_checkpoint_selections(raw, budgets))
+    return pd.concat(selected, ignore_index=True) if selected else raw.head(0)
+
+
+def select_evaluations(checkpoints: pd.DataFrame) -> pd.DataFrame:
+    learning_rates = select_learning_rates(
+        checkpoints,
+        curve_columns=CURVE_COLUMNS,
+        validation_metric="val_rmse",
+    )
+    return select_rows_at_learning_rates(
+        checkpoints,
+        learning_rates,
+        curve_columns=CURVE_COLUMNS,
+    )
+
+
+def summarize_evaluations(evaluations: pd.DataFrame) -> pd.DataFrame:
+    return scaling.summarize_evaluations(
+        evaluations,
+        curve_columns=CURVE_COLUMNS,
+        quantile_metrics=("test_rmse",),
+    )
+
+
+def _common_train_sizes(raw: pd.DataFrame) -> tuple[int, ...]:
+    grids = raw.groupby(RUN_ID_COLUMNS, sort=False, dropna=False)[
+        "train_size"
+    ].agg(lambda values: tuple(sorted(values.unique())))
+    if grids.empty:
+        return ()
+    if grids.nunique() != 1:
+        raise ValueError("synthetic runs have inconsistent train_size checkpoints")
+    return grids.iat[0]
+
+
+def summarize_results(raw: pd.DataFrame) -> pd.DataFrame:
+    summary = summarize_evaluations(
+        select_evaluations(select_checkpoints(raw, _common_train_sizes(raw)))
+    )
+    return (
+        summary
+        .sort_values([*CURVE_COLUMNS, "selected_lr"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+
 def validate_raw(raw: pd.DataFrame, profile: Profile) -> None:
     """Validate that raw results are a complete run of a synthetic profile."""
     if raw.columns.tolist() != RAW_COLUMNS:
@@ -255,7 +342,7 @@ def validate_raw(raw: pd.DataFrame, profile: Profile) -> None:
     if actual_configs != expected_configs:
         raise ValueError("synthetic run grid does not match the profile")
     lr_grids = raw.groupby(base_columns, sort=False, dropna=False)["lr"].agg(
-        lambda values: same_lrs(values, profile.lrs)
+        lambda values: same_learning_rates(values, profile.lrs)
     )
     if not lr_grids.all():
         raise ValueError("synthetic learning-rate grids do not match the profile")

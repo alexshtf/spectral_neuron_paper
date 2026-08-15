@@ -25,7 +25,7 @@ from paper.experiments.higgs_scaling import (
 )
 from paper.experiments.results import DEFAULT_RUNS_DIR, write_csv
 from paper.experiments.runner import run_many
-from paper.experiments.scaling import PROTOCOL, RunConfig, selected_runs
+from paper.experiments.scaling import PROTOCOL, RunConfig, select_evaluation_runs
 from paper.higgs import (
     FEATURE_NAMES,
     NUM_FEATURES,
@@ -123,13 +123,17 @@ def selected_configs(
     ]
     return tuple(
         selected.config
-        for selected in selected_runs(
+        for selected in select_evaluation_runs(
             tuning,
             experiment_columns=EXPERIMENT_COLUMNS,
             curve_columns=CURVE_COLUMNS,
             validation_metric="val_logloss",
             evaluation_seeds=profile.evaluation_seeds,
-            make_model_spec=HiggsModelSpec,
+            model_columns=("model", "dim"),
+            model_specs={
+                ("spectral", dim): HiggsModelSpec("spectral", dim)
+                for dim in profile.dims
+            },
         )
     )
 

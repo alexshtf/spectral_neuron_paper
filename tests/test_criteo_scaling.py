@@ -28,8 +28,8 @@ from paper.experiments.criteo_scaling import (
     build_arg_parser,
     default_raw_path,
     run_profile,
-    select_lr,
-    summarize_raw,
+    select_evaluations,
+    summarize_evaluations,
     validate_raw,
 )
 
@@ -382,7 +382,8 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
         progress=True,
         progress_file=output,
     )
-    summary = summarize_raw(raw)
+    selected = select_evaluations(raw)
+    summary = summarize_evaluations(selected)
 
     assert set(raw["model"]) == {
         "linear-bucketed",
@@ -532,7 +533,7 @@ def test_lr_selection_uses_median_tuning_validation_only():
         for lr, val, test in ((0.01, 0.1, 0.01), (0.1, 9.0, 4.0))
     ]
 
-    selected = select_lr(pd.DataFrame(tuning + evaluation))
+    selected = select_evaluations(pd.DataFrame(tuning + evaluation))
 
     assert selected[["lr", "median_val_logloss", "test_logloss"]].to_dict(
         "records"
@@ -572,7 +573,7 @@ def test_lr_selection_keeps_training_pools_separate():
                 }
             )
 
-    selected = select_lr(pd.DataFrame(rows))
+    selected = select_evaluations(pd.DataFrame(rows))
 
     assert selected[["train_pool_size", "lr"]].to_dict("records") == [
         {"train_pool_size": 40, "lr": 0.01},

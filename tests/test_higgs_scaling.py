@@ -19,14 +19,15 @@ from paper.experiments.higgs_scaling import (
     matched_mlp_width,
     mlp_parameter_count,
     run_profile,
+    select_evaluations,
     spectral_parameter_count,
-    summarize_raw,
+    summarize_evaluations,
     trainable_parameter_count,
     validate_raw,
 )
 from paper.higgs import NUM_FEATURES, HiggsLayout
 from paper.models import KthEigval
-from paper.tuning import best_lrs
+from paper.tuning import select_learning_rates
 
 
 def _write_tiny_higgs(path: Path, rows: int) -> None:
@@ -178,7 +179,8 @@ def test_seeded_model_construction_does_not_change_global_rng(spec):
 
 def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_raw):
     raw = complete_raw
-    summary = summarize_raw(raw)
+    selected = select_evaluations(raw)
+    summary = summarize_evaluations(selected)
 
     assert list(raw.columns) == RAW_COLUMNS
     assert set(raw["model"]) == set(VARIANTS)
@@ -195,7 +197,7 @@ def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_r
     assert set(evaluation["train_size"]) == {8, 16}
     assert evaluation["val_logloss"].isna().all()
     assert evaluation[["test_logloss", "test_brier"]].notna().all().all()
-    winners = best_lrs(
+    winners = select_learning_rates(
         tuning,
         curve_columns=CURVE_COLUMNS,
         validation_metric="val_logloss",

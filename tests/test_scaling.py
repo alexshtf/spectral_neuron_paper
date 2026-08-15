@@ -6,8 +6,9 @@ import pytest
 
 from paper.experiments.scaling import (
     SeedGrid,
-    selected_runs,
-    summarize_scaling,
+    select_evaluation_runs,
+    select_evaluations,
+    summarize_evaluations,
 )
 
 
@@ -45,9 +46,9 @@ class ModelSpec:
     dim: int
 
 
-def test_selected_runs_coalesces_checkpoints_with_the_same_lr():
+def test_evaluation_runs_coalesce_checkpoints_with_the_same_learning_rate():
     with pytest.warns(RuntimeWarning, match="nonfinite"):
-        runs = selected_runs(
+        runs = select_evaluation_runs(
             _tuning(),
             experiment_columns=EXPERIMENT_COLUMNS,
             curve_columns=CURVE_COLUMNS,
@@ -56,7 +57,8 @@ def test_selected_runs_coalesces_checkpoints_with_the_same_lr():
                 data_seeds=range(2, 4),
                 init_seeds=range(5, 6),
             ),
-            make_model_spec=ModelSpec,
+            model_columns=("model", "dim"),
+            model_specs={("spectral", 3): ModelSpec("spectral", 3)},
         )
 
     observed = {
@@ -71,24 +73,25 @@ def test_selected_runs_coalesces_checkpoints_with_the_same_lr():
     assert {run.config.init_seed for run in runs} == {5}
 
 
-def test_selected_runs_rejects_mixed_experiments():
+def test_evaluation_run_selection_rejects_mixed_experiments():
     tuning = pd.concat(
         [_tuning(), _tuning().assign(protocol="scaling-v2")],
         ignore_index=True,
     )
 
     with pytest.raises(ValueError, match="exactly one experiment"):
-        selected_runs(
+        select_evaluation_runs(
             tuning,
             experiment_columns=EXPERIMENT_COLUMNS,
             curve_columns=CURVE_COLUMNS,
             validation_metric="val_loss",
             evaluation_seeds=SeedGrid(),
-            make_model_spec=ModelSpec,
+            model_columns=("model", "dim"),
+            model_specs={("spectral", 3): ModelSpec("spectral", 3)},
         )
 
 
-def test_summarize_scaling_uses_only_selected_evaluation_rows():
+def test_evaluation_summary_uses_only_selected_learning_rate_rows():
     tuning = pd.DataFrame(
         [
             {
@@ -122,10 +125,14 @@ def test_summarize_scaling_uses_only_selected_evaluation_rows():
         ]
     )
 
-    summary = summarize_scaling(
+    selected = select_evaluations(
         pd.concat((tuning, evaluation), ignore_index=True),
         curve_columns=CURVE_COLUMNS,
         validation_metric="val_loss",
+    )
+    summary = summarize_evaluations(
+        selected,
+        curve_columns=CURVE_COLUMNS,
         quantile_metrics=("test_loss",),
     ).iloc[0]
 
