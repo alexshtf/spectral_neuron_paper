@@ -1,6 +1,5 @@
 from typing import TextIO
 
-import numpy as np
 import pandas as pd
 
 from paper.experiments import synthetic
@@ -8,36 +7,7 @@ from paper.experiments.synthetic import Profile
 from paper.targets import make_bivariate_target
 from paper.tasks import make_bivariate_task
 
-PROFILES: dict[str, Profile] = {
-    "sanity": Profile(
-        complexities=(5,),
-        target_seeds=range(2),
-        init_seeds=range(1),
-        dims=(5, 9),
-        lrs=(1e-3, 1e-2),
-        train_sizes=tuple(32 * step for step in (1, 2, 5, 10, 30)),
-        batch_size=32,
-    ),
-    "small": Profile(
-        complexities=(5, 9, 13),
-        target_seeds=range(8),
-        init_seeds=range(2),
-        dims=(5, 9, 15),
-        lrs=tuple(np.geomspace(1e-4, 1e-1, 4).tolist()),
-        train_sizes=tuple(32 * step for step in (1, 2, 5, 10, 20, 50, 100, 200)),
-        batch_size=32,
-    ),
-    "full": Profile(
-        complexities=(5, 9, 13),
-        target_seeds=range(32),
-        init_seeds=range(3),
-        dims=(5, 9, 15),
-        lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
-        train_sizes=tuple(32 * step for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)),
-        batch_size=32,
-        noise_stds=(0.0, 1e-1),
-    ),
-}
+PROFILES = synthetic.standard_profiles((5, 9, 13))
 
 
 def run_profile(

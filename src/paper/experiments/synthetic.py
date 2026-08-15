@@ -32,28 +32,6 @@ type TaskFactory = Callable[..., SyntheticTask]
 type ProfileRunner = Callable[..., pd.DataFrame]
 
 
-RAW_COLUMNS = [
-    "target_kind",
-    "complexity",
-    "target_seed",
-    "noise_std",
-    "model",
-    "dim",
-    "lr",
-    "init_seed",
-    "batch_size",
-    "step",
-    "train_size",
-    "val_rmse",
-    "test_rmse",
-]
-
-FITS: tuple[tuple[TargetKind, ModelKind], ...] = (
-    ("general", "unconstrained"),
-    ("monotone", "unconstrained"),
-    ("monotone", "monotone"),
-)
-
 RUN_ID_COLUMNS = [
     "target_kind",
     "complexity",
@@ -65,7 +43,8 @@ RUN_ID_COLUMNS = [
     "init_seed",
     "batch_size",
 ]
-
+METRIC_COLUMNS = ["val_rmse", "test_rmse"]
+RAW_COLUMNS = [*RUN_ID_COLUMNS, "step", "train_size", *METRIC_COLUMNS]
 CURVE_COLUMNS = [
     "target_kind",
     "complexity",
@@ -76,6 +55,14 @@ CURVE_COLUMNS = [
     "train_size",
 ]
 
+FITS: tuple[tuple[TargetKind, ModelKind], ...] = (
+    ("general", "unconstrained"),
+    ("monotone", "unconstrained"),
+    ("monotone", "monotone"),
+)
+
+_DEFAULT_BATCH_SIZE = 32
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -85,8 +72,45 @@ class Profile:
     dims: tuple[int, ...]
     lrs: tuple[float, ...]
     train_sizes: tuple[int, ...]
-    batch_size: int = 32
+    batch_size: int = _DEFAULT_BATCH_SIZE
     noise_stds: tuple[float, ...] = (0.0,)
+
+
+def _train_sizes(*steps: int) -> tuple[int, ...]:
+    return tuple(_DEFAULT_BATCH_SIZE * step for step in steps)
+
+
+def standard_profiles(complexities: tuple[int, ...]) -> dict[str, Profile]:
+    """Return the shared synthetic experiment profiles for one target family."""
+    return {
+        "sanity": Profile(
+            complexities=complexities[:1],
+            target_seeds=range(2),
+            init_seeds=range(1),
+            dims=(5, 9),
+            lrs=(1e-3, 1e-2),
+            train_sizes=_train_sizes(1, 2, 5, 10, 30),
+        ),
+        "small": Profile(
+            complexities=complexities,
+            target_seeds=range(8),
+            init_seeds=range(2),
+            dims=(5, 9, 15),
+            lrs=tuple(np.geomspace(1e-4, 1e-1, 4).tolist()),
+            train_sizes=_train_sizes(1, 2, 5, 10, 20, 50, 100, 200),
+        ),
+        "full": Profile(
+            complexities=complexities,
+            target_seeds=range(32),
+            init_seeds=range(3),
+            dims=(5, 9, 15),
+            lrs=tuple(np.geomspace(1e-4, 1e-1, 8).tolist()),
+            train_sizes=_train_sizes(
+                1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000
+            ),
+            noise_stds=(0.0, 1e-1),
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -351,7 +375,7 @@ def validate_raw(raw: pd.DataFrame, profile: Profile) -> None:
     if not lr_grids.all():
         raise ValueError("synthetic learning-rate grids do not match the profile")
 
-    keys = RUN_ID_COLUMNS + ["train_size"]
+    keys = [*RUN_ID_COLUMNS, "train_size"]
     if raw.duplicated(keys).any():
         raise ValueError("synthetic results contain duplicate checkpoints")
     checkpoints = raw.groupby(RUN_ID_COLUMNS, sort=False, dropna=False)[
@@ -361,7 +385,7 @@ def validate_raw(raw: pd.DataFrame, profile: Profile) -> None:
         raise ValueError("synthetic checkpoint grids do not match the profile")
     if not (raw["train_size"] == raw["step"] * raw["batch_size"]).all():
         raise ValueError("synthetic train sizes do not match their steps")
-    if not np.isfinite(raw[["val_rmse", "test_rmse"]]).all().all():
+    if not np.isfinite(raw[METRIC_COLUMNS]).all().all():
         raise ValueError("synthetic metrics must be finite")
 
 
