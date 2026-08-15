@@ -249,7 +249,7 @@ def at_train_sizes(
     return transform
 
 
-def _metric_results(
+def _fit_metric_trajectory(
     task: Task,
     model: nn.Module,
     *,
@@ -284,7 +284,7 @@ def _metric_results(
     return fts.collect_pd(events)
 
 
-def tune_scaling_stream(
+def fit_validation_trajectory(
     task: Task,
     model: nn.Module,
     *,
@@ -292,7 +292,7 @@ def tune_scaling_stream(
     lr: float,
     checkpoints: Iterable[int],
 ) -> pd.DataFrame:
-    return _metric_results(
+    return _fit_metric_trajectory(
         task,
         model,
         lr=lr,
@@ -305,7 +305,7 @@ def tune_scaling_stream(
     )
 
 
-def fit_and_test_scaling(
+def fit_test_trajectory(
     task: Task,
     model: nn.Module,
     *,
@@ -314,7 +314,7 @@ def fit_and_test_scaling(
     checkpoints: Iterable[int],
     test_checkpoints: Iterable[int],
 ) -> pd.DataFrame:
-    return _metric_results(
+    return _fit_metric_trajectory(
         task,
         model,
         lr=lr,

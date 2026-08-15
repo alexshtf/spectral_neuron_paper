@@ -65,7 +65,7 @@ def test_evaluation_runs_coalesce_checkpoints_with_the_same_learning_rate():
         )
 
     observed = {
-        (run.config.data_seed, run.config.lr): run.train_sizes for run in runs
+        (run.config.data_seed, run.config.lr): run.test_checkpoints for run in runs
     }
     assert observed == {
         (2, 0.01): (10, 30),

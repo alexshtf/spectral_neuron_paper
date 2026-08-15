@@ -6,10 +6,17 @@ from itertools import product
 from typing import TextIO
 
 import pandas as pd
+from torch import nn
 from tqdm import tqdm
 
 from paper.experiments.results import summarize_quantiles
 from paper.experiments.runner import run_many
+from paper.tasks import Task
+from paper.training import (
+    Objective,
+    fit_test_trajectory,
+    fit_validation_trajectory,
+)
 from paper.tuning import (
     select_learning_rates,
     select_rows_at_learning_rates,
@@ -17,6 +24,8 @@ from paper.tuning import (
 
 
 PROTOCOL = "repeated_shuffle"
+
+_TIMING_COLUMNS = ("train_seconds", "val_seconds", "test_seconds")
 
 
 @dataclass(frozen=True)
@@ -75,7 +84,67 @@ class RunConfig[T]:
 @dataclass(frozen=True)
 class SelectedRun[T]:
     config: RunConfig[T]
-    train_sizes: tuple[int, ...]
+    test_checkpoints: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ScalingRunner[T]:
+    schema: ScalingSchema
+    checkpoints: tuple[int, ...]
+    objective: Objective
+    make_task_model: Callable[[RunConfig[T]], tuple[Task, nn.Module]]
+    metadata: Callable[[RunConfig[T], nn.Module], Mapping[str, object]]
+
+    def _format_trajectory(
+        self,
+        trajectory: pd.DataFrame,
+        *,
+        phase: str,
+        config: RunConfig[T],
+        model: nn.Module,
+    ) -> pd.DataFrame:
+        return trajectory.assign(
+            phase=phase,
+            **self.metadata(config, model),
+        ).reindex(columns=(*self.schema.raw_columns, *_TIMING_COLUMNS))
+
+    def tune(self, config: RunConfig[T]) -> pd.DataFrame:
+        task, model = self.make_task_model(config)
+        trajectory = fit_validation_trajectory(
+            task,
+            model,
+            objective=self.objective,
+            lr=config.lr,
+            checkpoints=self.checkpoints,
+        )
+        return self._format_trajectory(
+            trajectory,
+            phase="tuning",
+            config=config,
+            model=model,
+        )
+
+    def evaluate(self, selected: SelectedRun[T]) -> pd.DataFrame:
+        task, model = self.make_task_model(selected.config)
+        checkpoints = tuple(
+            checkpoint
+            for checkpoint in self.checkpoints
+            if checkpoint <= max(selected.test_checkpoints)
+        )
+        trajectory = fit_test_trajectory(
+            task,
+            model,
+            objective=self.objective,
+            lr=selected.config.lr,
+            checkpoints=checkpoints,
+            test_checkpoints=selected.test_checkpoints,
+        )
+        return self._format_trajectory(
+            trajectory,
+            phase="evaluation",
+            config=selected.config,
+            model=model,
+        )
 
 
 def tuning_configs[T](
@@ -116,15 +185,14 @@ def _report_timings(
 def run_tuning_and_evaluation[T](
     configs: Sequence[RunConfig[T]],
     *,
-    tune: Callable[[RunConfig[T]], pd.DataFrame],
+    runner: ScalingRunner[T],
     select_evaluation_runs: Callable[[pd.DataFrame], Sequence[SelectedRun[T]]],
-    evaluate: Callable[[SelectedRun[T]], pd.DataFrame],
     workers: int,
     progress: bool,
     progress_file: TextIO | None,
 ) -> pd.DataFrame:
     tuning_results = run_many(
-        tune,
+        runner.tune,
         configs,
         workers=workers,
         desc="Tuning (train + validation)",
@@ -137,7 +205,7 @@ def run_tuning_and_evaluation[T](
     tuning = pd.concat(tuning_results, ignore_index=True)
 
     evaluation_results = run_many(
-        evaluate,
+        runner.evaluate,
         select_evaluation_runs(tuning),
         workers=workers,
         desc="Evaluation (retrain + test)",
@@ -163,7 +231,7 @@ def select_evaluation_runs[T](
     if len(experiments) != 1:
         raise ValueError("selected runs require exactly one experiment")
 
-    train_sizes: dict[RunConfig[T], list[int]] = {}
+    test_checkpoints: dict[RunConfig[T], list[int]] = {}
     for row in select_learning_rates(
         tuning,
         curve_columns=schema.curve_columns,
@@ -179,11 +247,11 @@ def select_evaluation_runs[T](
                 lr=row.selected_lr,
                 init_seed=init_seed,
             )
-            train_sizes.setdefault(config, []).append(int(row.train_size))
+            test_checkpoints.setdefault(config, []).append(int(row.train_size))
 
     return tuple(
         SelectedRun(config, tuple(sorted(set(sizes))))
-        for config, sizes in train_sizes.items()
+        for config, sizes in test_checkpoints.items()
     )
 
 

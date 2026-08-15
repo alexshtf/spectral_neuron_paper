@@ -24,19 +24,15 @@ from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.scaling import (
     PROTOCOL,
     RunConfig,
+    ScalingRunner,
     ScalingSchema,
     SeedGrid,
-    SelectedRun,
     run_tuning_and_evaluation,
     tuning_configs,
 )
 from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
 from paper.shuffling import ShuffledEpochs, resolve_train_sizes
-from paper.training import (
-    BINARY_OBJECTIVE,
-    fit_and_test_scaling,
-    tune_scaling_stream,
-)
+from paper.training import BINARY_OBJECTIVE
 from paper.tuning import same_learning_rates, select_learning_rates
 
 
@@ -71,8 +67,6 @@ RESULT_SCHEMA = ScalingSchema(
     validation_metric="val_logloss",
     test_metrics=("test_logloss", "test_brier"),
 )
-
-_TIMING_COLUMNS = ("train_seconds", "val_seconds", "test_seconds")
 
 
 @dataclass(frozen=True)
@@ -161,7 +155,6 @@ def _model_specs(
 
 @dataclass(frozen=True)
 class RunSettings:
-    train_sizes: tuple[int, ...]
     batch_size: int
     encoded_data: dict[PreprocessingKind, EncodedData]
     orders: dict[int, ShuffledEpochs]
@@ -217,6 +210,7 @@ def _make_task_model(
 
 def _metadata(
     config: RunConfig[CriteoModelSpec],
+    _model: nn.Module,
     settings: RunSettings,
 ) -> dict[str, int | float | str]:
     return {
@@ -231,74 +225,6 @@ def _metadata(
         "lr": config.lr,
         "init_seed": config.init_seed,
     }
-
-
-def _format_result(
-    result: pd.DataFrame,
-    *,
-    phase: Literal["tuning", "evaluation"],
-    config: RunConfig[CriteoModelSpec],
-    settings: RunSettings,
-) -> pd.DataFrame:
-    return result.assign(
-        phase=phase,
-        **_metadata(config, settings),
-    ).reindex(columns=(*RESULT_SCHEMA.raw_columns, *_TIMING_COLUMNS))
-
-
-def run_config(
-    config: RunConfig[CriteoModelSpec], settings: RunSettings
-) -> pd.DataFrame:
-    task, model = _make_task_model(config, settings)
-    result = tune_scaling_stream(
-        task,
-        model,
-        objective=BINARY_OBJECTIVE,
-        lr=config.lr,
-        checkpoints=settings.train_sizes,
-    )
-    return _format_result(
-        result,
-        phase="tuning",
-        config=config,
-        settings=settings,
-    )
-
-
-def run_selected(
-    selected: SelectedRun[CriteoModelSpec], settings: RunSettings
-) -> pd.DataFrame:
-    task, model = _make_task_model(selected.config, settings)
-    checkpoints = tuple(
-        size for size in settings.train_sizes if size <= max(selected.train_sizes)
-    )
-    result = fit_and_test_scaling(
-        task,
-        model,
-        objective=BINARY_OBJECTIVE,
-        lr=selected.config.lr,
-        checkpoints=checkpoints,
-        test_checkpoints=selected.train_sizes,
-    )
-    return _format_result(
-        result,
-        phase="evaluation",
-        config=selected.config,
-        settings=settings,
-    )
-
-
-def _select_evaluation_runs(
-    tuning: pd.DataFrame,
-    evaluation_seeds: SeedGrid,
-    model_specs: tuple[CriteoModelSpec, ...],
-) -> tuple[SelectedRun[CriteoModelSpec], ...]:
-    return scaling.select_evaluation_runs(
-        tuning,
-        schema=RESULT_SCHEMA,
-        evaluation_seeds=evaluation_seeds,
-        model_specs={(spec.variant, spec.result_dim): spec for spec in model_specs},
-    )
 
 
 def run_profile(
@@ -364,7 +290,6 @@ def run_profile(
     }
 
     settings = RunSettings(
-        train_sizes=train_sizes,
         batch_size=profile.batch_size,
         encoded_data=encoded_data,
         orders=orders,
@@ -373,15 +298,24 @@ def run_profile(
         preprocessor_seed=profile.preprocessor_seed,
         threads_per_worker=1 if workers > 1 else None,
     )
+    runner = ScalingRunner(
+        schema=RESULT_SCHEMA,
+        checkpoints=train_sizes,
+        objective=BINARY_OBJECTIVE,
+        make_task_model=partial(_make_task_model, settings=settings),
+        metadata=partial(_metadata, settings=settings),
+    )
     results = run_tuning_and_evaluation(
         configs,
-        tune=partial(run_config, settings=settings),
+        runner=runner,
         select_evaluation_runs=partial(
-            _select_evaluation_runs,
+            scaling.select_evaluation_runs,
+            schema=RESULT_SCHEMA,
             evaluation_seeds=profile.evaluation_seeds,
-            model_specs=model_specs,
+            model_specs={
+                (spec.variant, spec.result_dim): spec for spec in model_specs
+            },
         ),
-        evaluate=partial(run_selected, settings=settings),
         workers=workers,
         progress=progress,
         progress_file=progress_file,

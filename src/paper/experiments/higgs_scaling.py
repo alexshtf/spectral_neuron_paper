@@ -16,9 +16,9 @@ from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.scaling import (
     PROTOCOL,
     RunConfig,
+    ScalingRunner,
     ScalingSchema,
     SeedGrid,
-    SelectedRun,
     run_tuning_and_evaluation,
     tuning_configs,
 )
@@ -33,11 +33,7 @@ from paper.higgs import (
 )
 from paper.models import KthEigval
 from paper.shuffling import resolve_train_sizes
-from paper.training import (
-    BINARY_OBJECTIVE,
-    fit_and_test_scaling,
-    tune_scaling_stream,
-)
+from paper.training import BINARY_OBJECTIVE
 from paper.tuning import same_learning_rates, select_learning_rates
 
 
@@ -65,8 +61,6 @@ RESULT_SCHEMA = ScalingSchema(
     validation_metric="val_logloss",
     test_metrics=("test_logloss", "test_brier"),
 )
-
-_TIMING_COLUMNS = ("train_seconds", "val_seconds", "test_seconds")
 
 
 def spectral_parameter_count(input_dim: int, dim: int) -> int:
@@ -248,6 +242,17 @@ def trainable_parameter_count(model: nn.Module) -> int:
     )
 
 
+def _expected_capacity(spec: HiggsModelSpec) -> tuple[int, int]:
+    width = spec.width(NUM_FEATURES)
+    if spec.variant == "linear":
+        return width, NUM_FEATURES + 1
+    if spec.variant == "spectral":
+        assert spec.capacity_dim is not None
+        return width, spectral_parameter_count(NUM_FEATURES, spec.capacity_dim)
+    depth = MLP_DEPTHS[spec.variant]
+    return width, mlp_parameter_count(NUM_FEATURES, width, depth)
+
+
 def _make_seeded_model(spec: HiggsModelSpec, *, init_seed: int) -> nn.Module:
     with torch.random.fork_rng():
         torch.manual_seed(init_seed)
@@ -265,7 +270,10 @@ def make_task_model(
 
 
 def _metadata(
-    config: RunConfig[HiggsModelSpec], model: nn.Module
+    config: RunConfig[HiggsModelSpec],
+    model: nn.Module,
+    *,
+    train_pool_size: int,
 ) -> dict[str, int | float | str]:
     return {
         "protocol": PROTOCOL,
@@ -277,80 +285,8 @@ def _metadata(
         "num_parameters": trainable_parameter_count(model),
         "lr": config.lr,
         "init_seed": config.init_seed,
+        "train_pool_size": train_pool_size,
     }
-
-
-def _format_result(
-    result: pd.DataFrame,
-    *,
-    phase: Literal["tuning", "evaluation"],
-    config: RunConfig[HiggsModelSpec],
-    model: nn.Module,
-    train_pool_size: int,
-) -> pd.DataFrame:
-    return result.assign(
-        phase=phase,
-        train_pool_size=train_pool_size,
-        **_metadata(config, model),
-    ).reindex(columns=(*RESULT_SCHEMA.raw_columns, *_TIMING_COLUMNS))
-
-
-def run_config(
-    config: RunConfig[HiggsModelSpec], settings: RunSettings
-) -> pd.DataFrame:
-    task, model = make_task_model(config, settings)
-    result = tune_scaling_stream(
-        task,
-        model,
-        objective=BINARY_OBJECTIVE,
-        lr=config.lr,
-        checkpoints=settings.train_sizes,
-    )
-    return _format_result(
-        result,
-        phase="tuning",
-        config=config,
-        model=model,
-        train_pool_size=settings.corpus.train_stop,
-    )
-
-
-def run_selected(
-    selected: SelectedRun[HiggsModelSpec], settings: RunSettings
-) -> pd.DataFrame:
-    config = selected.config
-    task, model = make_task_model(config, settings)
-    checkpoints = tuple(
-        size for size in settings.train_sizes if size <= max(selected.train_sizes)
-    )
-    result = fit_and_test_scaling(
-        task,
-        model,
-        objective=BINARY_OBJECTIVE,
-        lr=config.lr,
-        checkpoints=checkpoints,
-        test_checkpoints=selected.train_sizes,
-    )
-    return _format_result(
-        result,
-        phase="evaluation",
-        config=config,
-        model=model,
-        train_pool_size=settings.corpus.train_stop,
-    )
-
-
-def _select_evaluation_runs(
-    tuning: pd.DataFrame,
-    evaluation_seeds: SeedGrid,
-    model_specs: tuple[HiggsModelSpec, ...],
-) -> tuple[SelectedRun[HiggsModelSpec], ...]:
-    return scaling.select_evaluation_runs(
-        tuning,
-        schema=RESULT_SCHEMA,
-        evaluation_seeds=evaluation_seeds,
-        model_specs={(spec.variant, spec.result_dim): spec for spec in model_specs},
-    )
 
 
 def run_profile(
@@ -398,15 +334,24 @@ def run_profile(
         corpus=corpus,
         threads_per_worker=1 if workers > 1 else None,
     )
+    runner = ScalingRunner(
+        schema=RESULT_SCHEMA,
+        checkpoints=train_sizes,
+        objective=BINARY_OBJECTIVE,
+        make_task_model=partial(make_task_model, settings=settings),
+        metadata=partial(_metadata, train_pool_size=corpus.train_stop),
+    )
     results = run_tuning_and_evaluation(
         configs,
-        tune=partial(run_config, settings=settings),
+        runner=runner,
         select_evaluation_runs=partial(
-            _select_evaluation_runs,
+            scaling.select_evaluation_runs,
+            schema=RESULT_SCHEMA,
             evaluation_seeds=profile.evaluation_seeds,
-            model_specs=model_specs,
+            model_specs={
+                (spec.variant, spec.result_dim): spec for spec in model_specs
+            },
         ),
-        evaluate=partial(run_selected, settings=settings),
         workers=workers,
         progress=progress,
         progress_file=progress_file,
@@ -420,17 +365,6 @@ def select_evaluations(raw: pd.DataFrame) -> pd.DataFrame:
 
 def summarize_evaluations(evaluations: pd.DataFrame) -> pd.DataFrame:
     return scaling.summarize_evaluations(evaluations, schema=RESULT_SCHEMA)
-
-
-def _expected_capacity(spec: HiggsModelSpec) -> tuple[int, int]:
-    width = spec.width(NUM_FEATURES)
-    if spec.variant == "linear":
-        return width, NUM_FEATURES + 1
-    if spec.variant == "spectral":
-        assert spec.capacity_dim is not None
-        return width, spectral_parameter_count(NUM_FEATURES, spec.capacity_dim)
-    depth = MLP_DEPTHS[spec.variant]
-    return width, mlp_parameter_count(NUM_FEATURES, width, depth)
 
 
 def validate_raw(

@@ -12,9 +12,9 @@ from paper.training import (
     evaluate_on,
     evaluate_regression,
     fit_and_evaluate,
-    fit_and_test_scaling,
+    fit_test_trajectory,
+    fit_validation_trajectory,
     train_events,
-    tune_scaling_stream,
 )
 
 
@@ -270,7 +270,7 @@ def test_binary_scaling_tests_only_selected_checkpoints():
                 torch.zeros(1),
             )
 
-    result = fit_and_test_scaling(
+    result = fit_test_trajectory(
         RecordingTask(),
         SparseLinear(num_features=1, num_fields=1),
         objective=BINARY_OBJECTIVE,
@@ -301,7 +301,7 @@ def test_binary_tuning_evaluates_every_checkpoint():
             validation_calls += 1
             yield (torch.zeros(1, 1, dtype=torch.long),), torch.zeros(1)
 
-    result = tune_scaling_stream(
+    result = fit_validation_trajectory(
         Task(),
         SparseLinear(num_features=1, num_fields=1),
         objective=BINARY_OBJECTIVE,
@@ -338,14 +338,14 @@ def test_regression_scaling_keeps_validation_and_test_separate():
     def model():
         return nn.Sequential(nn.Linear(1, 1), nn.Flatten(start_dim=0))
 
-    tuning = tune_scaling_stream(
+    tuning = fit_validation_trajectory(
         Task(),
         model(),
         objective=REGRESSION_OBJECTIVE,
         lr=0.1,
         checkpoints=(3, 5, 7),
     )
-    testing = fit_and_test_scaling(
+    testing = fit_test_trajectory(
         Task(),
         model(),
         objective=REGRESSION_OBJECTIVE,
