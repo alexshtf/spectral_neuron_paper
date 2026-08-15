@@ -1,3 +1,4 @@
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -8,6 +9,23 @@ type WriteMode = Literal["overwrite", "append"]
 
 DEFAULT_RUNS_DIR = Path("notebooks") / "runs"
 WRITE_MODES: tuple[WriteMode, ...] = ("overwrite", "append")
+
+
+def summarize_quantiles(
+    rows: pd.DataFrame,
+    *,
+    group_columns: Sequence[str],
+    metrics: Sequence[str],
+) -> pd.DataFrame:
+    metrics = tuple(metrics)
+    aggregations: dict[str, tuple[str, str | Callable]] = {}
+    for metric in metrics:
+        aggregations[f"median_{metric}"] = (metric, "median")
+        aggregations[f"q25_{metric}"] = (metric, lambda s: s.quantile(0.25))
+        aggregations[f"q75_{metric}"] = (metric, lambda s: s.quantile(0.75))
+    aggregations["n"] = (metrics[0], "size")
+
+    return rows.groupby(list(group_columns)).agg(**aggregations).reset_index()
 
 
 def write_csv(

@@ -21,7 +21,7 @@ from paper.experiments.higgs_robustness import (
     validate_results,
 )
 from paper.experiments.higgs_scaling import (
-    RAW_COLUMNS,
+    RESULT_SCHEMA,
     HiggsModelSpec,
     Profile,
     SeedGrid,
@@ -105,7 +105,7 @@ def _scaling_results(profile: Profile) -> pd.DataFrame:
                 "test_brier": 0.25,
             }
         )
-    return pd.DataFrame(rows).loc[:, RAW_COLUMNS]
+    return pd.DataFrame(rows).loc[:, RESULT_SCHEMA.raw_columns]
 
 
 def _write_tiny_higgs(path: Path) -> None:

@@ -22,7 +22,7 @@ from paper.criteo import (
     prepare_encoded_data,
 )
 from paper.experiments.criteo_scaling import (
-    RAW_COLUMNS,
+    RESULT_SCHEMA,
     CriteoModelSpec,
     Profile,
     SeedGrid,
@@ -419,7 +419,7 @@ def test_tiny_profile_runs_end_to_end(tmp_path):
     assert set(raw["phase"]) == {"tuning", "evaluation"}
     assert set(raw["preprocessor_sample_size"]) == {8}
     assert set(raw["train_pool_size"]) == {80}
-    assert set(RAW_COLUMNS) == set(raw.columns)
+    assert tuple(raw.columns) == RESULT_SCHEMA.raw_columns
     tuning = raw.loc[raw["phase"] == "tuning"]
     evaluation = raw.loc[raw["phase"] == "evaluation"]
     assert np.isfinite(tuning["val_logloss"]).all()

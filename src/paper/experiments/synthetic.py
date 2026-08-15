@@ -10,8 +10,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-from paper.experiments import scaling
-from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
+from paper.experiments.results import (
+    DEFAULT_RUNS_DIR,
+    WRITE_MODES,
+    summarize_quantiles,
+    write_csv,
+)
 from paper.experiments.runner import run_many
 from paper.models import ModelKind, ModelSpec, make_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
@@ -288,10 +292,10 @@ def select_evaluations(checkpoints: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_evaluations(evaluations: pd.DataFrame) -> pd.DataFrame:
-    return scaling.summarize_evaluations(
+    return summarize_quantiles(
         evaluations,
-        curve_columns=CURVE_COLUMNS,
-        quantile_metrics=("test_rmse",),
+        group_columns=(*CURVE_COLUMNS, "selected_lr"),
+        metrics=("test_rmse",),
     )
 
 

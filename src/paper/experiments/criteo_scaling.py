@@ -24,6 +24,7 @@ from paper.experiments.results import DEFAULT_RUNS_DIR, WRITE_MODES, write_csv
 from paper.experiments.scaling import (
     PROTOCOL,
     RunConfig,
+    ScalingSchema,
     SeedGrid,
     SelectedRun,
     run_tuning_and_evaluation,
@@ -57,45 +58,21 @@ VARIANTS: tuple[Variant, ...] = (
 
 OPTIMIZER = "adam+sparseadam"
 
-IDENTITY_COLUMNS = [
-    "protocol",
-    "optimizer",
-    "preprocessor_sample_size",
-    "preprocessor_seed",
-    "train_pool_size",
-    "phase",
-    "train_size",
-    "data_seed",
-    "model",
-    "dim",
-    "lr",
-    "init_seed",
-]
+RESULT_SCHEMA = ScalingSchema(
+    experiment_columns=(
+        "protocol",
+        "optimizer",
+        "preprocessor_sample_size",
+        "preprocessor_seed",
+        "train_pool_size",
+    ),
+    model_columns=("model", "dim"),
+    model_spec_columns=("model", "dim"),
+    validation_metric="val_logloss",
+    test_metrics=("test_logloss", "test_brier"),
+)
 
-METRIC_COLUMNS = [
-    "val_logloss",
-    "test_logloss",
-    "test_brier",
-]
-
-RAW_COLUMNS = IDENTITY_COLUMNS + METRIC_COLUMNS
-
-_TIMING_COLUMNS = ["train_seconds", "val_seconds", "test_seconds"]
-
-EXPERIMENT_COLUMNS = [
-    "protocol",
-    "optimizer",
-    "preprocessor_sample_size",
-    "preprocessor_seed",
-    "train_pool_size",
-]
-
-MODEL_COLUMNS = EXPERIMENT_COLUMNS + [
-    "model",
-    "dim",
-]
-
-CURVE_COLUMNS = MODEL_COLUMNS + ["train_size"]
+_TIMING_COLUMNS = ("train_seconds", "val_seconds", "test_seconds")
 
 
 @dataclass(frozen=True)
@@ -266,7 +243,7 @@ def _format_result(
     return result.assign(
         phase=phase,
         **_metadata(config, settings),
-    ).reindex(columns=RAW_COLUMNS + _TIMING_COLUMNS)
+    ).reindex(columns=(*RESULT_SCHEMA.raw_columns, *_TIMING_COLUMNS))
 
 
 def run_config(
@@ -318,11 +295,8 @@ def _select_evaluation_runs(
 ) -> tuple[SelectedRun[CriteoModelSpec], ...]:
     return scaling.select_evaluation_runs(
         tuning,
-        experiment_columns=EXPERIMENT_COLUMNS,
-        curve_columns=CURVE_COLUMNS,
-        validation_metric="val_logloss",
+        schema=RESULT_SCHEMA,
         evaluation_seeds=evaluation_seeds,
-        model_columns=("model", "dim"),
         model_specs={(spec.variant, spec.result_dim): spec for spec in model_specs},
     )
 
@@ -412,23 +386,15 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    return results.reindex(columns=RAW_COLUMNS)
+    return results.reindex(columns=RESULT_SCHEMA.raw_columns)
 
 
 def select_evaluations(raw: pd.DataFrame) -> pd.DataFrame:
-    return scaling.select_evaluations(
-        raw,
-        curve_columns=CURVE_COLUMNS,
-        validation_metric="val_logloss",
-    )
+    return scaling.select_evaluations(raw, schema=RESULT_SCHEMA)
 
 
 def summarize_evaluations(evaluations: pd.DataFrame) -> pd.DataFrame:
-    return scaling.summarize_evaluations(
-        evaluations,
-        curve_columns=CURVE_COLUMNS,
-        quantile_metrics=("test_logloss", "test_brier"),
-    )
+    return scaling.summarize_evaluations(evaluations, schema=RESULT_SCHEMA)
 
 
 def validate_raw(
@@ -439,9 +405,9 @@ def validate_raw(
     """Validate that raw results are a complete Criteo profile run."""
     if variant is not None and variant not in VARIANTS:
         raise ValueError(f"unknown variant {variant!r}")
-    if list(raw.columns) != RAW_COLUMNS:
+    if tuple(raw.columns) != RESULT_SCHEMA.raw_columns:
         raise ValueError("incompatible Criteo result schema")
-    if raw[IDENTITY_COLUMNS].isna().any().any():
+    if raw[list(RESULT_SCHEMA.identity_columns)].isna().any().any():
         raise ValueError("Criteo run identity columns must not contain missing values")
     if set(raw["protocol"]) != {PROTOCOL}:
         raise ValueError(f"expected protocol={PROTOCOL!r}")
@@ -459,7 +425,7 @@ def validate_raw(
         raise ValueError("preprocessor seed does not match the profile")
     if set(raw["phase"]) != {"tuning", "evaluation"}:
         raise ValueError("results must contain tuning and evaluation phases")
-    if raw.duplicated(IDENTITY_COLUMNS).any():
+    if raw.duplicated(list(RESULT_SCHEMA.identity_columns)).any():
         raise ValueError("results contain duplicate trajectory checkpoints")
 
     variants = (variant,) if variant is not None else VARIANTS
@@ -494,24 +460,26 @@ def validate_raw(
     evaluation = raw.loc[raw["phase"] == "evaluation"]
     for phase, rows in (("tuning", tuning), ("evaluation", evaluation)):
         observed_curves = set(
-            rows[CURVE_COLUMNS].drop_duplicates().itertuples(index=False, name=None)
+            rows[list(RESULT_SCHEMA.curve_columns)]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
         )
         if observed_curves != expected_curves:
             raise ValueError(f"{phase} has an incomplete model/checkpoint grid")
 
-    if tuning[["test_logloss", "test_brier"]].notna().any().any():
+    if tuning[list(RESULT_SCHEMA.test_metrics)].notna().any().any():
         raise ValueError("tuning rows must not contain test metrics")
-    if evaluation["val_logloss"].notna().any():
+    if evaluation[RESULT_SCHEMA.validation_metric].notna().any():
         raise ValueError("evaluation rows must not contain validation metrics")
     if not np.isfinite(
-        evaluation[["test_logloss", "test_brier"]].to_numpy(dtype=float)
+        evaluation[list(RESULT_SCHEMA.test_metrics)].to_numpy(dtype=float)
     ).all():
         raise ValueError("evaluation test metrics must be finite")
 
     if not same_learning_rates(tuning["lr"], profile.lrs):
         raise ValueError("tuning learning-rate grid does not match the profile")
     tuning_seeds = set(profile.tuning_seeds)
-    for curve, rows in tuning.groupby(CURVE_COLUMNS):
+    for curve, rows in tuning.groupby(list(RESULT_SCHEMA.curve_columns)):
         if not same_learning_rates(rows["lr"], profile.lrs):
             raise ValueError(f"incomplete tuning learning-rate grid for {curve}")
         for lr, lr_rows in rows.groupby("lr"):
@@ -522,15 +490,17 @@ def validate_raw(
                 raise ValueError(f"incomplete tuning seeds for {curve}, lr={lr:g}")
 
     selected_lrs = {
-        tuple(getattr(row, column) for column in CURVE_COLUMNS): row.selected_lr
+        tuple(getattr(row, column) for column in RESULT_SCHEMA.curve_columns): (
+            row.selected_lr
+        )
         for row in select_learning_rates(
             tuning,
-            curve_columns=CURVE_COLUMNS,
-            validation_metric="val_logloss",
+            curve_columns=RESULT_SCHEMA.curve_columns,
+            validation_metric=RESULT_SCHEMA.validation_metric,
         ).itertuples(index=False)
     }
     evaluation_seeds = set(profile.evaluation_seeds)
-    for curve, rows in evaluation.groupby(CURVE_COLUMNS):
+    for curve, rows in evaluation.groupby(list(RESULT_SCHEMA.curve_columns)):
         seeds = set(rows[["data_seed", "init_seed"]].itertuples(index=False, name=None))
         if seeds != evaluation_seeds:
             raise ValueError(f"incomplete evaluation seeds for {curve}")

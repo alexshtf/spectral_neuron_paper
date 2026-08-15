@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from paper.experiments.scaling import (
+    ScalingSchema,
     SeedGrid,
     select_evaluation_runs,
     select_evaluations,
@@ -12,8 +13,13 @@ from paper.experiments.scaling import (
 )
 
 
-EXPERIMENT_COLUMNS = ["protocol"]
-CURVE_COLUMNS = [*EXPERIMENT_COLUMNS, "model", "dim", "train_size"]
+RESULT_SCHEMA = ScalingSchema(
+    experiment_columns=("protocol",),
+    model_columns=("model", "dim"),
+    model_spec_columns=("model", "dim"),
+    validation_metric="val_loss",
+    test_metrics=("test_loss",),
+)
 
 
 def _tuning() -> pd.DataFrame:
@@ -50,14 +56,11 @@ def test_evaluation_runs_coalesce_checkpoints_with_the_same_learning_rate():
     with pytest.warns(RuntimeWarning, match="nonfinite"):
         runs = select_evaluation_runs(
             _tuning(),
-            experiment_columns=EXPERIMENT_COLUMNS,
-            curve_columns=CURVE_COLUMNS,
-            validation_metric="val_loss",
+            schema=RESULT_SCHEMA,
             evaluation_seeds=SeedGrid(
                 data_seeds=range(2, 4),
                 init_seeds=range(5, 6),
             ),
-            model_columns=("model", "dim"),
             model_specs={("spectral", 3): ModelSpec("spectral", 3)},
         )
 
@@ -82,11 +85,8 @@ def test_evaluation_run_selection_rejects_mixed_experiments():
     with pytest.raises(ValueError, match="exactly one experiment"):
         select_evaluation_runs(
             tuning,
-            experiment_columns=EXPERIMENT_COLUMNS,
-            curve_columns=CURVE_COLUMNS,
-            validation_metric="val_loss",
+            schema=RESULT_SCHEMA,
             evaluation_seeds=SeedGrid(),
-            model_columns=("model", "dim"),
             model_specs={("spectral", 3): ModelSpec("spectral", 3)},
         )
 
@@ -127,13 +127,11 @@ def test_evaluation_summary_uses_only_selected_learning_rate_rows():
 
     selected = select_evaluations(
         pd.concat((tuning, evaluation), ignore_index=True),
-        curve_columns=CURVE_COLUMNS,
-        validation_metric="val_loss",
+        schema=RESULT_SCHEMA,
     )
     summary = summarize_evaluations(
         selected,
-        curve_columns=CURVE_COLUMNS,
-        quantile_metrics=("test_loss",),
+        schema=RESULT_SCHEMA,
     ).iloc[0]
 
     assert summary[

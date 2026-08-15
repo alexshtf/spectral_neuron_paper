@@ -8,11 +8,48 @@ from typing import TextIO
 import pandas as pd
 from tqdm import tqdm
 
+from paper.experiments.results import summarize_quantiles
 from paper.experiments.runner import run_many
-from paper.tuning import select_learning_rates, select_rows_at_learning_rates
+from paper.tuning import (
+    select_learning_rates,
+    select_rows_at_learning_rates,
+)
 
 
 PROTOCOL = "repeated_shuffle"
+
+
+@dataclass(frozen=True)
+class ScalingSchema:
+    experiment_columns: tuple[str, ...]
+    model_columns: tuple[str, ...]
+    model_spec_columns: tuple[str, ...]
+    validation_metric: str
+    test_metrics: tuple[str, ...]
+
+    @property
+    def identity_columns(self) -> tuple[str, ...]:
+        return (
+            *self.experiment_columns,
+            "phase",
+            "train_size",
+            "data_seed",
+            *self.model_columns,
+            "lr",
+            "init_seed",
+        )
+
+    @property
+    def curve_columns(self) -> tuple[str, ...]:
+        return (*self.experiment_columns, *self.model_columns, "train_size")
+
+    @property
+    def raw_columns(self) -> tuple[str, ...]:
+        return (
+            *self.identity_columns,
+            self.validation_metric,
+            *self.test_metrics,
+        )
 
 
 @dataclass(frozen=True)
@@ -118,24 +155,23 @@ def run_tuning_and_evaluation[T](
 def select_evaluation_runs[T](
     tuning: pd.DataFrame,
     *,
-    experiment_columns: Sequence[str],
-    curve_columns: Sequence[str],
-    validation_metric: str,
+    schema: ScalingSchema,
     evaluation_seeds: SeedGrid,
-    model_columns: Sequence[str],
     model_specs: Mapping[tuple[object, ...], T],
 ) -> tuple[SelectedRun[T], ...]:
-    experiments = tuning[list(experiment_columns)].drop_duplicates()
+    experiments = tuning[list(schema.experiment_columns)].drop_duplicates()
     if len(experiments) != 1:
         raise ValueError("selected runs require exactly one experiment")
 
     train_sizes: dict[RunConfig[T], list[int]] = {}
     for row in select_learning_rates(
         tuning,
-        curve_columns=curve_columns,
-        validation_metric=validation_metric,
+        curve_columns=schema.curve_columns,
+        validation_metric=schema.validation_metric,
     ).itertuples(index=False):
-        model_key = tuple(getattr(row, column) for column in model_columns)
+        model_key = tuple(
+            getattr(row, column) for column in schema.model_spec_columns
+        )
         for data_seed, init_seed in evaluation_seeds:
             config = RunConfig(
                 data_seed=data_seed,
@@ -154,38 +190,27 @@ def select_evaluation_runs[T](
 def select_evaluations(
     raw: pd.DataFrame,
     *,
-    curve_columns: Sequence[str],
-    validation_metric: str,
+    schema: ScalingSchema,
 ) -> pd.DataFrame:
-    curve_columns = list(curve_columns)
     learning_rates = select_learning_rates(
         raw.loc[raw["phase"] == "tuning"],
-        curve_columns=curve_columns,
-        validation_metric=validation_metric,
+        curve_columns=schema.curve_columns,
+        validation_metric=schema.validation_metric,
     )
     return select_rows_at_learning_rates(
         raw.loc[raw["phase"] == "evaluation"],
         learning_rates,
-        curve_columns=curve_columns,
+        curve_columns=schema.curve_columns,
     )
 
 
 def summarize_evaluations(
     evaluations: pd.DataFrame,
     *,
-    curve_columns: Sequence[str],
-    quantile_metrics: Sequence[str],
+    schema: ScalingSchema,
 ) -> pd.DataFrame:
-    quantile_metrics = tuple(quantile_metrics)
-    aggregations: dict[str, tuple[str, str | Callable]] = {}
-    for metric in quantile_metrics:
-        aggregations[f"median_{metric}"] = (metric, "median")
-        aggregations[f"q25_{metric}"] = (metric, lambda s: s.quantile(0.25))
-        aggregations[f"q75_{metric}"] = (metric, lambda s: s.quantile(0.75))
-    aggregations["n"] = (quantile_metrics[0], "size")
-
-    return (
-        evaluations.groupby([*curve_columns, "selected_lr"])
-        .agg(**aggregations)
-        .reset_index()
+    return summarize_quantiles(
+        evaluations,
+        group_columns=(*schema.curve_columns, "selected_lr"),
+        metrics=schema.test_metrics,
     )

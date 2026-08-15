@@ -12,10 +12,9 @@ import pandas as pd
 import torch
 
 from paper.experiments.higgs_scaling import (
-    CURVE_COLUMNS,
-    EXPERIMENT_COLUMNS,
     OPTIMIZER,
     PROFILES,
+    RESULT_SCHEMA,
     HiggsModelSpec,
     Profile,
     RunSettings,
@@ -125,11 +124,8 @@ def selected_configs(
         selected.config
         for selected in select_evaluation_runs(
             tuning,
-            experiment_columns=EXPERIMENT_COLUMNS,
-            curve_columns=CURVE_COLUMNS,
-            validation_metric="val_logloss",
+            schema=RESULT_SCHEMA,
             evaluation_seeds=profile.evaluation_seeds,
-            model_columns=("model", "dim"),
             model_specs={
                 ("spectral", capacity_dim): HiggsModelSpec(
                     "spectral", capacity_dim

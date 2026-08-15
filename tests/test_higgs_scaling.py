@@ -6,8 +6,7 @@ import pytest
 import torch
 
 from paper.experiments.higgs_scaling import (
-    CURVE_COLUMNS,
-    RAW_COLUMNS,
+    RESULT_SCHEMA,
     VARIANTS,
     HiggsModelSpec,
     Profile,
@@ -203,7 +202,7 @@ def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_r
     selected = select_evaluations(raw)
     summary = summarize_evaluations(selected)
 
-    assert list(raw.columns) == RAW_COLUMNS
+    assert tuple(raw.columns) == RESULT_SCHEMA.raw_columns
     assert set(raw["model"]) == set(VARIANTS)
     assert set(raw["phase"]) == {"tuning", "evaluation"}
     assert set(raw["protocol"]) == {"repeated_shuffle"}
@@ -220,23 +219,12 @@ def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_r
     assert evaluation[["test_logloss", "test_brier"]].notna().all().all()
     winners = select_learning_rates(
         tuning,
-        curve_columns=CURVE_COLUMNS,
-        validation_metric="val_logloss",
-    ).set_index(CURVE_COLUMNS)["selected_lr"]
-    actual = evaluation.set_index(CURVE_COLUMNS)["lr"]
+        curve_columns=RESULT_SCHEMA.curve_columns,
+        validation_metric=RESULT_SCHEMA.validation_metric,
+    ).set_index(list(RESULT_SCHEMA.curve_columns))["selected_lr"]
+    actual = evaluation.set_index(list(RESULT_SCHEMA.curve_columns))["lr"]
     assert np.allclose(actual, winners.loc[actual.index])
-    identity = [
-        "phase",
-        "train_pool_size",
-        "train_size",
-        "data_seed",
-        "model",
-        "dim",
-        "width",
-        "num_parameters",
-        "lr",
-        "init_seed",
-    ]
+    identity = list(RESULT_SCHEMA.identity_columns)
     assert raw[identity].notna().all().all()
     assert not raw.duplicated(identity).any()
     assert len(tuning) == 20
