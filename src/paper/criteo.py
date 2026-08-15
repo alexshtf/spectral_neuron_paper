@@ -6,10 +6,10 @@ import tempfile
 from compression import zstd
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass, field
 from hashlib import file_digest
 from pathlib import Path
-from typing import ClassVar, Literal, TextIO
+from typing import ClassVar, Literal, NamedTuple, TextIO
 from uuid import uuid4
 
 import numpy as np
@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from paper.compression import ZSTD_LEVEL, open_dataset_file
 from paper.shuffling import ShuffledEpochs
+from paper.tasks import Batch
 
 
 NUM_NUMERIC_FIELDS = 13
@@ -154,8 +155,8 @@ def prepare_corpus(
                         categoricals = np.empty(
                             (len(chunk), NUM_CATEGORICAL_FIELDS), dtype=np.uint32
                         )
-                        for field, column in enumerate(CATEGORICAL_COLUMNS):
-                            categoricals[:, field] = _parse_hex(chunk[column])
+                        for field_index, column in enumerate(CATEGORICAL_COLUMNS):
+                            categoricals[:, field_index] = _parse_hex(chunk[column])
 
                         _parse_numerics(chunk).tofile(numeric_file)
                         categoricals.tofile(categorical_file)
@@ -224,6 +225,17 @@ class CriteoCorpus:
         return ShuffledEpochs(self.cache_dir, self.train_stop, seed)
 
 
+def _lookup_vocabulary(
+    values: np.ndarray,
+    vocabulary: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    positions = np.searchsorted(vocabulary, values)
+    in_bounds = positions < len(vocabulary)
+    known = np.zeros(values.shape, dtype=bool)
+    known[in_bounds] = vocabulary[positions[in_bounds]] == values[in_bounds]
+    return positions, known
+
+
 def _categorical_ids(
     values: np.ndarray,
     vocabulary: np.ndarray,
@@ -231,12 +243,27 @@ def _categorical_ids(
     offset: int,
 ) -> np.ndarray:
     encoded = np.full(values.shape, offset + 1, dtype=np.int32)
-    positions = np.searchsorted(vocabulary, values)
-    known = positions < len(vocabulary)
-    known[known] = vocabulary[positions[known]] == values[known]
+    positions, known = _lookup_vocabulary(values, vocabulary)
     encoded[known] = offset + 2 + positions[known]
     encoded[values == 0] = offset
     return encoded
+
+
+def _encode_categorical_fields(
+    categoricals: np.ndarray,
+    vocabularies: tuple[np.ndarray, ...],
+    offsets: np.ndarray,
+    *,
+    out: np.ndarray,
+) -> None:
+    for field_index, (vocabulary, offset) in enumerate(
+        zip(vocabularies, offsets, strict=True)
+    ):
+        out[..., field_index] = _categorical_ids(
+            categoricals[..., field_index],
+            vocabulary,
+            offset=int(offset),
+        )
 
 
 def _categorical_sizes(
@@ -301,7 +328,7 @@ class BucketPreprocessor:
         buckets = _bucket_numeric(numerics)
         offsets = self.field_offsets
 
-        for field, (offset, minimum, maximum) in enumerate(
+        for field_index, (offset, minimum, maximum) in enumerate(
             zip(
                 offsets[:NUM_NUMERIC_FIELDS],
                 self.numeric_minimums,
@@ -309,27 +336,21 @@ class BucketPreprocessor:
                 strict=True,
             )
         ):
-            raw = numerics[..., field]
-            values = buckets[..., field]
-            ids = feature_ids[..., field]
+            raw = numerics[..., field_index]
+            values = buckets[..., field_index]
+            ids = feature_ids[..., field_index]
             ids.fill(offset + 1)
             present = raw != MISSING_NUMERIC
             known = present & (minimum <= values) & (values <= maximum)
             ids[known] = offset + 2 + values[known] - minimum
             ids[~present] = offset
 
-        for category, (offset, vocabulary) in enumerate(
-            zip(
-                offsets[NUM_NUMERIC_FIELDS:],
-                self.categorical_vocabularies,
-                strict=True,
-            )
-        ):
-            feature_ids[..., NUM_NUMERIC_FIELDS + category] = _categorical_ids(
-                categoricals[..., category],
-                vocabulary,
-                offset=int(offset),
-            )
+        _encode_categorical_fields(
+            categoricals,
+            self.categorical_vocabularies,
+            offsets[NUM_NUMERIC_FIELDS:],
+            out=feature_ids[..., NUM_NUMERIC_FIELDS:],
+        )
 
         return feature_ids, None
 
@@ -376,23 +397,23 @@ class HybridPreprocessor:
         feature_values = np.ones(shape, dtype=np.float32)
         offsets = self.field_offsets
 
-        for field, (offset, negatives) in enumerate(
+        for field_index, (offset, negatives) in enumerate(
             zip(
                 offsets[:NUM_NUMERIC_FIELDS],
                 self.negative_values,
                 strict=True,
             )
         ):
-            raw = numerics[..., field]
-            ids = feature_ids[..., field]
-            values = feature_values[..., field]
+            raw = numerics[..., field_index]
+            ids = feature_ids[..., field_index]
+            values = feature_values[..., field_index]
             positive_id = int(offset + 3 + len(negatives))
 
             ids.fill(positive_id)
             positive = raw > 0
             values[positive] = (
-                (np.log1p(raw[positive]) - self.positive_mean[field])
-                / self.positive_scale[field]
+                (np.log1p(raw[positive]) - self.positive_mean[field_index])
+                / self.positive_scale[field_index]
             ).astype(np.float32)
 
             missing = raw == MISSING_NUMERIC
@@ -402,25 +423,16 @@ class HybridPreprocessor:
             ids[zero] = offset + 1
             ids[negative] = offset + 2
 
-            positions = np.searchsorted(negatives, raw)
-            valid = positions < len(negatives)
-            known = negative & valid
-            known[valid] &= negatives[positions[valid]] == raw[valid]
+            positions, in_vocabulary = _lookup_vocabulary(raw, negatives)
+            known = negative & in_vocabulary
             ids[known] = offset + 3 + positions[known]
 
-        for category, (offset, vocabulary) in enumerate(
-            zip(
-                offsets[NUM_NUMERIC_FIELDS:],
-                self.categorical_vocabularies,
-                strict=True,
-            )
-        ):
-            field = NUM_NUMERIC_FIELDS + category
-            feature_ids[..., field] = _categorical_ids(
-                categoricals[..., category],
-                vocabulary,
-                offset=int(offset),
-            )
+        _encode_categorical_fields(
+            categoricals,
+            self.categorical_vocabularies,
+            offsets[NUM_NUMERIC_FIELDS:],
+            out=feature_ids[..., NUM_NUMERIC_FIELDS:],
+        )
 
         return feature_ids, feature_values
 
@@ -501,7 +513,7 @@ def fit_preprocessors(
     )
     rows.sort()
     categoricals = corpus.categoricals()
-    fields = tqdm(
+    field_indices = tqdm(
         range(NUM_CATEGORICAL_FIELDS),
         desc=f"Fitting categorical vocabulary on {sample_size:,} rows",
         unit="field",
@@ -510,8 +522,10 @@ def fit_preprocessors(
         dynamic_ncols=True,
     )
     categorical_vocabularies = []
-    for field in fields:
-        values, counts = np.unique(categoricals[rows, field], return_counts=True)
+    for field_index in field_indices:
+        values, counts = np.unique(
+            categoricals[rows, field_index], return_counts=True
+        )
         categorical_vocabularies.append(values[(values != 0) & (counts >= min_count)])
     vocabularies = tuple(categorical_vocabularies)
 
@@ -521,7 +535,7 @@ def fit_preprocessors(
     positive_mean = np.empty(NUM_NUMERIC_FIELDS)
     positive_scale = np.empty(NUM_NUMERIC_FIELDS)
     numerics = corpus.numerics()
-    fields = tqdm(
+    field_indices = tqdm(
         range(NUM_NUMERIC_FIELDS),
         desc=f"Fitting numeric preprocessing on {sample_size:,} rows",
         unit="field",
@@ -529,21 +543,21 @@ def fit_preprocessors(
         file=progress_file,
         dynamic_ncols=True,
     )
-    for field in fields:
-        values = numerics[rows, field]
+    for field_index in field_indices:
+        values = numerics[rows, field_index]
         if "bucket" in missing:
             present = values != MISSING_NUMERIC
             buckets = _bucket_numeric(values[present])
-            numeric_minimums[field] = buckets.min()
-            numeric_maximums[field] = buckets.max()
+            numeric_minimums[field_index] = buckets.min()
+            numeric_maximums[field_index] = buckets.max()
         if "hybrid" in missing:
             negative_values.append(
                 np.unique(values[(values < 0) & (values != MISSING_NUMERIC)])
             )
             logged = np.log1p(values[values > 0].astype(np.float64))
-            positive_mean[field] = logged.mean() if len(logged) else 0.0
+            positive_mean[field_index] = logged.mean() if len(logged) else 0.0
             scale = logged.std() if len(logged) else 1.0
-            positive_scale[field] = scale if scale > 0 else 1.0
+            positive_scale[field_index] = scale if scale > 0 else 1.0
 
     if "bucket" in missing:
         _save_preprocessor(
@@ -569,20 +583,24 @@ def fit_preprocessors(
     return paths
 
 
-type BinaryBatch = tuple[tuple[torch.Tensor, ...], torch.Tensor]
-type EncodedArrays = tuple[np.ndarray, np.ndarray | None, np.ndarray]
+class EncodedSplit(NamedTuple):
+    feature_ids: np.ndarray
+    feature_values: np.ndarray | None
+    labels: np.ndarray
 
 
-def load_encoded(path: Path) -> EncodedArrays:
+def load_encoded(path: Path) -> EncodedSplit:
     values_path = path / "feature_values.npy"
-    return (
-        np.load(path / "feature_ids.npy", mmap_mode="c", allow_pickle=False),
-        (
+    return EncodedSplit(
+        feature_ids=np.load(
+            path / "feature_ids.npy", mmap_mode="c", allow_pickle=False
+        ),
+        feature_values=(
             np.load(values_path, mmap_mode="c", allow_pickle=False)
             if values_path.exists()
             else None
         ),
-        np.load(path / "labels.npy", mmap_mode="c", allow_pickle=False),
+        labels=np.load(path / "labels.npy", mmap_mode="c", allow_pickle=False),
     )
 
 
@@ -590,8 +608,8 @@ def load_encoded(path: Path) -> EncodedArrays:
 class EncodedData:
     num_features: int
     field_offsets: tuple[int, ...]
-    train: Path
-    holdout: Path
+    train_path: Path
+    holdout_path: Path
     validation_rows: int
 
 
@@ -738,14 +756,14 @@ def prepare_encoded_data(
             progress_file=progress_file,
         )
 
-    train = prepare("train", range(corpus.train_stop))
-    holdout = prepare("holdout", range(corpus.train_stop, corpus.rows))
+    train_path = prepare("train", range(corpus.train_stop))
+    holdout_path = prepare("holdout", range(corpus.train_stop, corpus.rows))
 
     return EncodedData(
         num_features=preprocessor.num_features,
         field_offsets=tuple(map(int, field_offsets)),
-        train=train,
-        holdout=holdout,
+        train_path=train_path,
+        holdout_path=holdout_path,
         validation_rows=corpus.val_stop - corpus.train_stop,
     )
 
@@ -755,53 +773,54 @@ class CriteoTask:
     data: EncodedData
     order: ShuffledEpochs
     batch_size: int
-    _train_arrays: EncodedArrays = dataclass_field(init=False, repr=False)
-    _holdout_arrays: EncodedArrays = dataclass_field(init=False, repr=False)
-    _field_offsets: np.ndarray = dataclass_field(init=False, repr=False)
+    _train_split: EncodedSplit = field(init=False, repr=False)
+    _holdout_split: EncodedSplit = field(init=False, repr=False)
+    _field_offsets: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._train_arrays = load_encoded(self.data.train)
-        self._holdout_arrays = load_encoded(self.data.holdout)
+        self._train_split = load_encoded(self.data.train_path)
+        self._holdout_split = load_encoded(self.data.holdout_path)
         self._field_offsets = np.asarray(self.data.field_offsets, dtype=np.int32)
-        if self.order.size != len(self._train_arrays[0]):
+        if self.order.size != len(self._train_split.labels):
             raise ValueError("shuffle size must match the encoded training split")
-        if not 0 < self.data.validation_rows < len(self._holdout_arrays[0]):
+        if not 0 < self.data.validation_rows < len(self._holdout_split.labels):
             raise ValueError("validation and test data must not be empty")
 
-    def train_batches(self, max_examples: int) -> Iterator[BinaryBatch]:
+    def train_batches(self, max_examples: int) -> Iterator[Batch]:
         for rows in self.order.batches(max_examples, self.batch_size):
-            yield self._batch(self._train_arrays, rows)
+            yield self._batch(self._train_split, rows)
 
-    def val_batches(self) -> Iterator[BinaryBatch]:
-        yield from self._batches(self._holdout_arrays, 0, self.data.validation_rows)
+    def val_batches(self) -> Iterator[Batch]:
+        yield from self._batches(self._holdout_split, 0, self.data.validation_rows)
 
-    def test_batches(self) -> Iterator[BinaryBatch]:
+    def test_batches(self) -> Iterator[Batch]:
         yield from self._batches(
-            self._holdout_arrays,
+            self._holdout_split,
             self.data.validation_rows,
-            len(self._holdout_arrays[0]),
+            len(self._holdout_split.labels),
         )
 
     def _batches(
         self,
-        arrays: EncodedArrays,
+        split: EncodedSplit,
         start: int,
         stop: int,
-    ) -> Iterator[BinaryBatch]:
+    ) -> Iterator[Batch]:
         for batch_start in range(start, stop, self.batch_size):
             batch_stop = min(batch_start + self.batch_size, stop)
-            yield self._batch(arrays, slice(batch_start, batch_stop))
+            yield self._batch(split, slice(batch_start, batch_stop))
 
     def _batch(
         self,
-        arrays: EncodedArrays,
+        split: EncodedSplit,
         rows: slice | np.ndarray,
-    ) -> BinaryBatch:
-        feature_ids, feature_values, labels = arrays
+    ) -> Batch:
         batch_values = (
-            None if feature_values is None else np.asarray(feature_values[rows])
+            None
+            if split.feature_values is None
+            else np.asarray(split.feature_values[rows])
         )
-        batch_ids_array = np.asarray(feature_ids[rows], dtype=np.int32)
+        batch_ids_array = np.asarray(split.feature_ids[rows], dtype=np.int32)
         batch_ids_array += self._field_offsets
         batch_ids = torch.from_numpy(batch_ids_array)
         model_inputs = (
@@ -810,5 +829,5 @@ class CriteoTask:
             else (batch_ids, torch.from_numpy(batch_values))
         )
         return model_inputs, torch.from_numpy(
-            np.asarray(labels[rows], dtype=np.float32)
+            np.asarray(split.labels[rows], dtype=np.float32)
         )
