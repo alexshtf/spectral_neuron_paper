@@ -186,7 +186,6 @@ class HiggsModelSpec:
 
 @dataclass(frozen=True)
 class RunSettings:
-    train_sizes: tuple[int, ...]
     batch_size: int
     corpus: HiggsCorpus
     threads_per_worker: int | None
@@ -328,7 +327,6 @@ def run_profile(
         corpus.shuffled_epochs(data_seed).prepare(required_passes)
 
     settings = RunSettings(
-        train_sizes=train_sizes,
         batch_size=profile.batch_size,
         corpus=corpus,
         threads_per_worker=1 if workers > 1 else None,

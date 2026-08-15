@@ -17,7 +17,7 @@ from paper.experiments.higgs_robustness import (
     ratio_count_columns,
     result_columns,
     run_profile,
-    selected_configs,
+    selected_runs,
     validate_results,
 )
 from paper.experiments.higgs_scaling import (
@@ -116,13 +116,15 @@ def _write_tiny_higgs(path: Path) -> None:
     np.savetxt(path, np.concatenate((labels, features), axis=1), delimiter=",")
 
 
-def test_selected_configs_use_final_validation_lrs_and_evaluation_seed_grid():
+def test_selected_runs_use_final_validation_lrs_and_evaluation_seed_grid():
     profile = _profile()
-    configs = selected_configs(_scaling_results(profile), profile)
+    runs = selected_runs(_scaling_results(profile), profile)
+    configs = [run.config for run in runs]
 
     assert len(configs) == len(profile.capacity_dims) * len(
         profile.evaluation_seeds
     )
+    assert {run.test_checkpoints for run in runs} == {(8,)}
     assert {
         (config.model_spec.capacity_dim, config.lr) for config in configs
     } == {(1, 1e-1), (2, 1e-2)}
@@ -167,7 +169,7 @@ def test_joint_histogram_uses_disjoint_magnitude_bins_and_preserves_diagnostics(
     bound = torch.tensor([0.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float64)
     magnitude = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], dtype=torch.float64)
 
-    counts, total, zero, above, maximum = _joint_histogram(
+    histogram = _joint_histogram(
         actual,
         bound,
         magnitude,
@@ -176,11 +178,15 @@ def test_joint_histogram_uses_disjoint_magnitude_bins_and_preserves_diagnostics(
         ratio_bins=4,
     )
 
-    assert total.tolist() == [1, 1, 1, 2]
-    assert counts.nonzero().tolist() == [[1, 0], [2, 2], [3, 3]]
-    assert zero.tolist() == [1, 0, 0, 0]
-    assert above.tolist() == [0, 0, 0, 1]
-    assert maximum.tolist() == [-torch.inf, 0.0, 0.5, 2.0]
+    assert histogram.total_counts.tolist() == [1, 1, 1, 2]
+    assert histogram.ratio_counts.nonzero().tolist() == [
+        [1, 0],
+        [2, 2],
+        [3, 3],
+    ]
+    assert histogram.zero_bound_counts.tolist() == [1, 0, 0, 0]
+    assert histogram.above_bound_counts.tolist() == [0, 0, 0, 1]
+    assert histogram.max_ratios.tolist() == [-torch.inf, 0.0, 0.5, 2.0]
 
 
 def test_dim_one_reference_has_one_unit_ratio_per_row_and_restores_model():

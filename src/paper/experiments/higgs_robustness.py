@@ -1,8 +1,8 @@
 import argparse
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from itertools import product
-from operator import index
 from pathlib import Path
 from typing import TextIO
 
@@ -24,7 +24,11 @@ from paper.experiments.higgs_scaling import (
 )
 from paper.experiments.results import DEFAULT_RUNS_DIR, write_csv
 from paper.experiments.runner import run_many
-from paper.experiments.scaling import PROTOCOL, RunConfig, select_evaluation_runs
+from paper.experiments.scaling import (
+    PROTOCOL,
+    SelectedRun,
+    select_evaluation_runs,
+)
 from paper.higgs import (
     FEATURE_NAMES,
     NUM_FEATURES,
@@ -92,21 +96,19 @@ def _noise_level(value: float) -> float:
 
 
 def _num_bins(value: int) -> int:
-    if isinstance(value, (bool, np.bool_)):
+    if not isinstance(value, (int, np.integer)) or isinstance(
+        value, (bool, np.bool_)
+    ):
         raise TypeError("bins must be an integer")
-    try:
-        value = index(value)
-    except TypeError as error:
-        raise TypeError("bins must be an integer") from error
     if value <= 0:
         raise ValueError("bins must be positive")
-    return value
+    return int(value)
 
 
-def selected_configs(
+def selected_runs(
     scaling_results: pd.DataFrame,
     profile: Profile,
-) -> tuple[RunConfig[HiggsModelSpec], ...]:
+) -> tuple[SelectedRun[HiggsModelSpec], ...]:
     """Select final-checkpoint spectral runs from a HIGGS scaling result."""
     if "model" not in scaling_results:
         raise ValueError("incompatible HIGGS result schema")
@@ -120,19 +122,14 @@ def selected_configs(
         (spectral["phase"] == "tuning")
         & (spectral["train_size"] == train_size)
     ]
-    return tuple(
-        selected.config
-        for selected in select_evaluation_runs(
-            tuning,
-            schema=RESULT_SCHEMA,
-            evaluation_seeds=profile.evaluation_seeds,
-            model_specs={
-                ("spectral", capacity_dim): HiggsModelSpec(
-                    "spectral", capacity_dim
-                )
-                for capacity_dim in profile.capacity_dims
-            },
-        )
+    return select_evaluation_runs(
+        tuning,
+        schema=RESULT_SCHEMA,
+        evaluation_seeds=profile.evaluation_seeds,
+        model_specs={
+            ("spectral", capacity_dim): HiggsModelSpec("spectral", capacity_dim)
+            for capacity_dim in profile.capacity_dims
+        },
     )
 
 
@@ -146,6 +143,35 @@ def feature_matrices(
     return model.tril_emb(weight.mT)
 
 
+@dataclass(frozen=True)
+class _HistogramChunk:
+    ratio_counts: torch.Tensor
+    total_counts: torch.Tensor
+    zero_bound_counts: torch.Tensor
+    above_bound_counts: torch.Tensor
+    max_ratios: torch.Tensor
+
+
+@dataclass
+class _HistogramAccumulator:
+    ratio_counts: torch.Tensor
+    total_counts: torch.Tensor
+    zero_bound_counts: torch.Tensor
+    above_bound_counts: torch.Tensor
+    max_ratios: torch.Tensor
+
+    def accumulate_feature_(
+        self, feature_index: int, chunk: _HistogramChunk
+    ) -> None:
+        self.ratio_counts[feature_index] += chunk.ratio_counts
+        self.total_counts[feature_index] += chunk.total_counts
+        self.zero_bound_counts[feature_index] += chunk.zero_bound_counts
+        self.above_bound_counts[feature_index] += chunk.above_bound_counts
+        self.max_ratios[feature_index] = torch.maximum(
+            self.max_ratios[feature_index], chunk.max_ratios
+        )
+
+
 def _joint_histogram(
     actual: torch.Tensor,
     bound: torch.Tensor,
@@ -154,7 +180,7 @@ def _joint_histogram(
     noise_level: float,
     magnitude_bins: int,
     ratio_bins: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> _HistogramChunk:
     if not (actual.shape == bound.shape == magnitude.shape):
         raise ValueError("actual deviations, bounds, and magnitudes must align")
     if (
@@ -210,7 +236,7 @@ def _joint_histogram(
         reduce="amax",
         include_self=True,
     )
-    return counts, totals, zero_bounds, above_bounds, maxima
+    return _HistogramChunk(counts, totals, zero_bounds, above_bounds, maxima)
 
 
 def deviation_histograms(
@@ -233,23 +259,29 @@ def deviation_histograms(
     matrices = feature_matrices(model, dtype=torch.float64).detach()
     matrix_norms = torch.linalg.matrix_norm(matrices, ord=2)
     device = weight.device
-    counts = torch.zeros(
+    total_counts = torch.zeros(
         NUM_FEATURES,
         magnitude_bins,
-        ratio_bins,
         dtype=torch.int64,
         device=device,
     )
-    totals = torch.zeros(
-        NUM_FEATURES, magnitude_bins, dtype=torch.int64, device=device
-    )
-    zero_bounds = torch.zeros_like(totals)
-    above_bounds = torch.zeros_like(totals)
-    max_ratios = torch.full(
-        (NUM_FEATURES, magnitude_bins),
-        -torch.inf,
-        dtype=torch.float64,
-        device=device,
+    histograms = _HistogramAccumulator(
+        ratio_counts=torch.zeros(
+            NUM_FEATURES,
+            magnitude_bins,
+            ratio_bins,
+            dtype=torch.int64,
+            device=device,
+        ),
+        total_counts=total_counts,
+        zero_bound_counts=torch.zeros_like(total_counts),
+        above_bound_counts=torch.zeros_like(total_counts),
+        max_ratios=torch.full(
+            (NUM_FEATURES, magnitude_bins),
+            -torch.inf,
+            dtype=torch.float64,
+            device=device,
+        ),
     )
     rng = np.random.default_rng(perturbation_seed)
     test_rows = 0
@@ -279,20 +311,16 @@ def deviation_histograms(
                     actual = (perturbed_logits - base_logits).abs()
                     magnitude = perturbation.abs()
                     bound = magnitude * matrix_norms[feature_index]
-                    chunk = _joint_histogram(
-                        actual,
-                        bound,
-                        magnitude,
-                        noise_level=noise_level,
-                        magnitude_bins=magnitude_bins,
-                        ratio_bins=ratio_bins,
-                    )
-                    counts[feature_index] += chunk[0]
-                    totals[feature_index] += chunk[1]
-                    zero_bounds[feature_index] += chunk[2]
-                    above_bounds[feature_index] += chunk[3]
-                    max_ratios[feature_index] = torch.maximum(
-                        max_ratios[feature_index], chunk[4]
+                    histograms.accumulate_feature_(
+                        feature_index,
+                        _joint_histogram(
+                            actual,
+                            bound,
+                            magnitude,
+                            noise_level=noise_level,
+                            magnitude_bins=magnitude_bins,
+                            ratio_bins=ratio_bins,
+                        ),
                     )
                 test_rows += len(features)
     finally:
@@ -304,7 +332,8 @@ def deviation_histograms(
     magnitude_edges = np.linspace(0.0, noise_level, magnitude_bins + 1)
     feature_indices = np.repeat(np.arange(NUM_FEATURES), magnitude_bins)
     magnitude_indices = np.tile(np.arange(magnitude_bins), NUM_FEATURES)
-    maxima = max_ratios.cpu().numpy()
+    maxima = histograms.max_ratios.cpu().numpy()
+    ratio_counts = histograms.ratio_counts.cpu().numpy()
     maxima[np.isneginf(maxima)] = np.nan
     data = {
         "noise_level": noise_level,
@@ -316,22 +345,22 @@ def deviation_histograms(
         "magnitude_bin_index": magnitude_indices,
         "magnitude_left": magnitude_edges[magnitude_indices],
         "magnitude_right": magnitude_edges[magnitude_indices + 1],
-        "total_count": totals.cpu().numpy().reshape(-1),
-        "zero_bound_count": zero_bounds.cpu().numpy().reshape(-1),
-        "above_bound_count": above_bounds.cpu().numpy().reshape(-1),
+        "total_count": histograms.total_counts.cpu().numpy().reshape(-1),
+        "zero_bound_count": histograms.zero_bound_counts.cpu().numpy().reshape(-1),
+        "above_bound_count": histograms.above_bound_counts.cpu().numpy().reshape(-1),
         "max_ratio": maxima.reshape(-1),
     }
     data.update(
         {
-            column: counts[..., bin_index].cpu().numpy().reshape(-1)
+            column: ratio_counts[..., bin_index].reshape(-1)
             for bin_index, column in enumerate(ratio_count_columns(ratio_bins))
         }
     )
     return pd.DataFrame(data)
 
 
-def run_config(
-    config: RunConfig[HiggsModelSpec],
+def run_selected(
+    selected: SelectedRun[HiggsModelSpec],
     settings: RunSettings,
     *,
     noise_level: float = NOISE_LEVEL,
@@ -339,10 +368,11 @@ def run_config(
     ratio_bins: int = RATIO_BINS,
     perturbation_seed: int = PERTURBATION_SEED,
 ) -> pd.DataFrame:
+    config = selected.config
     task, model = make_task_model(config, settings)
     if not isinstance(model, KthEigval):
         raise TypeError("HIGGS robustness requires a spectral model")
-    train_size = settings.train_sizes[-1]
+    (train_size,) = selected.test_checkpoints
     fts.collect(
         train_events(
             task,
@@ -394,7 +424,7 @@ def run_profile(
     noise_level = _noise_level(noise_level)
     magnitude_bins = _num_bins(magnitude_bins)
     ratio_bins = _num_bins(ratio_bins)
-    configs = selected_configs(scaling_results, profile)
+    runs = selected_runs(scaling_results, profile)
     corpus = prepare_corpus(
         raw_path,
         cache_dir,
@@ -413,21 +443,18 @@ def run_profile(
             "scaling results and HIGGS corpus use different training pools"
         )
 
-    train_size = resolve_train_sizes(
-        profile.train_sizes, batch_size=profile.batch_size
-    )[-1]
+    (train_size,) = runs[0].test_checkpoints
     required_passes = (train_size + corpus.train_stop - 1) // corpus.train_stop
-    for data_seed in sorted({config.data_seed for config in configs}):
+    for data_seed in sorted({run.config.data_seed for run in runs}):
         corpus.shuffled_epochs(data_seed).prepare(required_passes)
 
     settings = RunSettings(
-        train_sizes=(train_size,),
         batch_size=profile.batch_size,
         corpus=corpus,
         threads_per_worker=1 if workers > 1 else None,
     )
     run = partial(
-        run_config,
+        run_selected,
         settings=settings,
         noise_level=noise_level,
         magnitude_bins=magnitude_bins,
@@ -436,7 +463,7 @@ def run_profile(
     )
     results = run_many(
         run,
-        configs,
+        runs,
         workers=workers,
         desc="Train + perturb",
         unit="model",
@@ -448,21 +475,8 @@ def run_profile(
     return pd.concat(results, ignore_index=True).loc[:, result_columns(ratio_bins)]
 
 
-def validate_results(
-    results: pd.DataFrame,
-    profile: Profile,
-    *,
-    noise_level: float = NOISE_LEVEL,
-    magnitude_bins: int = MAGNITUDE_BINS,
-    ratio_bins: int = RATIO_BINS,
-    perturbation_seed: int = PERTURBATION_SEED,
-) -> None:
-    """Validate a complete HIGGS robustness result."""
-    noise_level = _noise_level(noise_level)
-    magnitude_bins = _num_bins(magnitude_bins)
-    ratio_bins = _num_bins(ratio_bins)
+def _validate_result_schema(results: pd.DataFrame, ratio_bins: int) -> None:
     columns = result_columns(ratio_bins)
-    ratio_columns = ratio_count_columns(ratio_bins)
     if list(results.columns) != columns:
         raise ValueError("incompatible HIGGS robustness result schema")
     if results.empty:
@@ -470,6 +484,15 @@ def validate_results(
     required = [column for column in columns if column != "max_ratio"]
     if results[required].isna().any().any():
         raise ValueError("HIGGS robustness results contain missing values")
+
+
+def _validate_run_metadata(
+    results: pd.DataFrame,
+    profile: Profile,
+    *,
+    noise_level: float,
+    perturbation_seed: int,
+) -> None:
     if set(results["protocol"]) != {PROTOCOL}:
         raise ValueError(f"expected protocol={PROTOCOL!r}")
     if set(results["optimizer"]) != {OPTIMIZER}:
@@ -489,6 +512,14 @@ def validate_results(
     if results.groupby("dim")["lr"].nunique().ne(1).any():
         raise ValueError("each matrix dimension must use one learning rate")
 
+
+def _validate_histogram_grid(
+    results: pd.DataFrame,
+    profile: Profile,
+    *,
+    noise_level: float,
+    magnitude_bins: int,
+) -> None:
     feature_labels = set(
         results[["feature_index", "feature_name"]]
         .drop_duplicates()
@@ -515,11 +546,6 @@ def validate_results(
         raise ValueError("duplicate robustness histogram bins")
 
     magnitude_indices = results["magnitude_bin_index"].to_numpy(dtype=int)
-    if not np.array_equal(
-        magnitude_indices,
-        results["magnitude_bin_index"].to_numpy(),
-    ) or not np.isin(magnitude_indices, np.arange(magnitude_bins)).all():
-        raise ValueError("invalid magnitude bin index")
     magnitude_edges = np.linspace(0.0, noise_level, magnitude_bins + 1)
     if not (
         np.allclose(results["magnitude_left"], magnitude_edges[magnitude_indices])
@@ -529,31 +555,34 @@ def validate_results(
     ):
         raise ValueError("invalid magnitude bin edges")
 
-    count_values = results[ratio_columns].to_numpy()
-    if (
-        not np.isfinite(count_values).all()
-        or (count_values < 0).any()
-        or not np.equal(count_values, np.floor(count_values)).all()
-    ):
+
+def _valid_counts(values: np.ndarray) -> bool:
+    return bool(
+        np.isfinite(values).all()
+        and (values >= 0).all()
+        and np.equal(values, np.floor(values)).all()
+    )
+
+
+def _validate_histogram_values(
+    results: pd.DataFrame,
+    *,
+    ratio_bins: int,
+) -> None:
+    ratio_counts = results[ratio_count_columns(ratio_bins)].to_numpy()
+    if not _valid_counts(ratio_counts):
         raise ValueError("invalid robustness histogram counts")
-    binned_count = count_values.sum(axis=1)
-    total_count = results["total_count"].to_numpy()
-    zero_bound_count = results["zero_bound_count"].to_numpy()
-    above_bound_count = results["above_bound_count"].to_numpy()
-    if (
-        not np.isfinite(total_count).all()
-        or not np.isfinite(zero_bound_count).all()
-        or not np.isfinite(above_bound_count).all()
-        or (total_count < 0).any()
-        or (zero_bound_count < 0).any()
-        or (above_bound_count < 0).any()
-        or not np.equal(total_count, np.floor(total_count)).all()
-        or not np.equal(zero_bound_count, np.floor(zero_bound_count)).all()
-        or not np.equal(above_bound_count, np.floor(above_bound_count)).all()
-        or not (
-            binned_count + zero_bound_count + above_bound_count == total_count
-        ).all()
-    ):
+
+    total_counts = results["total_count"].to_numpy()
+    zero_bound_counts = results["zero_bound_count"].to_numpy()
+    above_bound_counts = results["above_bound_count"].to_numpy()
+    if not all(
+        _valid_counts(counts)
+        for counts in (total_counts, zero_bound_counts, above_bound_counts)
+    ) or not (
+        ratio_counts.sum(axis=1) + zero_bound_counts + above_bound_counts
+        == total_counts
+    ).all():
         raise ValueError("invalid robustness histogram count accounting")
 
     feature_groups = results.groupby(_FEATURE_COLUMNS, sort=False)
@@ -566,14 +595,43 @@ def validate_results(
     if (test_counts <= 0).any() or test_counts.nunique() != 1:
         raise ValueError("inconsistent test-set counts")
 
-    defined = total_count > zero_bound_count
-    maxima = results["max_ratio"].to_numpy()
+    defined = total_counts > zero_bound_counts
+    max_ratios = results["max_ratio"].to_numpy()
     if (
-        not np.isfinite(maxima[defined]).all()
-        or (maxima[defined] < 0).any()
-        or not np.isnan(maxima[~defined]).all()
+        not np.isfinite(max_ratios[defined]).all()
+        or (max_ratios[defined] < 0).any()
+        or not np.isnan(max_ratios[~defined]).all()
     ):
         raise ValueError("invalid maximum deviation ratios")
+
+
+def validate_results(
+    results: pd.DataFrame,
+    profile: Profile,
+    *,
+    noise_level: float = NOISE_LEVEL,
+    magnitude_bins: int = MAGNITUDE_BINS,
+    ratio_bins: int = RATIO_BINS,
+    perturbation_seed: int = PERTURBATION_SEED,
+) -> None:
+    """Validate a complete HIGGS robustness result."""
+    noise_level = _noise_level(noise_level)
+    magnitude_bins = _num_bins(magnitude_bins)
+    ratio_bins = _num_bins(ratio_bins)
+    _validate_result_schema(results, ratio_bins)
+    _validate_run_metadata(
+        results,
+        profile,
+        noise_level=noise_level,
+        perturbation_seed=perturbation_seed,
+    )
+    _validate_histogram_grid(
+        results,
+        profile,
+        noise_level=noise_level,
+        magnitude_bins=magnitude_bins,
+    )
+    _validate_histogram_values(results, ratio_bins=ratio_bins)
 
 
 def _float_label(value: float) -> str:
