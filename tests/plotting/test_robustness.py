@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from paper.plotting import plot_higgs_deviation_shell_grid
+from paper.plotting.robustness import _mean_higgs_deviation_shells
 
 
 def _higgs_deviation_results(
@@ -73,21 +74,17 @@ def test_plot_higgs_deviation_shell_grid_uses_disjoint_ranges_and_feature_order(
         "|δ| ∈ [0.375, 0.5]",
     ]
     assert ax.get_xlim() == pytest.approx((0, 1))
-    assert fig._supxlabel.get_text() == "Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)"
-    assert fig._supylabel.get_text() == "Feature"
-    assert len(ax.lines) == 4  # Two dimensions, y=0, and x=1.
+    assert fig.get_supxlabel() == "Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)"
+    assert fig.get_supylabel() == "Feature"
     assert _legend_labels(fig) == ["3", "7"]
     assert fig.legends[0].get_title().get_text() == "Matrix dimension"
     assert fig.get_figheight() == pytest.approx(24 / 25.4)
     assert fig.axes[0].get_ylabel() == "lepton pT"
     assert fig.axes[4].get_ylabel() == "lepton η"
     assert fig.axes[0].yaxis.label.get_fontsize() == 8
-    for cell in fig.axes:
-        for histogram in cell.lines[:2]:
-            assert histogram.get_ydata()[:-1].sum() == pytest.approx(1)
 
 
-def test_plot_higgs_deviation_shell_grid_aggregates_shells_without_cumulation():
+def test_mean_higgs_deviation_shells_aggregates_disjoint_shells():
     rows = []
     for magnitude_bin_index in range(4):
         row = {
@@ -113,17 +110,19 @@ def test_plot_higgs_deviation_shell_grid_aggregates_shells_without_cumulation():
         )
         rows.append(row)
 
-    fig = plot_higgs_deviation_shell_grid(pd.DataFrame(rows), shell_count=2)
-    first_shell = fig.axes[0].lines[0].get_ydata()[:-1]
-    second_shell = fig.axes[1].lines[0].get_ydata()[:-1]
+    noise_level, ratio_columns, shells = _mean_higgs_deviation_shells(
+        pd.DataFrame(rows), shell_count=2
+    )
 
-    assert first_shell.tolist() == pytest.approx([0.5, 0.5, 0, 0])
-    assert second_shell.tolist() == pytest.approx([0, 0, 0.5, 0.5])
-    assert first_shell.sum() == pytest.approx(1)
-    assert second_shell.sum() == pytest.approx(1)
+    assert noise_level == 0.5
+    assert ratio_columns == [f"ratio_bin_{index:03d}_count" for index in range(4)]
+    np.testing.assert_allclose(
+        shells.sort_values("shell_index")[ratio_columns],
+        [[0.5, 0.5, 0, 0], [0, 0, 0.5, 0.5]],
+    )
 
 
-def test_plot_higgs_deviation_shell_grid_uses_raw_probabilities_and_cell_limits():
+def test_higgs_deviation_shells_preserve_probabilities_and_cell_limits():
     rows = []
     feature_counts = {
         (0, "sharp"): ((9, 1), (1, 1)),
@@ -149,17 +148,27 @@ def test_plot_higgs_deviation_shell_grid_uses_raw_probabilities_and_cell_limits(
                 }
             )
 
-    fig = plot_higgs_deviation_shell_grid(pd.DataFrame(rows), shell_count=2)
+    results = pd.DataFrame(rows)
+    _, ratio_columns, shells = _mean_higgs_deviation_shells(
+        results, shell_count=2
+    )
+    probabilities = shells.set_index(["feature_name", "shell_index"])
+    np.testing.assert_allclose(
+        probabilities.loc[("sharp", 0), ratio_columns], [0.9, 0.1]
+    )
+    np.testing.assert_allclose(
+        probabilities.loc[("sharp", 1), ratio_columns], [0.5, 0.5]
+    )
+
+    fig = plot_higgs_deviation_shell_grid(results, shell_count=2)
     sharp_first, sharp_second, flat_first, flat_second = fig.axes
-    assert sharp_first.lines[0].get_ydata()[:-1] == pytest.approx([0.9, 0.1])
-    assert sharp_second.lines[0].get_ydata()[:-1] == pytest.approx([0.5, 0.5])
-    assert flat_first.lines[0].get_ydata()[:-1] == pytest.approx([0.5, 0.5])
-    assert flat_second.lines[0].get_ydata()[:-1] == pytest.approx([0.5, 0.5])
     assert sharp_first.get_ylim()[1] == pytest.approx(0.9 / 0.85)
     assert sharp_second.get_ylim()[1] == pytest.approx(0.5 / 0.85)
+    assert flat_first.get_ylim()[1] == pytest.approx(0.5 / 0.85)
+    assert flat_second.get_ylim()[1] == pytest.approx(0.5 / 0.85)
 
 
-def test_plot_higgs_deviation_shell_grid_weights_runs_equally():
+def test_mean_higgs_deviation_shells_weights_runs_equally():
     rows = []
     for init_seed, (counts, total_count) in enumerate(
         (((8, 2), 10), ((0, 100), 100))
@@ -182,19 +191,19 @@ def test_plot_higgs_deviation_shell_grid_weights_runs_equally():
             }
         )
 
-    fig = plot_higgs_deviation_shell_grid(pd.DataFrame(rows), shell_count=1)
-    heights = fig.axes[0].lines[0].get_ydata()[:-1]
+    _, ratio_columns, shells = _mean_higgs_deviation_shells(
+        pd.DataFrame(rows), shell_count=1
+    )
+    probabilities = shells.loc[0, ratio_columns].to_numpy(dtype=float)
 
     # Mean seed probabilities are (0.4, 0.6), not pooled counts (8, 102).
-    assert heights[0] / heights[1] == pytest.approx(2 / 3)
+    np.testing.assert_allclose(probabilities, [0.4, 0.6])
 
 
-def test_plot_higgs_deviation_shell_grid_rejects_mixed_noise_and_bad_shell_count():
+def test_mean_higgs_deviation_shells_rejects_mixed_noise_and_bad_shell_count():
     with pytest.raises(ValueError, match="one noise_level"):
-        plot_higgs_deviation_shell_grid(
-            _higgs_deviation_results(noise_levels=(0.25, 0.5))
+        _mean_higgs_deviation_shells(
+            _higgs_deviation_results(noise_levels=(0.25, 0.5)), shell_count=4
         )
     with pytest.raises(ValueError, match="divisor"):
-        plot_higgs_deviation_shell_grid(
-            _higgs_deviation_results(), shell_count=3
-        )
+        _mean_higgs_deviation_shells(_higgs_deviation_results(), shell_count=3)

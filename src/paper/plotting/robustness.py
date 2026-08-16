@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -5,9 +7,33 @@ import seaborn as sns
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
-from ._common import _dimension_curve_styles
+_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
 
-HIGGS_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
+
+@dataclass(frozen=True)
+class _DeviationCurveStyle:
+    dimension: int
+    color: tuple[float, float, float]
+    linestyle: str
+
+
+def _deviation_curve_styles(
+    dimensions: list[int],
+) -> tuple[_DeviationCurveStyle, ...]:
+    return tuple(
+        _DeviationCurveStyle(
+            dimension,
+            color,
+            _DIMENSION_LINESTYLES[index % len(_DIMENSION_LINESTYLES)],
+        )
+        for index, (dimension, color) in enumerate(
+            zip(
+                dimensions,
+                sns.color_palette("colorblind", len(dimensions)),
+                strict=True,
+            )
+        )
+    )
 
 
 def _higgs_ratio_count_columns(results: pd.DataFrame) -> list[str]:
@@ -97,16 +123,7 @@ def plot_higgs_deviation_shell_grid(
     )
 
     dimensions = sorted(map(int, averaged["dim"].unique()))
-    colors = {
-        int(style.label): style.color
-        for style in _dimension_curve_styles(dimensions)
-    }
-    linestyles = {
-        dim: HIGGS_DIMENSION_LINESTYLES[
-            index % len(HIGGS_DIMENSION_LINESTYLES)
-        ]
-        for index, dim in enumerate(dimensions)
-    }
+    styles = _deviation_curve_styles(dimensions)
     features = (
         averaged[["feature_index", "feature_name"]]
         .drop_duplicates()
@@ -133,8 +150,10 @@ def plot_higgs_deviation_shell_grid(
                 (averaged["feature_index"] == feature_index)
                 & (averaged["shell_index"] == shell_index)
             ]
-            for dim in dimensions:
-                histogram = cell.loc[cell["dim"] == dim, ratio_columns]
+            for style in styles:
+                histogram = cell.loc[
+                    cell["dim"] == style.dimension, ratio_columns
+                ]
                 if histogram.empty or histogram.iloc[0].isna().all():
                     continue
 
@@ -145,7 +164,7 @@ def plot_higgs_deviation_shell_grid(
                     0,
                     heights,
                     step="post",
-                    color=colors[dim],
+                    color=style.color,
                     alpha=0.07,
                     linewidth=0,
                 )
@@ -153,8 +172,8 @@ def plot_higgs_deviation_shell_grid(
                     ratio_edges,
                     heights,
                     where="post",
-                    color=colors[dim],
-                    linestyle=linestyles[dim],
+                    color=style.color,
+                    linestyle=style.linestyle,
                     linewidth=1.1,
                 )
 
@@ -204,12 +223,12 @@ def plot_higgs_deviation_shell_grid(
         Line2D(
             [],
             [],
-            color=colors[dim],
-            linestyle=linestyles[dim],
+            color=style.color,
+            linestyle=style.linestyle,
             linewidth=1.2,
-            label=str(dim),
+            label=str(style.dimension),
         )
-        for dim in dimensions
+        for style in styles
     ]
     fig.legend(
         handles=handles,

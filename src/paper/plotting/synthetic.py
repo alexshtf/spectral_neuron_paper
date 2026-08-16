@@ -1,5 +1,5 @@
-import math
 from collections.abc import Callable, Iterable
+from typing import cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -7,6 +7,7 @@ from matplotlib.figure import Figure, SubFigure
 
 from ._common import (
     FigureContainer,
+    _grid_shape,
     _subplot_grid,
     _subplot_matrix,
 )
@@ -81,6 +82,15 @@ def _plot_curve(
     ax.fill_between(x, q25, q75, **fill_kwargs)
 
 
+def _finish_scaling_axis(ax, data: pd.DataFrame) -> None:
+    ax.set_xlabel(SYNTHETIC_TRAIN_SIZE_LABEL)
+    ax.set_ylabel("test RMSE")
+    ax.set_xscale("log")
+    if (data["median_test_rmse"] > 0).all():
+        ax.set_yscale("log")
+    ax.grid(True, alpha=0.25)
+
+
 def _add_shared_legend(fig, axes, *, borderaxespad: float = 0.5) -> None:
     handles = []
     labels = []
@@ -128,9 +138,7 @@ def _noise_title(noise_std: float) -> str:
 
 
 def _grid_figure_size(summary: pd.DataFrame) -> tuple[float, float]:
-    complexities = summary["complexity"].nunique()
-    n_cols = int(math.ceil(math.sqrt(complexities)))
-    n_rows = int(math.ceil(complexities / n_cols))
+    n_rows, n_cols = _grid_shape(summary["complexity"].nunique())
     return 4.5 * n_cols, 3.5 * n_rows
 
 
@@ -175,12 +183,7 @@ def _plot_scaling_grid(
                     linestyle=linestyle,
                 )
         ax.set_title(f"complexity={complexity}")
-        ax.set_xlabel(SYNTHETIC_TRAIN_SIZE_LABEL)
-        ax.set_ylabel("test RMSE")
-        ax.set_xscale("log")
-        if (sub["median_test_rmse"] > 0).all():
-            ax.set_yscale("log")
-        ax.grid(True, alpha=0.25)
+        _finish_scaling_axis(ax, sub)
 
     _add_shared_legend(
         fig,
@@ -228,12 +231,7 @@ def _plot_pairwise_scaling(
                     )
 
             ax.set_title(f"complexity={complexity}, dim={dim}")
-            ax.set_xlabel(SYNTHETIC_TRAIN_SIZE_LABEL)
-            ax.set_ylabel("test RMSE")
-            ax.set_xscale("log")
-            if (sub["median_test_rmse"] > 0).all():
-                ax.set_yscale("log")
-            ax.grid(True, alpha=0.25)
+            _finish_scaling_axis(ax, sub)
 
     _add_shared_legend(
         fig,
@@ -266,7 +264,7 @@ def _plot_noise_subfigures(
     return fig
 
 
-def plot_general_scaling(summary: pd.DataFrame) -> FigureContainer:
+def plot_general_scaling(summary: pd.DataFrame) -> Figure:
     _check_scaling_columns(summary)
     _check_target_kind(summary, "general")
     if len(_noise_stds(summary)) > 1:
@@ -275,10 +273,10 @@ def plot_general_scaling(summary: pd.DataFrame) -> FigureContainer:
             _plot_scaling_grid,
             _grid_figure_size(summary),
         )
-    return _plot_scaling_grid(summary)
+    return cast(Figure, _plot_scaling_grid(summary))
 
 
-def plot_monotone_scaling(summary: pd.DataFrame) -> FigureContainer:
+def plot_monotone_scaling(summary: pd.DataFrame) -> Figure:
     _check_scaling_columns(summary)
     _check_target_kind(summary, "monotone")
     if set(summary["model"].unique()) != set(_MONOTONE_MODEL_PAIR):
@@ -291,4 +289,4 @@ def plot_monotone_scaling(summary: pd.DataFrame) -> FigureContainer:
             _plot_pairwise_scaling,
             _pairwise_figure_size(summary),
         )
-    return _plot_pairwise_scaling(summary)
+    return cast(Figure, _plot_pairwise_scaling(summary))

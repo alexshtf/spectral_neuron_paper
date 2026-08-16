@@ -45,6 +45,15 @@ def _subplot_matrix(
     return container, axs
 
 
+def _grid_shape(n_items: int) -> tuple[int, int]:
+    if n_items == 0:
+        raise ValueError("at least one item is required")
+
+    n_cols = int(math.ceil(math.sqrt(n_items)))
+    n_rows = int(math.ceil(n_items / n_cols))
+    return n_rows, n_cols
+
+
 def _subplot_grid(
     n_items: int,
     *,
@@ -52,11 +61,7 @@ def _subplot_grid(
     cell_height: float,
     container: FigureContainer | None = None,
 ):
-    if n_items == 0:
-        raise ValueError("at least one item is required")
-
-    n_cols = int(math.ceil(math.sqrt(n_items)))
-    n_rows = int(math.ceil(n_items / n_cols))
+    n_rows, n_cols = _grid_shape(n_items)
     fig, axs = _subplot_matrix(
         n_rows,
         n_cols,
