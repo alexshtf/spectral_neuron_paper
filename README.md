@@ -1,6 +1,6 @@
 # Spectral neuron experiments
 
-This repository contains the experiments for spectral neurons: scalar models of
+This repository contains the experiments for the spectral neuron paper (https://arxiv.org/abs/2608.08003): scalar models of
 the form
 
 ```text
