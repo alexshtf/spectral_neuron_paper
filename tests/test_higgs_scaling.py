@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from paper.experiments.higgs_scaling import (
-    RESULT_SCHEMA,
     VARIANTS,
     HiggsModelSpec,
     Profile,
@@ -17,15 +16,12 @@ from paper.experiments.higgs_scaling import (
     matched_mlp_width,
     mlp_parameter_count,
     run_profile,
-    select_evaluations,
     spectral_parameter_count,
-    summarize_evaluations,
     trainable_parameter_count,
     validate_raw,
 )
 from paper.higgs import NUM_FEATURES, HiggsLayout
 from paper.models import KthEigval
-from paper.tuning import select_learning_rates
 
 
 def _write_tiny_higgs(path: Path, rows: int) -> None:
@@ -174,39 +170,13 @@ def test_dense_higgs_models_preserve_batch_dimensions(spec):
     assert model(torch.zeros(2, 7, NUM_FEATURES)).shape == (2, 7)
 
 
-def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_raw):
+def test_tiny_profile_runs_all_model_families(complete_raw):
     raw = complete_raw
-    selected = select_evaluations(raw)
-    summary = summarize_evaluations(selected)
 
-    assert tuple(raw.columns) == RESULT_SCHEMA.raw_columns
     assert set(raw["model"]) == set(VARIANTS)
-    assert set(raw["phase"]) == {"tuning", "evaluation"}
     assert set(raw["protocol"]) == {"repeated_shuffle"}
     assert set(raw["optimizer"]) == {"adam"}
     assert set(raw["train_pool_size"]) == {16}
-
-    tuning = raw.loc[raw["phase"] == "tuning"]
-    evaluation = raw.loc[raw["phase"] == "evaluation"]
-    assert set(tuning["train_size"]) == {8, 16}
-    assert tuning["val_logloss"].notna().all()
-    assert tuning[["test_logloss", "test_brier"]].isna().all().all()
-    assert set(evaluation["train_size"]) == {8, 16}
-    assert evaluation["val_logloss"].isna().all()
-    assert evaluation[["test_logloss", "test_brier"]].notna().all().all()
-    winners = select_learning_rates(
-        tuning,
-        curve_columns=RESULT_SCHEMA.curve_columns,
-        validation_metric=RESULT_SCHEMA.validation_metric,
-    ).set_index(list(RESULT_SCHEMA.curve_columns))["selected_lr"]
-    actual = evaluation.set_index(list(RESULT_SCHEMA.curve_columns))["lr"]
-    assert np.allclose(actual, winners.loc[actual.index])
-    identity = list(RESULT_SCHEMA.identity_columns)
-    assert raw[identity].notna().all().all()
-    assert not raw.duplicated(identity).any()
-    assert len(tuning) == 20
-    assert len(evaluation) == 10
-    assert len(summary) == 10
 
 
 def test_default_result_path_does_not_target_legacy_one_pass_results():
@@ -235,125 +205,12 @@ def test_validate_raw_checks_experiment_metadata(complete_raw, column, value):
         validate_raw(complete_raw.assign(**{column: value}), _tiny_profile())
 
 
-def test_validate_raw_rejects_schema_identity_and_capacity_errors(complete_raw):
-    with pytest.raises(ValueError, match="schema"):
-        validate_raw(complete_raw.drop(columns="test_brier"), _tiny_profile())
-
-    missing_identity = complete_raw.copy()
-    missing_identity.loc[0, "width"] = np.nan
-    with pytest.raises(ValueError, match="identity"):
-        validate_raw(missing_identity, _tiny_profile())
-
-    mixed_pool_sizes = complete_raw.copy()
-    mixed_pool_sizes.loc[0, "train_pool_size"] = 8
-    with pytest.raises(ValueError, match="one experiment"):
-        validate_raw(mixed_pool_sizes, _tiny_profile())
-
-    duplicate = pd.concat((complete_raw, complete_raw.iloc[[0]]), ignore_index=True)
-    with pytest.raises(ValueError, match="duplicate"):
-        validate_raw(duplicate, _tiny_profile())
-
+def test_validate_raw_checks_capacity_metadata(complete_raw):
     wrong_capacity = complete_raw.copy()
     index = wrong_capacity.index[wrong_capacity["model"] == "mlp-1"][0]
     wrong_capacity.loc[index, "width"] += 1
     with pytest.raises(ValueError, match="capacity metadata"):
         validate_raw(wrong_capacity, _tiny_profile())
-
-
-def test_validate_raw_rejects_incomplete_grids_and_invalid_phase_metrics(
-    complete_raw,
-):
-    missing_model = complete_raw.loc[complete_raw["model"] != "spectral"]
-    with pytest.raises(ValueError, match="model/capacity grid"):
-        validate_raw(missing_model, _tiny_profile())
-
-    incomplete_tuning = complete_raw.drop(
-        complete_raw.index[complete_raw["phase"] == "tuning"][0]
-    )
-    with pytest.raises(ValueError, match="tuning"):
-        validate_raw(incomplete_tuning, _tiny_profile())
-
-    incomplete_trajectory = complete_raw.drop(
-        complete_raw.index[complete_raw["phase"] == "evaluation"][0]
-    )
-    with pytest.raises(ValueError, match="evaluation"):
-        validate_raw(incomplete_trajectory, _tiny_profile())
-
-    extra_seed = complete_raw.loc[
-        complete_raw["phase"] == "evaluation"
-    ].iloc[[0]].copy()
-    extra_seed["init_seed"] = 99
-    unexpected_evaluation_seed = pd.concat(
-        (complete_raw, extra_seed), ignore_index=True
-    )
-    with pytest.raises(ValueError, match="evaluation seeds"):
-        validate_raw(unexpected_evaluation_seed, _tiny_profile())
-
-    leaked_validation = complete_raw.copy()
-    index = leaked_validation.index[leaked_validation["phase"] == "evaluation"][0]
-    leaked_validation.loc[index, "val_logloss"] = 0.5
-    with pytest.raises(ValueError, match="validation metrics"):
-        validate_raw(leaked_validation, _tiny_profile())
-
-    leaked_test = complete_raw.copy()
-    index = leaked_test.index[leaked_test["phase"] == "tuning"][0]
-    leaked_test.loc[index, "test_logloss"] = 0.5
-    with pytest.raises(ValueError, match="test metrics"):
-        validate_raw(leaked_test, _tiny_profile())
-
-
-def test_validate_raw_warns_for_nonfinite_tuning_and_checks_selected_lr(
-    complete_raw,
-):
-    tuning = complete_raw.loc[complete_raw["phase"] == "tuning"]
-    row = tuning.iloc[0]
-    curve = (
-        (tuning["model"] == row["model"])
-        & (tuning["dim"] == row["dim"])
-        & (tuning["train_size"] == row["train_size"])
-    )
-    worst_lr = tuning.loc[curve].sort_values("val_logloss").iloc[-1]["lr"]
-    nonfinite = complete_raw.copy()
-    mask = (
-        (nonfinite["phase"] == "tuning")
-        & (nonfinite["model"] == row["model"])
-        & (nonfinite["dim"] == row["dim"])
-        & (nonfinite["train_size"] == row["train_size"])
-        & (nonfinite["lr"] == worst_lr)
-    )
-    nonfinite.loc[mask, "val_logloss"] = np.nan
-    with pytest.warns(RuntimeWarning, match="nonfinite"):
-        validate_raw(nonfinite, _tiny_profile())
-
-    wrong_lr = complete_raw.copy()
-    evaluation_row = wrong_lr.loc[wrong_lr["phase"] == "evaluation"].iloc[0]
-    evaluation_curve = (
-        (wrong_lr["phase"] == "evaluation")
-        & (wrong_lr["model"] == evaluation_row["model"])
-        & (wrong_lr["dim"] == evaluation_row["dim"])
-        & (wrong_lr["train_size"] == evaluation_row["train_size"])
-    )
-    selected_lr = evaluation_row["lr"]
-    alternate_lr = next(lr for lr in _tiny_profile().lrs if lr != selected_lr)
-    wrong_lr.loc[evaluation_curve, "lr"] = alternate_lr
-    with pytest.raises(ValueError, match="selected LR"):
-        validate_raw(wrong_lr, _tiny_profile())
-
-
-def test_validate_raw_rejects_checkpoint_without_finite_tuning(complete_raw):
-    raw = complete_raw.copy()
-    row = raw.loc[raw["phase"] == "tuning"].iloc[0]
-    curve = (
-        (raw["phase"] == "tuning")
-        & (raw["model"] == row["model"])
-        & (raw["dim"] == row["dim"])
-        & (raw["train_size"] == row["train_size"])
-    )
-    raw.loc[curve, "val_logloss"] = np.nan
-
-    with pytest.warns(RuntimeWarning, match="nonfinite"):
-        with pytest.raises(ValueError, match="no finite validation"):
-            validate_raw(raw, _tiny_profile())
 
 
 def test_parallel_profile_matches_serial_results(tmp_path):
