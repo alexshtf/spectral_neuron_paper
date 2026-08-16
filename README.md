@@ -32,6 +32,9 @@ uv run jupyter lab
 
 ## Repository layout
 
+For a guided walkthrough of the architecture and end-to-end experiment flows,
+see [Code structure](code_structure.md).
+
 - `src/paper/models.py` implements the spectral and comparison models.
 - `src/paper/targets.py`, `tasks.py`, `training.py`, and `tuning.py` contain the
   reusable synthetic-data and training components.
