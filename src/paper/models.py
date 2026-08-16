@@ -95,17 +95,22 @@ class TrilEmbed(nn.Module):
 
         i, j = torch.tril_indices(dim, dim)
 
-        grid = torch.zeros(dim, dim, dtype=torch.long)
-        grid[i, j] = torch.arange(len(i))
-        grid = torch.maximum(grid, grid.T)
+        symmetric_indices = torch.empty(dim, dim, dtype=torch.long)
+        coordinates = torch.arange(len(i))
+        symmetric_indices[i, j] = coordinates
+        symmetric_indices[j, i] = coordinates
 
-        self.register_buffer("map", grid.flatten())
+        self.register_buffer(
+            "symmetric_indices", symmetric_indices.flatten(), persistent=False
+        )
         self.register_buffer("diagonal", i == j, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Isometrically embed lower-triangular coordinates as symmetric matrices."""
         x = _scale_tril_off_diagonal(x, self.diagonal, 1 / sqrt(2))
-        return x[..., self.map].view(*x.shape[:-1], self.dim, self.dim)
+        return x[..., self.symmetric_indices].view(
+            *x.shape[:-1], self.dim, self.dim
+        )
 
 
 class KthEigval(nn.Module):
@@ -273,7 +278,8 @@ class KthEigvalLastMonotone(nn.Module):
         self.eig_idx = _resolve_eig_idx(dim, eig_idx)
 
         num_tril = dim * (dim + 1) // 2
-        self.dense_tril = nn.Parameter(torch.empty(num_features, num_tril))
+        self.base_tril = nn.Parameter(torch.empty(num_tril))
+        self.feature_tril = nn.Parameter(torch.empty(num_features - 1, num_tril))
         self.last_diag = nn.Parameter(torch.empty(dim))
         self.tril_emb = TrilEmbed(dim)
 
@@ -281,8 +287,8 @@ class KthEigvalLastMonotone(nn.Module):
 
     def reset_parameters(self) -> None:
         _reset_spectral_pencil_(
-            self.dense_tril[0],
-            self.dense_tril[1:],
+            self.base_tril,
+            self.feature_tril,
             dim=self.dim,
             eig_idx=self.eig_idx,
             fan_in=self.num_features,
@@ -295,7 +301,7 @@ class KthEigvalLastMonotone(nn.Module):
                 f"expected input shape (..., {self.num_features}); got {tuple(x.shape)}"
             )
 
-        all_but_last_tril = self.dense_tril[0] + x[..., :-1].matmul(self.dense_tril[1:])
+        all_but_last_tril = self.base_tril + x[..., :-1].matmul(self.feature_tril)
         all_but_last_mat = self.tril_emb(all_but_last_tril)
         last_mat = torch.diag_embed(x[..., -1:] * square_plus(self.last_diag))
         return torch.linalg.eigvalsh(all_but_last_mat + last_mat)[..., self.eig_idx]

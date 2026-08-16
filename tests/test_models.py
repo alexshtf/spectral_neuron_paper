@@ -92,8 +92,8 @@ def test_monotone_spectral_initialization_uses_the_same_pencil_contract():
     torch.manual_seed(0)
     model = KthEigvalLastMonotone(num_features=3, dim=5, eig_idx=2)
     coefficients = _assert_centered_gapped_identity_initialization(
-        model.dense_tril[0],
-        model.dense_tril[1:],
+        model.base_tril,
+        model.feature_tril,
         dim=model.dim,
         eig_idx=model.eig_idx,
         fan_in=model.num_features,
@@ -116,10 +116,10 @@ def test_last_monotone_model_matches_matrix_path():
     model = KthEigvalLastMonotone(num_features=3, dim=2, eig_idx=1)
     sqrt_2 = 2**0.5
     with torch.no_grad():
-        model.dense_tril.copy_(
+        model.base_tril.copy_(torch.tensor([1.0, sqrt_2 * 0.2, 2.0]))
+        model.feature_tril.copy_(
             torch.tensor(
                 [
-                    [1.0, sqrt_2 * 0.2, 2.0],
                     [0.5, sqrt_2 * -0.4, -0.25],
                     [-1.0, sqrt_2 * 0.3, 0.75],
                 ]
