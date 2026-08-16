@@ -3,43 +3,30 @@ from typing import Literal
 import pandas as pd
 from matplotlib.figure import Figure
 
+from paper.experiments.criteo_scaling import matched_fm_rank
+
 from ._common import (
     BINARY_METRIC_LABELS,
     TRAIN_SIZE_LABEL,
-    _binary_relplot,
-    _dimension_styles,
+    CurveStyle,
+    _dimension_curve_styles,
+    _finish_scaling_grid,
+    _summary_curve_grid,
+    _summary_metric_columns,
 )
 
-CRITEO_MODEL_LABELS = {
-    "linear-bucketed": "Linear (bucketed)",
-    "linear-continuous": "Linear (continuous)",
-    "fm": "FM",
-    "spectral-bucketed": "Spectral (bucketed)",
-    "spectral-continuous": "Spectral (continuous)",
-}
-
-CRITEO_MODEL_COLORS = {
-    "Linear (bucketed)": "#555555",
-    "Linear (continuous)": "#CC78BC",
-    "FM": "#0173B2",
-    "Spectral (bucketed)": "#DE8F05",
-    "Spectral (continuous)": "#029E73",
-}
-
-CRITEO_MODEL_MARKERS = {
-    "Linear (bucketed)": "o",
-    "Linear (continuous)": "P",
-    "FM": "s",
-    "Spectral (bucketed)": "^",
-    "Spectral (continuous)": "D",
-}
-
-CRITEO_MODEL_DASHES = {
-    "Linear (bucketed)": "",
-    "Linear (continuous)": (2, 2),
-    "FM": "",
-    "Spectral (bucketed)": (4, 2),
-    "Spectral (continuous)": "",
+_CRITEO_MODEL_STYLES = {
+    "linear-bucketed": CurveStyle("Linear (bucketed)", "#555555", "o"),
+    "linear-continuous": CurveStyle(
+        "Linear (continuous)", "#CC78BC", "P", (2, 2)
+    ),
+    "fm": CurveStyle("FM", "#0173B2", "s"),
+    "spectral-bucketed": CurveStyle(
+        "Spectral (bucketed)", "#DE8F05", "^", (4, 2)
+    ),
+    "spectral-continuous": CurveStyle(
+        "Spectral (continuous)", "#029E73", "D"
+    ),
 }
 
 type CriteoSpectralVariant = Literal[
@@ -48,183 +35,208 @@ type CriteoSpectralVariant = Literal[
 ]
 
 
-def _check_criteo_results(results: pd.DataFrame, metric: str) -> str:
-    if metric not in BINARY_METRIC_LABELS:
-        raise ValueError(
-            f"metric must be one of {sorted(BINARY_METRIC_LABELS)}; got {metric!r}"
-        )
-
-    value = f"test_{metric}"
-    required = {
-        "train_size",
-        "model",
-        "dim",
-        value,
-    }
-    missing = required.difference(results.columns)
+def _check_criteo_summary(summary: pd.DataFrame, metric: str) -> None:
+    _summary_metric_columns(summary, metric)
+    missing = {"model", "dim"}.difference(summary.columns)
     if missing:
-        raise ValueError(f"results are missing columns: {sorted(missing)}")
-    return value
+        raise ValueError(f"summary is missing columns: {sorted(missing)}")
 
 
-def _spectral_dimensions(results: pd.DataFrame) -> list[int]:
-    values = results.loc[
-        results["model"].isin(("spectral-bucketed", "spectral-continuous")),
+def _spectral_dimensions(summary: pd.DataFrame) -> list[int]:
+    values = summary.loc[
+        summary["model"].isin(("spectral-bucketed", "spectral-continuous")),
         "dim",
     ].unique()
     dimensions = sorted(map(int, values))
     if not dimensions:
-        raise ValueError("results contain no spectral models")
+        raise ValueError("summary contains no spectral models")
     return dimensions
 
 
-def _criteo_relplot(
-    results: pd.DataFrame,
-    *,
-    metric: str,
-    title: str,
-    by: str,
-    hue_order: list,
-    palette,
-    markers,
-    dashes,
-    col: str | None = None,
-    xlim: tuple[float, float] | None = None,
-) -> Figure:
-    return _binary_relplot(
-        results,
-        value=_check_criteo_results(results, metric),
-        metric=metric,
-        title=title,
-        x_label=TRAIN_SIZE_LABEL,
-        by=by,
-        hue_order=hue_order,
-        palette=palette,
-        markers=markers,
-        dashes=dashes,
-        legend_title="model" if by == "model_label" else "dimension",
-        col=col,
-        xlim=xlim,
+def _label_models(summary: pd.DataFrame) -> pd.DataFrame:
+    labeled = summary.copy()
+    labeled["model_label"] = labeled["model"].map(
+        {model: style.label for model, style in _CRITEO_MODEL_STYLES.items()}
     )
-
-
-def _label_criteo_models(results: pd.DataFrame) -> pd.DataFrame:
-    labeled = results.copy()
-    labeled["model_label"] = labeled["model"].map(CRITEO_MODEL_LABELS)
     return labeled
 
 
+def _require_models(summary: pd.DataFrame, models: set[str]) -> None:
+    missing = models.difference(summary["model"].unique())
+    if missing:
+        raise ValueError(f"summary is missing models: {sorted(missing)}")
+
+
+def _require_dimension_grid(
+    summary: pd.DataFrame,
+    models: set[str],
+    dimensions: list[int],
+) -> None:
+    observed = set(
+        summary[["model", "dim"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    expected = {
+        (model, dimension) for model in models for dimension in dimensions
+    }
+    if observed != expected:
+        raise ValueError("summary has an incomplete model/dimension grid")
+
+
+def _matched_model_curves(summary: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
+    models = set(_CRITEO_MODEL_STYLES)
+    _require_models(summary, models)
+    dimensions = _spectral_dimensions(summary)
+    nonlinear_models = {
+        "fm",
+        "spectral-bucketed",
+        "spectral-continuous",
+    }
+    nonlinear = summary.loc[
+        summary["model"].isin(nonlinear_models)
+    ].copy()
+    _require_dimension_grid(nonlinear, nonlinear_models, dimensions)
+    nonlinear["dimension"] = nonlinear["dim"]
+
+    linears = summary.loc[
+        summary["model"].isin(("linear-bucketed", "linear-continuous"))
+    ].merge(pd.DataFrame({"dimension": dimensions}), how="cross")
+    return _label_models(pd.concat((linears, nonlinear))), dimensions
+
+
+def _spectral_comparison_curves(summary: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
+    models = {"spectral-bucketed", "spectral-continuous"}
+    _require_models(summary, models)
+    spectral = summary.loc[
+        summary["model"].isin(models)
+    ]
+    dimensions = _spectral_dimensions(spectral)
+    _require_dimension_grid(spectral, models, dimensions)
+    return _label_models(spectral), dimensions
+
+
+def _spectral_dimension_curves(
+    summary: pd.DataFrame, variant: CriteoSpectralVariant
+) -> tuple[pd.DataFrame, list[int]]:
+    spectral = summary.loc[summary["model"] == variant]
+    return spectral, _spectral_dimensions(spectral)
+
+
+def _fm_dimension_curves(summary: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
+    fm = summary.loc[summary["model"] == "fm"].copy()
+    fm["rank"] = fm["dim"].map(matched_fm_rank)
+    ranks = sorted(map(int, fm["rank"].unique()))
+    if not ranks:
+        raise ValueError("summary contains no FM models")
+    return fm, ranks
+
+
 def plot_criteo_models_by_dimension(
-    results: pd.DataFrame,
+    summary: pd.DataFrame,
     *,
     metric: str = "logloss",
 ) -> Figure:
     """Compare parameter-matched models in one facet per spectral dimension."""
-    _check_criteo_results(results, metric)
-    dimensions = _spectral_dimensions(results)
-
-    nonlinear = results.loc[
-        results["model"].isin(("fm", "spectral-bucketed", "spectral-continuous"))
-    ].copy()
-    if not set(nonlinear["dim"]) <= set(dimensions):
-        raise ValueError("some nonlinear models have no matched spectral dimension")
-    nonlinear["dimension"] = nonlinear["dim"]
-
-    linears = results.loc[
-        results["model"].isin(("linear-bucketed", "linear-continuous"))
-    ].merge(
-        pd.DataFrame({"dimension": dimensions}), how="cross"
-    )
-    faceted = _label_criteo_models(pd.concat((linears, nonlinear)))
-    model_order = list(CRITEO_MODEL_LABELS.values())
-    return _criteo_relplot(
+    _check_criteo_summary(summary, metric)
+    faceted, dimensions = _matched_model_curves(summary)
+    grid = _summary_curve_grid(
         faceted,
         metric=metric,
-        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: matched models",
         by="model_label",
-        hue_order=model_order,
-        palette=CRITEO_MODEL_COLORS,
-        markers=CRITEO_MODEL_MARKERS,
-        dashes=CRITEO_MODEL_DASHES,
+        styles=tuple(_CRITEO_MODEL_STYLES.values()),
         col="dimension",
+        col_order=dimensions,
+    )
+    return _finish_scaling_grid(
+        grid,
+        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: matched models",
+        x_label=TRAIN_SIZE_LABEL,
+        y_label=f"{BINARY_METRIC_LABELS[metric]} ↓",
+        legend_title="model",
+        facet_title="dim={col_name}",
     )
 
 
 def plot_criteo_spectral_comparison(
-    results: pd.DataFrame,
+    summary: pd.DataFrame,
     *,
     metric: str = "logloss",
 ) -> Figure:
     """Compare bucketed and continuous spectral preprocessing by dimension."""
-    spectral = _label_criteo_models(
-        results.loc[
-            results["model"].isin(
-                ("spectral-bucketed", "spectral-continuous")
-            )
-        ]
-    )
-    model_order = ["Spectral (bucketed)", "Spectral (continuous)"]
-    return _criteo_relplot(
+    _check_criteo_summary(summary, metric)
+    spectral, dimensions = _spectral_comparison_curves(summary)
+    variants = ("spectral-bucketed", "spectral-continuous")
+    grid = _summary_curve_grid(
         spectral,
         metric=metric,
-        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: spectral preprocessing",
         by="model_label",
-        hue_order=model_order,
-        palette=CRITEO_MODEL_COLORS,
-        markers=CRITEO_MODEL_MARKERS,
-        dashes=CRITEO_MODEL_DASHES,
+        styles=tuple(_CRITEO_MODEL_STYLES[variant] for variant in variants),
         col="dim",
+        col_order=dimensions,
+    )
+    return _finish_scaling_grid(
+        grid,
+        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: spectral preprocessing",
+        x_label=TRAIN_SIZE_LABEL,
+        y_label=f"{BINARY_METRIC_LABELS[metric]} ↓",
+        legend_title="model",
+        facet_title="dim={col_name}",
     )
 
 
 def plot_criteo_spectral_dimensions(
-    results: pd.DataFrame,
+    summary: pd.DataFrame,
     variant: CriteoSpectralVariant,
     *,
     metric: str = "logloss",
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
     """Compare all dimensions of one spectral preprocessing variant."""
-    spectral = results.loc[results["model"] == variant]
-    dimensions = _spectral_dimensions(spectral)
-    palette, markers = _dimension_styles(dimensions)
-    return _criteo_relplot(
+    _check_criteo_summary(summary, metric)
+    spectral, dimensions = _spectral_dimension_curves(summary, variant)
+    grid = _summary_curve_grid(
         spectral,
         metric=metric,
+        by="dim",
+        styles=_dimension_curve_styles(dimensions),
+    )
+    return _finish_scaling_grid(
+        grid,
         title=(
             f"Criteo {BINARY_METRIC_LABELS[metric]}: "
-            f"{CRITEO_MODEL_LABELS[variant]} across dimensions"
+            f"{_CRITEO_MODEL_STYLES[variant].label} across dimensions"
         ),
-        by="dim",
-        hue_order=dimensions,
-        palette=palette,
-        markers=markers,
-        dashes=False,
+        x_label=TRAIN_SIZE_LABEL,
+        y_label=f"{BINARY_METRIC_LABELS[metric]} ↓",
+        legend_title="dimension",
         xlim=xlim,
     )
 
 
 def plot_criteo_fm_dimensions(
-    results: pd.DataFrame,
+    summary: pd.DataFrame,
     *,
     metric: str = "logloss",
     xlim: tuple[float, float] | None = None,
 ) -> Figure:
     """Compare FM embedding dimensions."""
-    fm = results.loc[results["model"] == "fm"].copy()
-    fm["rank"] = fm["dim"].map(lambda dim: dim * (dim + 1) // 2 - 1)
-    ranks = sorted(map(int, fm["rank"].unique()))
-    if not ranks:
-        raise ValueError("results contain no FM models")
-    palette, markers = _dimension_styles(ranks)
-    return _criteo_relplot(
+    _check_criteo_summary(summary, metric)
+    fm, ranks = _fm_dimension_curves(summary)
+    grid = _summary_curve_grid(
         fm,
         metric=metric,
-        title=f"Criteo {BINARY_METRIC_LABELS[metric]}: FM across embedding dimensions",
         by="rank",
-        hue_order=ranks,
-        palette=palette,
-        markers=markers,
-        dashes=False,
+        styles=_dimension_curve_styles(ranks),
+    )
+    return _finish_scaling_grid(
+        grid,
+        title=(
+            f"Criteo {BINARY_METRIC_LABELS[metric]}: "
+            "FM across embedding dimensions"
+        ),
+        x_label=TRAIN_SIZE_LABEL,
+        y_label=f"{BINARY_METRIC_LABELS[metric]} ↓",
+        legend_title="dimension",
         xlim=xlim,
     )

@@ -163,14 +163,22 @@ class RunSettings:
     threads_per_worker: int | None
 
 
+def matched_fm_rank(capacity_dim: int) -> int:
+    """Match FM and spectral models by per-feature parameter width."""
+    return capacity_dim * (capacity_dim + 1) // 2 - 1
+
+
 def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
     match spec.variant:
         case "linear-bucketed" | "linear-continuous":
             return SparseLinear(num_features, NUM_FIELDS)
         case "fm":
             assert spec.capacity_dim is not None
-            rank = spec.capacity_dim * (spec.capacity_dim + 1) // 2 - 1
-            return FactorizationMachine(num_features, NUM_FIELDS, rank)
+            return FactorizationMachine(
+                num_features,
+                NUM_FIELDS,
+                matched_fm_rank(spec.capacity_dim),
+            )
         case "spectral-bucketed" | "spectral-continuous":
             assert spec.capacity_dim is not None
             return SparseMiddleEigval(

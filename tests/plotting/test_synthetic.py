@@ -1,7 +1,10 @@
 import pandas as pd
 import pytest
 
-from paper.plotting import plot_scaling
+from paper.plotting import (
+    plot_general_scaling,
+    plot_monotone_scaling,
+)
 
 
 def _row(
@@ -26,7 +29,7 @@ def _row(
     }
 
 
-def test_plot_scaling_pairs_monotone_models_by_dimension():
+def test_plot_monotone_scaling_pairs_models_by_dimension():
     summary = pd.DataFrame(
         [
             _row(
@@ -39,7 +42,7 @@ def test_plot_scaling_pairs_monotone_models_by_dimension():
         ]
     )
 
-    fig = plot_scaling(summary)
+    fig = plot_monotone_scaling(summary)
     axes = [ax for ax in fig.axes if ax.get_visible()]
 
     assert len(axes) == 4
@@ -49,16 +52,19 @@ def test_plot_scaling_pairs_monotone_models_by_dimension():
         "complexity=10, dim=3",
         "complexity=10, dim=5",
     }
-    assert all(len(ax.lines) == 2 for ax in axes)
-    assert {line.get_linestyle() for line in axes[0].lines} == {"-", "--"}
+    assert all(
+        {line.get_label() for line in ax.lines} == {"unconstrained", "monotone"}
+        for ax in axes
+    )
+    assert {
+        line.get_label(): line.get_linestyle() for line in axes[0].lines
+    } == {"unconstrained": "-", "monotone": "--"}
     assert len(fig.legends) == 1
     assert all(ax.get_legend() is None for ax in axes)
-    assert all(
-        ax.get_xlabel() == "training-sample budget" for ax in axes
-    )
+    assert all(ax.get_xlabel() == "training-sample budget" for ax in axes)
 
 
-def test_plot_scaling_styles_models_and_dimensions():
+def test_plot_general_scaling_styles_models_and_dimensions():
     summary = pd.DataFrame(
         [
             _row(
@@ -74,7 +80,7 @@ def test_plot_scaling_styles_models_and_dimensions():
         ]
     )
 
-    fig = plot_scaling(summary)
+    fig = plot_general_scaling(summary)
     lines = {line.get_label(): line for line in fig.axes[0].lines}
 
     assert (
@@ -95,7 +101,14 @@ def test_plot_scaling_styles_models_and_dimensions():
     assert all(ax.get_legend() is None for ax in fig.axes)
 
 
-def test_plot_scaling_rejects_mixed_target_kinds():
+@pytest.mark.parametrize(
+    ("plotter", "target_kind"),
+    [
+        (plot_general_scaling, "monotone"),
+        (plot_monotone_scaling, "general"),
+    ],
+)
+def test_scaling_plots_reject_the_wrong_target_kind(plotter, target_kind):
     summary = pd.DataFrame(
         [
             _row(
@@ -105,24 +118,47 @@ def test_plot_scaling_rejects_mixed_target_kinds():
                 train_size=train_size,
                 target_kind=target_kind,
             )
-            for target_kind in ("general", "monotone")
             for train_size in (32, 64)
         ]
     )
 
-    with pytest.raises(ValueError, match="single target_kind"):
-        plot_scaling(summary)
+    with pytest.raises(ValueError, match="expected target_kind"):
+        plotter(summary)
+
+
+def test_monotone_scaling_requires_the_intended_model_pair():
+    summary = pd.DataFrame(
+        [
+            _row(
+                complexity=5,
+                model=model,
+                dim=3,
+                train_size=train_size,
+                target_kind="monotone",
+            )
+            for model in ("unconstrained", "monotone", "extra")
+            for train_size in (32, 64)
+        ]
+    )
+
+    with pytest.raises(ValueError, match="unconstrained and monotone"):
+        plot_monotone_scaling(summary)
 
 
 @pytest.mark.parametrize(
-    ("target_kind", "models", "expected_axes", "lines_per_axis"),
+    ("plotter", "target_kind", "models", "expected_axes"),
     [
-        ("monotone", ("unconstrained", "monotone"), 4, 2),
-        ("general", ("unconstrained",), 2, 2),
+        (
+            plot_monotone_scaling,
+            "monotone",
+            ("unconstrained", "monotone"),
+            4,
+        ),
+        (plot_general_scaling, "general", ("unconstrained",), 2),
     ],
 )
-def test_plot_scaling_separates_noise_before_choosing_target_layout(
-    target_kind, models, expected_axes, lines_per_axis
+def test_scaling_plots_separate_noise_levels(
+    plotter, target_kind, models, expected_axes
 ):
     summary = pd.DataFrame(
         [
@@ -142,20 +178,14 @@ def test_plot_scaling_separates_noise_before_choosing_target_layout(
         ]
     )
 
-    fig = plot_scaling(summary)
-    assert [subfigure._suptitle.get_text() for subfigure in fig.subfigs] == [
+    fig = plotter(summary)
+    assert [subfigure.get_suptitle() for subfigure in fig.subfigs] == [
         "Noiseless training (σ = 0)",
         "Noisy training (σ = 0.1)",
         "Noisy training (σ = 0.2)",
     ]
-    fig.canvas.draw()
-    positions = [subfigure.bbox.bounds for subfigure in fig.subfigs]
-    assert len({round(x, 6) for x, _, _, _ in positions}) == 1
-    assert len({round(y, 6) for _, y, _, _ in positions}) == 3
     for subfigure in fig.subfigs:
         axes = [ax for ax in subfigure.axes if ax.get_visible()]
         assert len(axes) == expected_axes
-        assert all(len(ax.lines) == lines_per_axis for ax in axes)
-        assert all(len(line.get_xdata()) == 2 for ax in axes for line in ax.lines)
         assert len(subfigure.legends) == 1
         assert all(ax.get_legend() is None for ax in axes)

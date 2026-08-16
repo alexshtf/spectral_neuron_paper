@@ -1,5 +1,5 @@
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -12,7 +12,9 @@ from ._common import (
 )
 
 SCALING_COLUMNS = {
+    "target_kind",
     "complexity",
+    "noise_std",
     "model",
     "dim",
     "train_size",
@@ -79,14 +81,6 @@ def _plot_curve(
     ax.fill_between(x, q25, q75, **fill_kwargs)
 
 
-def _use_pairwise_scaling(summary: pd.DataFrame) -> bool:
-    if "target_kind" not in summary or "model" not in summary:
-        return False
-    target_kinds = set(summary["target_kind"].dropna().unique())
-    models = set(summary["model"].dropna().unique())
-    return target_kinds == {"monotone"} and set(_MONOTONE_MODEL_PAIR) <= models
-
-
 def _add_shared_legend(fig, axes, *, borderaxespad: float = 0.5) -> None:
     handles = []
     labels = []
@@ -115,21 +109,13 @@ def _check_scaling_columns(summary: pd.DataFrame) -> None:
         raise ValueError(f"summary is missing columns: {sorted(missing)}")
 
 
-def _check_single_target_kind(summary: pd.DataFrame) -> None:
-    if "target_kind" not in summary:
-        return
-
+def _check_target_kind(summary: pd.DataFrame, expected: str) -> None:
     target_kinds = sorted(summary["target_kind"].dropna().unique())
-    if len(target_kinds) > 1:
-        raise ValueError(
-            "plot_scaling expects a single target_kind; "
-            f"filter summary first, got {target_kinds}"
-        )
+    if target_kinds != [expected]:
+        raise ValueError(f"expected target_kind={expected!r}, got {target_kinds}")
 
 
 def _noise_stds(summary: pd.DataFrame) -> list[float]:
-    if "noise_std" not in summary:
-        return []
     if summary["noise_std"].isna().any():
         raise ValueError("noise_std must not contain missing values")
     return sorted(summary["noise_std"].unique().tolist())
@@ -141,14 +127,18 @@ def _noise_title(noise_std: float) -> str:
     return f"Noisy training (σ = {noise_std:g})"
 
 
-def _scaling_figure_size(summary: pd.DataFrame) -> tuple[float, float]:
+def _grid_figure_size(summary: pd.DataFrame) -> tuple[float, float]:
     complexities = summary["complexity"].nunique()
-    if _use_pairwise_scaling(summary):
-        return 4.0 * summary["dim"].nunique(), 3.0 * complexities
-
     n_cols = int(math.ceil(math.sqrt(complexities)))
     n_rows = int(math.ceil(complexities / n_cols))
     return 4.5 * n_cols, 3.5 * n_rows
+
+
+def _pairwise_figure_size(summary: pd.DataFrame) -> tuple[float, float]:
+    return (
+        4.0 * summary["dim"].nunique(),
+        3.0 * summary["complexity"].nunique(),
+    )
 
 
 def _plot_scaling_grid(
@@ -254,10 +244,13 @@ def _plot_pairwise_scaling(
     return fig
 
 
-def _plot_noise_subfigures(summary: pd.DataFrame) -> Figure:
+def _plot_noise_subfigures(
+    summary: pd.DataFrame,
+    plotter: Callable[..., FigureContainer],
+    figure_size: tuple[float, float],
+) -> Figure:
     noise_stds = _noise_stds(summary)
-    pairwise = _use_pairwise_scaling(summary)
-    width, height = _scaling_figure_size(summary)
+    width, height = figure_size
     fig = plt.figure(
         figsize=(width, height * len(noise_stds)),
         layout="constrained",
@@ -268,22 +261,34 @@ def _plot_noise_subfigures(summary: pd.DataFrame) -> Figure:
     for noise_std, subfigure in zip(noise_stds, subfigures):
         noise_summary = summary.loc[summary["noise_std"] == noise_std]
         subfigure.suptitle(_noise_title(noise_std), y=1, fontsize="x-large")
-        if pairwise:
-            _plot_pairwise_scaling(
-                noise_summary,
-                container=subfigure,
-            )
-        else:
-            _plot_scaling_grid(noise_summary, container=subfigure)
+        plotter(noise_summary, container=subfigure)
 
     return fig
 
 
-def plot_scaling(summary: pd.DataFrame):
+def plot_general_scaling(summary: pd.DataFrame) -> FigureContainer:
     _check_scaling_columns(summary)
-    _check_single_target_kind(summary)
+    _check_target_kind(summary, "general")
     if len(_noise_stds(summary)) > 1:
-        return _plot_noise_subfigures(summary)
-    if _use_pairwise_scaling(summary):
-        return _plot_pairwise_scaling(summary)
+        return _plot_noise_subfigures(
+            summary,
+            _plot_scaling_grid,
+            _grid_figure_size(summary),
+        )
     return _plot_scaling_grid(summary)
+
+
+def plot_monotone_scaling(summary: pd.DataFrame) -> FigureContainer:
+    _check_scaling_columns(summary)
+    _check_target_kind(summary, "monotone")
+    if set(summary["model"].unique()) != set(_MONOTONE_MODEL_PAIR):
+        raise ValueError(
+            "monotone scaling expects unconstrained and monotone models"
+        )
+    if len(_noise_stds(summary)) > 1:
+        return _plot_noise_subfigures(
+            summary,
+            _plot_pairwise_scaling,
+            _pairwise_figure_size(summary),
+        )
+    return _plot_pairwise_scaling(summary)

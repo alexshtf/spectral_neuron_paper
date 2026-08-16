@@ -5,7 +5,7 @@ import seaborn as sns
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
-from ._common import _dimension_styles
+from ._common import _dimension_curve_styles
 
 HIGGS_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
 
@@ -97,7 +97,10 @@ def plot_higgs_deviation_shell_grid(
     )
 
     dimensions = sorted(map(int, averaged["dim"].unique()))
-    colors, _ = _dimension_styles(dimensions)
+    colors = {
+        int(style.label): style.color
+        for style in _dimension_curve_styles(dimensions)
+    }
     linestyles = {
         dim: HIGGS_DIMENSION_LINESTYLES[
             index % len(HIGGS_DIMENSION_LINESTYLES)
