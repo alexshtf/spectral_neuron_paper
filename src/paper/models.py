@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import sqrt
 from typing import Literal
@@ -6,6 +7,13 @@ import torch
 from torch import nn
 
 type ModelKind = Literal["unconstrained", "monotone"]
+
+
+def make_seeded_model(factory: Callable[[], nn.Module], *, seed: int) -> nn.Module:
+    """Construct a model deterministically without changing the ambient RNG."""
+    with torch.random.fork_rng():
+        torch.manual_seed(seed)
+        return factory()
 
 
 def _scale_tril_off_diagonal(
@@ -212,6 +220,11 @@ class FactorizationMachine(SparseLinear):
             - vectors.square().sum(dim=(-2, -1))
         )
         return linear + interaction
+
+
+def matched_fm_rank(spectral_dim: int) -> int:
+    """Match FM and spectral models by per-feature parameter width."""
+    return spectral_dim * (spectral_dim + 1) // 2 - 1
 
 
 class SparseMiddleEigval(nn.Module):

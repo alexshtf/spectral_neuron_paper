@@ -1,5 +1,5 @@
 import argparse
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
@@ -649,18 +649,16 @@ def default_result_path(
 ) -> Path:
     return DEFAULT_RUNS_DIR / (
         f"higgs_robustness_{profile_name}_noise_{_float_label(_noise_level(noise_level))}"
-        "_repeated_shuffle.csv.zst"
+        f"_{PROTOCOL}.csv.zst"
     )
 
 
-def build_arg_parser(
-    profiles: Mapping[str, Profile] = PROFILES,
-) -> argparse.ArgumentParser:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data", type=Path, required=True, help="Headerless HIGGS CSV."
     )
-    parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
+    parser.add_argument("--profile", choices=PROFILES.keys(), default="sanity")
     parser.add_argument("--scaling-results", type=Path, default=None)
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=None)

@@ -12,6 +12,7 @@ from paper.criteo import (
     CriteoTask,
     HybridPreprocessor,
     _bucket_numeric,
+    default_cache_dir,
     fit_preprocessors,
     load_encoded,
     load_preprocessor,
@@ -26,6 +27,12 @@ def _compress_zstd(path: Path) -> Path:
     compressed.write_bytes(zstd.compress(path.read_bytes(), level=3))
     path.unlink()
     return compressed
+
+
+def test_default_cache_dir_tracks_the_corpus_cache_version(monkeypatch):
+    monkeypatch.setattr("paper.criteo.CACHE_VERSION", 7)
+
+    assert default_cache_dir(Path("train.txt")).name == ".train.txt.cache-v7"
 
 
 def _categorical_vocabularies() -> tuple[np.ndarray, ...]:
@@ -108,7 +115,6 @@ def test_hybrid_preprocessor_separates_special_and_positive_values():
     assert feature_ids[:, 0].tolist() == [0, 2, 3, 4, 1, 5]
     assert feature_values[:5, 0].tolist() == [1.0] * 5
     assert feature_values[5, 0] == np.float32(np.log1p(1_000_000))
-    assert preprocessor.num_numeric_features == 6 + 4 * (NUM_NUMERIC_FIELDS - 1)
     assert preprocessor.field_offsets.dtype == np.int32
 
 

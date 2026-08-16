@@ -47,6 +47,11 @@ type PreprocessingKind = Literal["bucket", "hybrid"]
 type FeatureArrays = tuple[np.ndarray, np.ndarray | None]
 
 
+def default_cache_dir(raw_path: Path) -> Path:
+    raw_path = Path(raw_path)
+    return raw_path.with_name(f".{raw_path.name}.cache-v{CACHE_VERSION}")
+
+
 @contextmanager
 def _exclusive_lock(path: Path) -> Iterator[None]:
     with path.open("a+b") as lock:
@@ -373,10 +378,6 @@ class HybridPreprocessor:
         return np.concatenate(
             (numeric, _categorical_sizes(self.categorical_vocabularies))
         )
-
-    @property
-    def num_numeric_features(self) -> int:
-        return sum(len(values) + 4 for values in self.negative_values)
 
     @property
     def num_features(self) -> int:

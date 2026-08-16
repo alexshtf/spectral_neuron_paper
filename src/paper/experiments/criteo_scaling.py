@@ -1,5 +1,4 @@
 import argparse
-from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -15,6 +14,7 @@ from paper.criteo import (
     CriteoTask,
     EncodedData,
     PreprocessingKind,
+    default_cache_dir,
     fit_preprocessors,
     prepare_corpus,
     prepare_encoded_data,
@@ -30,7 +30,13 @@ from paper.experiments.scaling import (
     run_tuning_and_evaluation,
     tuning_configs,
 )
-from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
+from paper.models import (
+    FactorizationMachine,
+    SparseLinear,
+    SparseMiddleEigval,
+    make_seeded_model,
+    matched_fm_rank,
+)
 from paper.shuffling import ShuffledEpochs
 from paper.training import BINARY_OBJECTIVE, training_checkpoints
 
@@ -163,11 +169,6 @@ class RunSettings:
     threads_per_worker: int | None
 
 
-def matched_fm_rank(capacity_dim: int) -> int:
-    """Match FM and spectral models by per-feature parameter width."""
-    return capacity_dim * (capacity_dim + 1) // 2 - 1
-
-
 def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
     match spec.variant:
         case "linear-bucketed" | "linear-continuous":
@@ -190,14 +191,6 @@ def make_model(spec: CriteoModelSpec, num_features: int) -> nn.Module:
             raise ValueError(spec.variant)
 
 
-def _make_seeded_model(
-    spec: CriteoModelSpec, *, num_features: int, init_seed: int
-) -> nn.Module:
-    with torch.random.fork_rng():
-        torch.manual_seed(init_seed)
-        return make_model(spec, num_features)
-
-
 def _make_task_model(
     config: RunConfig[CriteoModelSpec], settings: RunSettings
 ) -> tuple[CriteoTask, nn.Module]:
@@ -207,10 +200,9 @@ def _make_task_model(
     preprocessing = config.model_spec.preprocessing
     data = settings.encoded_data[preprocessing]
     task = CriteoTask(data, settings.orders[config.data_seed], settings.batch_size)
-    model = _make_seeded_model(
-        config.model_spec,
-        num_features=data.num_features,
-        init_seed=config.init_seed,
+    model = make_seeded_model(
+        partial(make_model, config.model_spec, data.num_features),
+        seed=config.init_seed,
     )
     return task, model
 
@@ -377,19 +369,17 @@ def validate_raw(
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
     suffix = f"_{variant}" if variant is not None else ""
     return DEFAULT_RUNS_DIR / (
-        f"criteo_scaling_{profile_name}_repeated_shuffle{suffix}.csv"
+        f"criteo_scaling_{profile_name}_{PROTOCOL}{suffix}.csv"
     )
 
 
-def build_arg_parser(
-    profiles: Mapping[str, Profile] = PROFILES,
-) -> argparse.ArgumentParser:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data", type=Path, required=True, help="Headerless Criteo TSV."
     )
     parser.add_argument("--cache-dir", type=Path, default=None)
-    parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
+    parser.add_argument("--profile", choices=PROFILES.keys(), default="sanity")
     parser.add_argument("--variant", choices=VARIANTS, default=None)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
@@ -402,7 +392,7 @@ def build_arg_parser(
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
     profile = PROFILES[args.profile]
-    cache_dir = args.cache_dir or args.data.with_name(f".{args.data.name}.cache-v2")
+    cache_dir = args.cache_dir or default_cache_dir(args.data)
     raw = run_profile(
         profile,
         raw_path=args.data,

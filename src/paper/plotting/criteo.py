@@ -3,7 +3,7 @@ from typing import Literal
 import pandas as pd
 from matplotlib.figure import Figure
 
-from paper.experiments.criteo_scaling import matched_fm_rank
+from paper.models import matched_fm_rank
 
 from ._common import (
     BINARY_METRIC_LABELS,

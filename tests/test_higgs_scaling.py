@@ -12,7 +12,6 @@ from paper.experiments.higgs_scaling import (
     Profile,
     SeedGrid,
     _make_mlp,
-    _make_seeded_model,
     default_raw_path,
     make_model,
     matched_mlp_width,
@@ -173,28 +172,6 @@ def test_dense_higgs_models_preserve_batch_dimensions(spec):
 
     assert model(torch.zeros(7, NUM_FEATURES)).shape == (7,)
     assert model(torch.zeros(2, 7, NUM_FEATURES)).shape == (2, 7)
-
-
-@pytest.mark.parametrize(
-    "spec",
-    [
-        HiggsModelSpec("linear"),
-        HiggsModelSpec("mlp-1", 3),
-        HiggsModelSpec("spectral", 3),
-    ],
-)
-def test_seeded_model_construction_does_not_change_global_rng(spec):
-    torch.manual_seed(17)
-    state = torch.random.get_rng_state()
-
-    first = _make_seeded_model(spec, init_seed=3)
-    second = _make_seeded_model(spec, init_seed=3)
-
-    assert torch.equal(torch.random.get_rng_state(), state)
-    for first_parameter, second_parameter in zip(
-        first.parameters(), second.parameters(), strict=True
-    ):
-        torch.testing.assert_close(first_parameter, second_parameter)
 
 
 def test_tiny_profile_runs_all_families_with_per_checkpoint_selection(complete_raw):

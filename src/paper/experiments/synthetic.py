@@ -8,16 +8,14 @@ from typing import TextIO
 
 import numpy as np
 import pandas as pd
-import torch
 
 from paper.experiments.results import (
     DEFAULT_RUNS_DIR,
-    WRITE_MODES,
     summarize_quantiles,
     write_csv,
 )
 from paper.experiments.runner import run_many
-from paper.models import ModelKind, ModelSpec, make_model
+from paper.models import ModelKind, ModelSpec, make_model, make_seeded_model
 from paper.targets import ArrayTarget, TargetKind, TargetSpec
 from paper.tasks import SyntheticTask
 from paper.training import REGRESSION_OBJECTIVE, fit_and_evaluate
@@ -172,14 +170,6 @@ class RunSettings:
     test_size: int
 
 
-def _make_seeded_model(
-    model_spec: ModelSpec, *, input_dim: int, init_seed: int
-) -> torch.nn.Module:
-    with torch.random.fork_rng():
-        torch.manual_seed(init_seed)
-        return make_model(model_spec, input_dim)
-
-
 def _with_metadata(
     df: pd.DataFrame, *, config: RunConfig, batch_size: int
 ) -> pd.DataFrame:
@@ -218,10 +208,9 @@ def run_config(
         train_seed=config.init_seed,
         noise_std=config.noise_std,
     )
-    model = _make_seeded_model(
-        config.model_spec,
-        input_dim=task.input_dim,
-        init_seed=config.init_seed,
+    model = make_seeded_model(
+        partial(make_model, config.model_spec, task.input_dim),
+        seed=config.init_seed,
     )
     if any(train_size % settings.batch_size for train_size in settings.train_sizes):
         raise ValueError("synthetic train sizes must be divisible by batch_size")
@@ -395,7 +384,6 @@ def build_arg_parser(profiles: Mapping[str, Profile]) -> argparse.ArgumentParser
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--write-mode", choices=WRITE_MODES, default="overwrite")
     return parser
 
 
@@ -416,4 +404,4 @@ def run_cli(
     profile = profiles[args.profile]
     out = args.out or default_raw_path(experiment_name, args.profile)
     raw = run_profile(profile, workers=args.workers, progress=not args.quiet)
-    write_csv(raw, out, write_mode=args.write_mode)
+    write_csv(raw, out)

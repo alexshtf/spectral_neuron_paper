@@ -8,8 +8,24 @@ from paper.models import (
     SparseLinear,
     SparseMiddleEigval,
     TrilEmbed,
+    make_seeded_model,
+    matched_fm_rank,
     square_plus,
 )
+
+
+def test_make_seeded_model_is_reproducible_without_changing_the_ambient_rng():
+    torch.manual_seed(17)
+    state = torch.random.get_rng_state().clone()
+
+    first = make_seeded_model(lambda: torch.nn.Linear(3, 2), seed=3)
+    second = make_seeded_model(lambda: torch.nn.Linear(3, 2), seed=3)
+
+    assert torch.equal(torch.random.get_rng_state(), state)
+    for first_parameter, second_parameter in zip(
+        first.parameters(), second.parameters(), strict=True
+    ):
+        torch.testing.assert_close(first_parameter, second_parameter)
 
 
 def test_tril_embed_is_isometric():
@@ -204,7 +220,7 @@ def test_fm_and_spectral_match_parameters_per_feature(dim):
     fm = FactorizationMachine(
         num_features,
         num_fields=3,
-        rank=parameters_per_feature - 1,
+        rank=matched_fm_rank(dim),
     )
     spectral = SparseMiddleEigval(num_features, num_fields=3, dim=dim)
 

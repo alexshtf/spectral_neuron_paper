@@ -1,5 +1,4 @@
 import argparse
-from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from itertools import pairwise
@@ -31,7 +30,7 @@ from paper.higgs import (
     default_cache_dir,
     prepare_corpus,
 )
-from paper.models import KthEigval
+from paper.models import KthEigval, make_seeded_model
 from paper.training import BINARY_OBJECTIVE, training_checkpoints
 
 
@@ -44,7 +43,7 @@ VARIANTS: tuple[Variant, ...] = (
     "mlp-3",
     "spectral",
 )
-MLP_DEPTHS: dict[Variant, int] = {
+_MLP_DEPTHS: dict[Variant, int] = {
     "mlp-1": 1,
     "mlp-2": 2,
     "mlp-3": 3,
@@ -173,14 +172,15 @@ class HiggsModelSpec:
 
     @property
     def depth(self) -> int | None:
-        return MLP_DEPTHS.get(self.variant)
+        return _MLP_DEPTHS.get(self.variant)
 
     def width(self, input_dim: int) -> int:
-        if self.depth is None:
+        depth = self.depth
+        if depth is None:
             return 0
         assert self.capacity_dim is not None
         target = spectral_parameter_count(input_dim, self.capacity_dim)
-        return matched_mlp_width(input_dim, self.depth, target)
+        return matched_mlp_width(input_dim, depth, target)
 
 
 @dataclass(frozen=True)
@@ -229,7 +229,8 @@ def make_model(spec: HiggsModelSpec, input_dim: int = NUM_FEATURES) -> nn.Module
             spec.capacity_dim,
             eig_idx=spec.capacity_dim // 2,
         )
-    depth = MLP_DEPTHS[spec.variant]
+    depth = spec.depth
+    assert depth is not None
     return _make_mlp(input_dim, spec.width(input_dim), depth)
 
 
@@ -246,14 +247,9 @@ def _expected_capacity(spec: HiggsModelSpec) -> tuple[int, int]:
     if spec.variant == "spectral":
         assert spec.capacity_dim is not None
         return width, spectral_parameter_count(NUM_FEATURES, spec.capacity_dim)
-    depth = MLP_DEPTHS[spec.variant]
+    depth = spec.depth
+    assert depth is not None
     return width, mlp_parameter_count(NUM_FEATURES, width, depth)
-
-
-def _make_seeded_model(spec: HiggsModelSpec, *, init_seed: int) -> nn.Module:
-    with torch.random.fork_rng():
-        torch.manual_seed(init_seed)
-        return make_model(spec)
 
 
 def make_task_model(
@@ -262,7 +258,9 @@ def make_task_model(
     if settings.threads_per_worker is not None:
         torch.set_num_threads(settings.threads_per_worker)
     task = HiggsTask(settings.corpus, config.data_seed, settings.batch_size)
-    model = _make_seeded_model(config.model_spec, init_seed=config.init_seed)
+    model = make_seeded_model(
+        partial(make_model, config.model_spec), seed=config.init_seed
+    )
     return task, model
 
 
@@ -406,19 +404,17 @@ def validate_raw(
 def default_raw_path(profile_name: str, variant: Variant | None = None) -> Path:
     suffix = f"_{variant}" if variant is not None else ""
     return DEFAULT_RUNS_DIR / (
-        f"higgs_scaling_{profile_name}_repeated_shuffle{suffix}.csv"
+        f"higgs_scaling_{profile_name}_{PROTOCOL}{suffix}.csv"
     )
 
 
-def build_arg_parser(
-    profiles: Mapping[str, Profile] = PROFILES,
-) -> argparse.ArgumentParser:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data", type=Path, required=True, help="Headerless HIGGS CSV."
     )
     parser.add_argument("--cache-dir", type=Path, default=None)
-    parser.add_argument("--profile", choices=profiles.keys(), default="sanity")
+    parser.add_argument("--profile", choices=PROFILES.keys(), default="sanity")
     parser.add_argument("--variant", choices=VARIANTS, default=None)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--chunk-size", type=int, default=250_000)

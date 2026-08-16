@@ -3,21 +3,17 @@ from typing import TextIO
 
 import pandas as pd
 import pytest
-import torch
 
 from paper.experiments.bivariate import run_profile as run_bivariate
 from paper.experiments.synthetic import (
     Profile,
     RunGrid,
-    _make_seeded_model,
-    build_arg_parser,
     select_checkpoints,
     select_evaluations,
     summarize_results,
     validate_raw,
 )
 from paper.experiments.univariate import run_profile as run_univariate
-from paper.models import ModelSpec
 
 
 _EXPECTED_FIT_PAIRS = {
@@ -109,12 +105,6 @@ def test_run_grid_declares_the_scientific_fit_pairs():
     assert len(configs) == len(grid) == len(_EXPECTED_FIT_PAIRS)
 
 
-def test_cli_uses_the_requested_write_mode():
-    parser = build_arg_parser({"tiny": _tiny_profile()})
-
-    assert parser.parse_args(["--write-mode", "append"]).write_mode == "append"
-
-
 def test_profile_reports_progress():
     progress = StringIO()
 
@@ -130,16 +120,6 @@ def test_parallel_profile_matches_serial_results():
     parallel = _run_tiny_profile(workers=2)
 
     pd.testing.assert_frame_equal(serial, parallel)
-
-
-def test_make_seeded_model_preserves_torch_rng_state():
-    spec = ModelSpec("unconstrained", dim=3)
-    torch.manual_seed(123)
-    rng_state = torch.random.get_rng_state().clone()
-
-    _make_seeded_model(spec, input_dim=1, init_seed=999)
-
-    assert torch.equal(torch.random.get_rng_state(), rng_state)
 
 
 def test_checkpoint_selection_uses_validation_not_test():

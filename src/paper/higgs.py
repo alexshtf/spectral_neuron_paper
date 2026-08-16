@@ -53,6 +53,7 @@ FEATURE_NAMES = (
     "m(wwbb)",
 )
 
+
 def default_cache_dir(raw_path: Path) -> Path:
     raw_path = Path(raw_path)
     return raw_path.with_name(f".{raw_path.name}.cache-v{CACHE_VERSION}")
