@@ -34,6 +34,17 @@ def _checkpoints(values: Iterable[int]) -> tuple[int, ...]:
     return checkpoints
 
 
+def training_checkpoints(
+    values: Iterable[int],
+    *,
+    batch_size: int,
+) -> tuple[int, ...]:
+    checkpoints = _checkpoints(values)
+    if any(size % batch_size for size in checkpoints[:-1]):
+        raise ValueError("nonterminal checkpoints must be divisible by batch_size")
+    return checkpoints
+
+
 def _adam_optimizers(
     model: nn.Module,
     *,

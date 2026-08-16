@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -76,25 +76,6 @@ class ShuffledEpochs:
                 ]
                 cursor += output_stop - output_start
                 output_start = output_stop
+            # Preserve random batch membership while reading memmaps in row order.
             rows.sort()
             yield rows
-
-
-def resolve_train_sizes(
-    requested: Iterable[int],
-    *,
-    batch_size: int,
-) -> tuple[int, ...]:
-    requested = tuple(requested)
-    if (
-        not requested
-        or requested[0] <= 0
-        or requested != tuple(sorted(set(requested)))
-    ):
-        raise ValueError(
-            "requested train sizes must be positive, unique, and increasing"
-        )
-
-    if any(size % batch_size for size in requested[:-1]):
-        raise ValueError("nonterminal train sizes must be divisible by batch_size")
-    return requested

@@ -32,8 +32,7 @@ from paper.higgs import (
     prepare_corpus,
 )
 from paper.models import KthEigval
-from paper.shuffling import resolve_train_sizes
-from paper.training import BINARY_OBJECTIVE
+from paper.training import BINARY_OBJECTIVE, training_checkpoints
 
 
 type Variant = Literal["linear", "mlp-1", "mlp-2", "mlp-3", "spectral"]
@@ -310,7 +309,7 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    train_sizes = resolve_train_sizes(
+    train_sizes = training_checkpoints(
         profile.train_sizes,
         batch_size=profile.batch_size,
     )
@@ -390,7 +389,7 @@ def validate_raw(
         raw,
         schema=RESULT_SCHEMA,
         expected_model_rows=expected_models,
-        train_sizes=resolve_train_sizes(
+        train_sizes=training_checkpoints(
             profile.train_sizes,
             batch_size=profile.batch_size,
         ),

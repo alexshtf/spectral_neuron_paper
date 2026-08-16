@@ -1,9 +1,8 @@
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-from paper.shuffling import ShuffledEpochs, resolve_train_sizes
+from paper.shuffling import ShuffledEpochs
 
 
 def _successive_orders(size: int, seed: int, passes: int) -> tuple[np.ndarray, ...]:
@@ -69,13 +68,3 @@ def test_batches_are_global_across_pass_boundaries(tmp_path: Path):
     prefix = list(shuffled.batches(stop=8, batch_size=4))
     for actual, expected in zip(prefix, batches[:2], strict=True):
         np.testing.assert_array_equal(actual, expected)
-
-
-def test_resolve_train_sizes_preserves_explicit_batch_aligned_checkpoints():
-    assert resolve_train_sizes((4, 8, 11), batch_size=4) == (4, 8, 11)
-    assert resolve_train_sizes((1,), batch_size=8) == (1,)
-
-
-def test_resolve_train_sizes_rejects_unaligned_nonterminal_checkpoints():
-    with pytest.raises(ValueError, match="nonterminal train sizes"):
-        resolve_train_sizes((1, 2, 5), batch_size=4)

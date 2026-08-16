@@ -38,9 +38,12 @@ from paper.higgs import (
     prepare_corpus,
 )
 from paper.models import KthEigval
-from paper.shuffling import resolve_train_sizes
 from paper.tasks import Batch
-from paper.training import BINARY_OBJECTIVE, train_events
+from paper.training import (
+    BINARY_OBJECTIVE,
+    training_checkpoints,
+    train_events,
+)
 
 
 NOISE_LEVEL = 0.5
@@ -105,6 +108,12 @@ def _num_bins(value: int) -> int:
     return int(value)
 
 
+def _final_checkpoint(profile: Profile) -> int:
+    return training_checkpoints(
+        profile.train_sizes, batch_size=profile.batch_size
+    )[-1]
+
+
 def selected_runs(
     scaling_results: pd.DataFrame,
     profile: Profile,
@@ -115,9 +124,7 @@ def selected_runs(
     spectral = scaling_results.loc[scaling_results["model"] == "spectral"].copy()
     validate_raw(spectral, profile, variant="spectral")
 
-    train_size = resolve_train_sizes(
-        profile.train_sizes, batch_size=profile.batch_size
-    )[-1]
+    train_size = _final_checkpoint(profile)
     tuning = spectral.loc[
         (spectral["phase"] == "tuning")
         & (spectral["train_size"] == train_size)
@@ -443,7 +450,7 @@ def run_profile(
             "scaling results and HIGGS corpus use different training pools"
         )
 
-    (train_size,) = runs[0].test_checkpoints
+    train_size = _final_checkpoint(profile)
     required_passes = (train_size + corpus.train_stop - 1) // corpus.train_stop
     for data_seed in sorted({run.config.data_seed for run in runs}):
         corpus.shuffled_epochs(data_seed).prepare(required_passes)
@@ -504,9 +511,7 @@ def _validate_run_metadata(
     if not np.allclose(results["noise_level"], noise_level, rtol=0, atol=0):
         raise ValueError("unexpected noise level")
 
-    train_size = resolve_train_sizes(
-        profile.train_sizes, batch_size=profile.batch_size
-    )[-1]
+    train_size = _final_checkpoint(profile)
     if set(results["train_size"]) != {train_size}:
         raise ValueError("unexpected robustness training checkpoint")
     if results.groupby("dim")["lr"].nunique().ne(1).any():

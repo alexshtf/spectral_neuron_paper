@@ -8,6 +8,7 @@ from paper.training import (
     BINARY_OBJECTIVE,
     REGRESSION_OBJECTIVE,
     _adam_optimizers,
+    training_checkpoints,
     evaluate_binary,
     evaluate_on,
     evaluate_regression,
@@ -26,6 +27,16 @@ class ModeRecorder(nn.Module):
     def forward(self, x: torch.Tensor, *_: torch.Tensor) -> torch.Tensor:
         self.modes.append(self.training)
         return torch.zeros(x.shape[:-1])
+
+
+def test_training_checkpoints_preserve_explicit_checkpoints():
+    assert training_checkpoints((4, 8, 11), batch_size=4) == (4, 8, 11)
+    assert training_checkpoints((1,), batch_size=8) == (1,)
+
+
+def test_training_checkpoints_reject_unaligned_nonterminal_checkpoint():
+    with pytest.raises(ValueError, match="nonterminal checkpoints"):
+        training_checkpoints((1, 2, 5), batch_size=4)
 
 
 def test_checkpoint_metrics_describe_post_update_model():

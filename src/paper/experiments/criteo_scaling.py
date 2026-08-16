@@ -31,8 +31,8 @@ from paper.experiments.scaling import (
     tuning_configs,
 )
 from paper.models import FactorizationMachine, SparseLinear, SparseMiddleEigval
-from paper.shuffling import ShuffledEpochs, resolve_train_sizes
-from paper.training import BINARY_OBJECTIVE
+from paper.shuffling import ShuffledEpochs
+from paper.training import BINARY_OBJECTIVE, training_checkpoints
 
 
 type Variant = Literal[
@@ -247,7 +247,7 @@ def run_profile(
         progress=progress,
         progress_file=progress_file,
     )
-    train_sizes = resolve_train_sizes(
+    train_sizes = training_checkpoints(
         profile.train_sizes,
         batch_size=profile.batch_size,
     )
@@ -346,7 +346,7 @@ def validate_raw(
         expected_model_rows=[
             {"model": spec.variant, "dim": spec.result_dim} for spec in specs
         ],
-        train_sizes=resolve_train_sizes(
+        train_sizes=training_checkpoints(
             profile.train_sizes,
             batch_size=profile.batch_size,
         ),
