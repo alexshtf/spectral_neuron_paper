@@ -163,7 +163,8 @@ def test_hybrid_preprocessor_fits_sampled_positive_statistics(tmp_path):
     np.testing.assert_allclose(hybrid.positive_scale[0], scale if scale > 0 else 1.0)
 
 
-def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path):
+@pytest.fixture
+def encoded_variants(tmp_path):
     raw_path = tmp_path / "train.txt"
     cache_dir = tmp_path / "cache"
     write_tiny_criteo(raw_path, rows=103)
@@ -175,13 +176,18 @@ def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path
         sample_seed=0,
         min_count=2,
     )
-    batch_size = 4
-    order = corpus.shuffled_epochs(7)
-    order.prepare(2)
+    return corpus, {
+        kind: (
+            load_preprocessor(path),
+            prepare_encoded_data(corpus, path, chunk_size=3),
+        )
+        for kind, path in paths.items()
+    }
 
-    for kind, path in paths.items():
-        preprocessor = load_preprocessor(path)
-        data = prepare_encoded_data(corpus, path, chunk_size=3)
+
+def test_encoded_cache_matches_preprocessor_with_local_ids(encoded_variants):
+    corpus, variants = encoded_variants
+    for preprocessor, data in variants.values():
         sources = (
             (data.train_path, slice(0, corpus.train_stop)),
             (data.holdout_path, slice(corpus.train_stop, corpus.rows)),
@@ -204,23 +210,31 @@ def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path
                 ),
             )
 
+
+def test_criteo_task_gathers_shuffled_training_batches(encoded_variants):
+    corpus, variants = encoded_variants
+    batch_size = 4
+    order = corpus.shuffled_epochs(7)
+    order.prepare(2)
+    train_size = corpus.train_stop + 3
+    expected_rows = np.concatenate(list(order.batches(train_size, batch_size)))
+
+    for _, data in variants.values():
         task = CriteoTask(data, order, batch_size)
-        train_size = corpus.train_stop + 3
+        expected = load_encoded(data.train_path)
         batches = list(task.train_batches(train_size))
         actual_ids = np.concatenate(
             [model_inputs[0].numpy() for model_inputs, _ in batches]
         )
         actual_values = (
             None
-            if kind == "bucket"
+            if expected.feature_values is None
             else np.concatenate(
                 [model_inputs[1].numpy() for model_inputs, _ in batches]
             )
         )
         actual_labels = np.concatenate([labels.numpy() for _, labels in batches])
         assert actual_ids.dtype == np.int32
-        expected_rows = np.concatenate(list(order.batches(train_size, batch_size)))
-        expected = load_encoded(data.train_path)
         _assert_arrays(
             (actual_ids, actual_values, actual_labels),
             (
@@ -234,15 +248,18 @@ def test_encoded_cache_uses_local_ids_and_tasks_gather_shuffled_batches(tmp_path
             ),
         )
 
-        if kind == "bucket":
-            val_labels = np.concatenate(
-                [labels.numpy() for _, labels in task.val_batches()]
-            )
-            test_labels = np.concatenate(
-                [labels.numpy() for _, labels in task.test_batches()]
-            )
-            labels = corpus.labels()
-            np.testing.assert_array_equal(
-                val_labels, labels[corpus.train_stop : corpus.val_stop]
-            )
-            np.testing.assert_array_equal(test_labels, labels[corpus.val_stop :])
+
+def test_criteo_task_respects_holdout_boundaries(encoded_variants):
+    corpus, variants = encoded_variants
+    _, data = variants["bucket"]
+    task = CriteoTask(data, corpus.shuffled_epochs(7), batch_size=4)
+
+    val_labels = np.concatenate([labels.numpy() for _, labels in task.val_batches()])
+    test_labels = np.concatenate(
+        [labels.numpy() for _, labels in task.test_batches()]
+    )
+    labels = corpus.labels()
+    np.testing.assert_array_equal(
+        val_labels, labels[corpus.train_stop : corpus.val_stop]
+    )
+    np.testing.assert_array_equal(test_labels, labels[corpus.val_stop :])

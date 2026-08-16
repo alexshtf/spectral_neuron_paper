@@ -473,6 +473,100 @@ def load_preprocessor(path: Path) -> FittedPreprocessor:
         return pickle.load(file)
 
 
+def _fit_categorical_vocabularies(
+    categoricals: np.ndarray,
+    rows: np.ndarray,
+    *,
+    min_count: int,
+    progress: bool,
+    progress_file: TextIO | None,
+) -> tuple[np.ndarray, ...]:
+    field_indices = tqdm(
+        range(NUM_CATEGORICAL_FIELDS),
+        desc=f"Fitting categorical vocabulary on {len(rows):,} rows",
+        unit="field",
+        disable=not progress,
+        file=progress_file,
+        dynamic_ncols=True,
+    )
+    vocabularies = []
+    for field_index in field_indices:
+        values, counts = np.unique(
+            categoricals[rows, field_index], return_counts=True
+        )
+        vocabularies.append(values[(values != 0) & (counts >= min_count)])
+    return tuple(vocabularies)
+
+
+def _bucket_statistics(values: np.ndarray) -> tuple[int, int]:
+    present = values != MISSING_NUMERIC
+    buckets = _bucket_numeric(values[present])
+    return int(buckets.min()), int(buckets.max())
+
+
+def _hybrid_statistics(values: np.ndarray) -> tuple[np.ndarray, float, float]:
+    negative_values = np.unique(
+        values[(values < 0) & (values != MISSING_NUMERIC)]
+    )
+    logged = np.log1p(values[values > 0].astype(np.float64))
+    positive_mean = float(logged.mean()) if len(logged) else 0.0
+    scale = float(logged.std()) if len(logged) else 1.0
+    return negative_values, positive_mean, scale if scale > 0 else 1.0
+
+
+def _fit_numeric_preprocessors(
+    numerics: np.ndarray,
+    rows: np.ndarray,
+    kinds: Iterable[PreprocessingKind],
+    categorical_vocabularies: tuple[np.ndarray, ...],
+    *,
+    progress: bool,
+    progress_file: TextIO | None,
+) -> dict[PreprocessingKind, FittedPreprocessor]:
+    kinds = set(kinds)
+    bucket_fields: list[tuple[int, int]] | None = (
+        [] if "bucket" in kinds else None
+    )
+    hybrid_fields: list[tuple[np.ndarray, float, float]] | None = (
+        [] if "hybrid" in kinds else None
+    )
+
+    field_indices = tqdm(
+        range(NUM_NUMERIC_FIELDS),
+        desc=f"Fitting numeric preprocessing on {len(rows):,} rows",
+        unit="field",
+        disable=not progress,
+        file=progress_file,
+        dynamic_ncols=True,
+    )
+    for field_index in field_indices:
+        values = numerics[rows, field_index]
+        if bucket_fields is not None:
+            bucket_fields.append(_bucket_statistics(values))
+        if hybrid_fields is not None:
+            hybrid_fields.append(_hybrid_statistics(values))
+
+    preprocessors: dict[PreprocessingKind, FittedPreprocessor] = {}
+    if bucket_fields is not None:
+        minimums, maximums = zip(*bucket_fields, strict=True)
+        preprocessors["bucket"] = BucketPreprocessor(
+            np.asarray(minimums, dtype=np.int32),
+            np.asarray(maximums, dtype=np.int32),
+            categorical_vocabularies,
+        )
+    if hybrid_fields is not None:
+        negative_values, positive_mean, positive_scale = zip(
+            *hybrid_fields, strict=True
+        )
+        preprocessors["hybrid"] = HybridPreprocessor(
+            categorical_vocabularies,
+            negative_values,
+            np.asarray(positive_mean),
+            np.asarray(positive_scale),
+        )
+    return preprocessors
+
+
 def fit_preprocessors(
     corpus: CriteoCorpus,
     kinds: Iterable[PreprocessingKind],
@@ -494,16 +588,16 @@ def fit_preprocessors(
         )
         for kind in kinds
     }
-    missing = [kind for kind, path in paths.items() if not path.exists()]
+    missing_kinds = [kind for kind, path in paths.items() if not path.exists()]
     if progress:
         output = sys.stderr if progress_file is None else progress_file
         for kind in kinds:
-            if kind not in missing:
+            if kind not in missing_kinds:
                 tqdm.write(
                     f"{kind.title()} preprocessor: {sample_size:,} rows (cached)",
                     file=output,
                 )
-    if not missing:
+    if not missing_kinds:
         return paths
 
     rows = np.random.default_rng(sample_seed).choice(
@@ -513,73 +607,23 @@ def fit_preprocessors(
         shuffle=False,
     )
     rows.sort()
-    categoricals = corpus.categoricals()
-    field_indices = tqdm(
-        range(NUM_CATEGORICAL_FIELDS),
-        desc=f"Fitting categorical vocabulary on {sample_size:,} rows",
-        unit="field",
-        disable=not progress,
-        file=progress_file,
-        dynamic_ncols=True,
+    vocabularies = _fit_categorical_vocabularies(
+        corpus.categoricals(),
+        rows,
+        min_count=min_count,
+        progress=progress,
+        progress_file=progress_file,
     )
-    categorical_vocabularies = []
-    for field_index in field_indices:
-        values, counts = np.unique(
-            categoricals[rows, field_index], return_counts=True
-        )
-        categorical_vocabularies.append(values[(values != 0) & (counts >= min_count)])
-    vocabularies = tuple(categorical_vocabularies)
-
-    numeric_minimums = np.empty(NUM_NUMERIC_FIELDS, dtype=np.int32)
-    numeric_maximums = np.empty(NUM_NUMERIC_FIELDS, dtype=np.int32)
-    negative_values = []
-    positive_mean = np.empty(NUM_NUMERIC_FIELDS)
-    positive_scale = np.empty(NUM_NUMERIC_FIELDS)
-    numerics = corpus.numerics()
-    field_indices = tqdm(
-        range(NUM_NUMERIC_FIELDS),
-        desc=f"Fitting numeric preprocessing on {sample_size:,} rows",
-        unit="field",
-        disable=not progress,
-        file=progress_file,
-        dynamic_ncols=True,
+    preprocessors = _fit_numeric_preprocessors(
+        corpus.numerics(),
+        rows,
+        missing_kinds,
+        vocabularies,
+        progress=progress,
+        progress_file=progress_file,
     )
-    for field_index in field_indices:
-        values = numerics[rows, field_index]
-        if "bucket" in missing:
-            present = values != MISSING_NUMERIC
-            buckets = _bucket_numeric(values[present])
-            numeric_minimums[field_index] = buckets.min()
-            numeric_maximums[field_index] = buckets.max()
-        if "hybrid" in missing:
-            negative_values.append(
-                np.unique(values[(values < 0) & (values != MISSING_NUMERIC)])
-            )
-            logged = np.log1p(values[values > 0].astype(np.float64))
-            positive_mean[field_index] = logged.mean() if len(logged) else 0.0
-            scale = logged.std() if len(logged) else 1.0
-            positive_scale[field_index] = scale if scale > 0 else 1.0
-
-    if "bucket" in missing:
-        _save_preprocessor(
-            BucketPreprocessor(
-                numeric_minimums,
-                numeric_maximums,
-                vocabularies,
-            ),
-            paths["bucket"],
-        )
-
-    if "hybrid" in missing:
-        _save_preprocessor(
-            HybridPreprocessor(
-                vocabularies,
-                tuple(negative_values),
-                positive_mean,
-                positive_scale,
-            ),
-            paths["hybrid"],
-        )
+    for kind, preprocessor in preprocessors.items():
+        _save_preprocessor(preprocessor, paths[kind])
 
     return paths
 
