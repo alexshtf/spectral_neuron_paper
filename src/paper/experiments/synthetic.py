@@ -204,7 +204,7 @@ def run_config(
         batch_size=settings.batch_size,
         val_size=settings.val_size,
         test_size=settings.test_size,
-        seed=config.target_spec.seed,
+        validation_seed=config.target_spec.seed,
         train_seed=config.init_seed,
         noise_std=config.noise_std,
     )

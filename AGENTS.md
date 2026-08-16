@@ -4,7 +4,7 @@
 
 This repo is research code for spectral neurons: scalar units of the form `x -> lambda_k(A_theta(x))`, where `lambda_k` is one selected eigenvalue and the generic matrix path is `A_theta(x) = A_0 + x_1 A_1 + ... + x_n A_n` with learned symmetric matrices `A_0, A_1, ..., A_n`.
 
-Optimize for clear, minimal experiment infrastructure that supports the paper. Do not turn it into a general framework, but you can (and perhaps SHOULD) write small specific reusable components that serve this repo well, and compose experimental code out of these components. Do not insert robustness-inducing code you would normally do in a production system - the emphasis here is clariy, conciseness.
+Optimize for clear, minimal experiment infrastructure that supports the paper. Do not turn it into a general framework, but you can (and perhaps SHOULD) write small specific reusable components that serve this repo well, and compose experimental code out of these components. Do not insert robustness-inducing code you would normally do in a production system - the emphasis here is clarity, conciseness.
 
 Prefer modern, explicit Python when it improves clarity. Keep tensor code vectorized and shape-aware; do not replace vectorized numerical work with Python loops unless the problem is genuinely tiny and clarity wins.
 

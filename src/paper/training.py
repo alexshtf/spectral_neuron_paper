@@ -12,7 +12,7 @@ from torch import nn
 from paper.tasks import Batch, ModelInputs, Task, TrainTask
 
 
-type Event = dict[str, Any]
+type EventRecord = dict[str, Any]
 type BatchFactory = Callable[[], Iterable[Batch]]
 type Loss = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 type Evaluator = Callable[[nn.Module, Iterable[Batch]], dict[str, float]]
@@ -207,10 +207,10 @@ def evaluate_on(
     name: str,
     batches: BatchFactory,
     evaluate: Evaluator,
-) -> Callable[[Event], dict[str, float]]:
+) -> Callable[[EventRecord], dict[str, float]]:
     elapsed_seconds = 0.0
 
-    def augment(event: Event) -> dict[str, float]:
+    def augment(event: EventRecord) -> dict[str, float]:
         nonlocal elapsed_seconds
         started = perf_counter()
         metrics = evaluate(event["model"], batches())
@@ -249,10 +249,10 @@ def fit_and_evaluate(
 
 def at_train_sizes(
     train_sizes: Iterable[int],
-) -> Callable[[Iterable[Event]], Iterator[Event]]:
+) -> Callable[[Iterable[EventRecord]], Iterator[EventRecord]]:
     selected = frozenset(train_sizes)
 
-    def transform(events: Iterable[Event]) -> Iterator[Event]:
+    def transform(events: Iterable[EventRecord]) -> Iterator[EventRecord]:
         for event in events:
             if event["train_size"] in selected:
                 yield event

@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from paper.experiments.higgs_robustness import (
-    RESULT_COLUMNS,
     _joint_histogram,
     build_arg_parser,
     default_result_path,
@@ -335,7 +334,6 @@ def test_tiny_profile_runs_end_to_end_and_validates(tiny_run):
         ratio_bins=5,
     )
     assert list(results.columns) == result_columns(5)
-    assert RESULT_COLUMNS == result_columns()
     assert len(results) == (
         len(profile.capacity_dims) * len(profile.evaluation_seeds) * 28 * 4
     )

@@ -84,8 +84,6 @@ def result_columns(ratio_bins: int = RATIO_BINS) -> list[str]:
     return _BASE_RESULT_COLUMNS + ratio_count_columns(ratio_bins)
 
 
-RESULT_COLUMNS = result_columns()
-
 _RUN_COLUMNS = ["dim", "data_seed", "init_seed"]
 _FEATURE_COLUMNS = _RUN_COLUMNS + ["feature_index"]
 _HISTOGRAM_COLUMNS = _FEATURE_COLUMNS + ["magnitude_bin_index"]

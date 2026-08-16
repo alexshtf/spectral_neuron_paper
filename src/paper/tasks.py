@@ -73,11 +73,11 @@ def _make_task(
     upper: float,
     batch_size: int,
     val_size: int,
-    seed: int,
+    validation_seed: int,
     train_seed: int,
     noise_std: float = 0.0,
 ) -> SyntheticTask:
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(validation_seed)
     x_val_np = rng.uniform(lower, upper, size=(val_size, input_dim))
 
     x_val = _to_x_tensor(x_val_np)
@@ -108,7 +108,7 @@ def make_univariate_task(
     batch_size: int,
     val_size: int,
     test_size: int,
-    seed: int,
+    validation_seed: int,
     train_seed: int,
     noise_std: float = 0.0,
 ) -> SyntheticTask:
@@ -120,7 +120,7 @@ def make_univariate_task(
         upper=upper,
         batch_size=batch_size,
         val_size=val_size,
-        seed=seed,
+        validation_seed=validation_seed,
         train_seed=train_seed,
         noise_std=noise_std,
     )
@@ -134,7 +134,7 @@ def make_bivariate_task(
     batch_size: int,
     val_size: int,
     test_size: int,
-    seed: int,
+    validation_seed: int,
     train_seed: int,
     noise_std: float = 0.0,
 ) -> SyntheticTask:
@@ -155,7 +155,7 @@ def make_bivariate_task(
         upper=upper,
         batch_size=batch_size,
         val_size=val_size,
-        seed=seed,
+        validation_seed=validation_seed,
         train_seed=train_seed,
         noise_std=noise_std,
     )

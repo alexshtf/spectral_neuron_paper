@@ -15,7 +15,7 @@ def test_training_inputs_match_across_noise_levels():
             batch_size=4,
             val_size=3,
             test_size=5,
-            seed=0,
+            validation_seed=0,
             train_seed=1,
             noise_std=noise_std,
         )
@@ -38,7 +38,7 @@ def test_bivariate_task_uses_a_square_tensor_product_test_grid():
         batch_size=4,
         val_size=3,
         test_size=9,
-        seed=2,
+        validation_seed=2,
         train_seed=3,
     )
 
@@ -61,6 +61,6 @@ def test_bivariate_task_requires_a_perfect_square_test_size():
             batch_size=4,
             val_size=3,
             test_size=8,
-            seed=2,
+            validation_seed=2,
             train_seed=3,
         )
