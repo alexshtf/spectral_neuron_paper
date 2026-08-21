@@ -41,7 +41,27 @@ def test_tril_embed_is_isometric():
     )
 
 
-def _assert_centered_gapped_identity_initialization(
+def _assert_scalar_plus_jitter(
+    diagonals: torch.Tensor,
+    *,
+    coefficient_lower: float,
+    coefficient_upper: float,
+    jitter_bound: float,
+) -> None:
+    """Check that each row admits diagonal = alpha + epsilon."""
+    feasible_lower = torch.clamp_min(
+        diagonals.amax(dim=-1) - jitter_bound,
+        coefficient_lower,
+    )
+    feasible_upper = torch.clamp_max(
+        diagonals.amin(dim=-1) + jitter_bound,
+        coefficient_upper,
+    )
+    assert torch.all(feasible_lower <= feasible_upper)
+    assert torch.all(diagonals.amax(dim=-1) > diagonals.amin(dim=-1))
+
+
+def _assert_centered_gapped_jittered_initialization(
     base_tril: torch.Tensor,
     feature_tril: torch.Tensor,
     *,
@@ -55,21 +75,29 @@ def _assert_centered_gapped_identity_initialization(
 
     expected_spectrum = torch.arange(dim).sub(eig_idx).sign().to(base)
     torch.testing.assert_close(torch.linalg.eigvalsh(base), expected_spectrum)
-    assert torch.count_nonzero(base - torch.diag_embed(base.diagonal())) > 0
 
-    coefficients = features[..., 0, 0]
-    identity = torch.eye(dim, device=features.device, dtype=features.dtype)
-    expected_features = coefficients[..., None, None] * identity
-    torch.testing.assert_close(features, expected_features)
-    assert torch.all(coefficients.abs() <= fan_in**-0.5)
-    return coefficients
+    diagonals = features.diagonal(dim1=-2, dim2=-1)
+    torch.testing.assert_close(features, torch.diag_embed(diagonals))
+    coefficient_bound = fan_in**-0.5
+    _assert_scalar_plus_jitter(
+        diagonals,
+        coefficient_lower=-coefficient_bound,
+        coefficient_upper=coefficient_bound,
+        jitter_bound=1 / (20 * fan_in),
+    )
+
+    commutators = base @ features - features @ base
+    assert torch.all(torch.linalg.matrix_norm(commutators) > 1e-6)
+    return base
 
 
-@pytest.mark.parametrize("eig_idx", [2, 4])
-def test_dense_spectral_initialization_is_centered_gapped_and_linear(eig_idx):
+@pytest.mark.parametrize("eig_idx", [0, 2, 4])
+def test_dense_spectral_initialization_preserves_gap_and_breaks_commutation(
+    eig_idx,
+):
     torch.manual_seed(0)
     model = KthEigval(num_features=3, dim=5, eig_idx=eig_idx)
-    coefficients = _assert_centered_gapped_identity_initialization(
+    _assert_centered_gapped_jittered_initialization(
         model.lin.bias,
         model.lin.weight.mT,
         dim=model.dim,
@@ -77,18 +105,28 @@ def test_dense_spectral_initialization_is_centered_gapped_and_linear(eig_idx):
         fan_in=model.lin.in_features,
     )
 
-    x = torch.randn(7, 3)
-    torch.testing.assert_close(model(x), x @ coefficients, atol=1e-6, rtol=1e-6)
+    bounds = torch.tensor([-5.0, 5.0])
+    corners = torch.cartesian_prod(
+        *(bounds for _ in range(model.lin.in_features))
+    )
+    eigvals = torch.linalg.eigvalsh(model.tril_emb(model.lin(corners)))
+    selected = eigvals[..., eig_idx]
+    gaps = []
+    if eig_idx > 0:
+        gaps.append(selected - eigvals[..., eig_idx - 1])
+    if eig_idx + 1 < model.dim:
+        gaps.append(eigvals[..., eig_idx + 1] - selected)
+    assert torch.stack(gaps).amin() >= 0.5 - 1e-6
 
 
-def test_sparse_spectral_initialization_is_centered_gapped_and_additive():
+def test_sparse_spectral_initialization_uses_active_field_jitter_scale():
     torch.manual_seed(0)
     model = SparseMiddleEigval(
         num_features=7,
         num_fields=2,
         dim=5,
     )
-    coefficients = _assert_centered_gapped_identity_initialization(
+    _assert_centered_gapped_jittered_initialization(
         model.base_tril,
         model.feature_tril.weight,
         dim=model.dim,
@@ -96,18 +134,11 @@ def test_sparse_spectral_initialization_is_centered_gapped_and_additive():
         fan_in=model.num_fields,
     )
 
-    ids = torch.tensor([[0, 1], [2, 3], [4, 5]])
-    values = torch.tensor([[1.0, 1.0], [0.5, 2.0], [-1.0, 0.25]])
-    expected = (coefficients[ids] * values).sum(dim=-1)
-    torch.testing.assert_close(
-        model(ids, values), expected, atol=1e-6, rtol=1e-6
-    )
 
-
-def test_monotone_spectral_initialization_uses_the_same_pencil_contract():
+def test_monotone_spectral_initialization_jitters_positive_diagonal():
     torch.manual_seed(0)
     model = KthEigvalLastMonotone(num_features=3, dim=5, eig_idx=2)
-    coefficients = _assert_centered_gapped_identity_initialization(
+    base = _assert_centered_gapped_jittered_initialization(
         model.base_tril,
         model.feature_tril,
         dim=model.dim,
@@ -115,17 +146,19 @@ def test_monotone_spectral_initialization_uses_the_same_pencil_contract():
         fan_in=model.num_features,
     )
 
-    monotone_coefficients = square_plus(model.last_diag)
-    monotone_coefficient = monotone_coefficients[0]
-    torch.testing.assert_close(
-        monotone_coefficients,
-        monotone_coefficient.expand_as(model.last_diag),
+    monotone_diagonal = square_plus(model.last_diag)
+    coefficient_bound = model.num_features**-0.5
+    _assert_scalar_plus_jitter(
+        monotone_diagonal.unsqueeze(0),
+        coefficient_lower=coefficient_bound / 2,
+        coefficient_upper=coefficient_bound,
+        jitter_bound=1 / (20 * model.num_features),
     )
-    bound = model.num_features**-0.5
-    assert bound / 2 <= monotone_coefficient <= bound
-    x = torch.randn(7, 3)
-    expected = x[..., :-1] @ coefficients + x[..., -1] * monotone_coefficient
-    torch.testing.assert_close(model(x), expected, atol=1e-6, rtol=1e-6)
+    assert torch.all(monotone_diagonal > 0)
+
+    monotone_matrix = torch.diag(monotone_diagonal)
+    commutator = base @ monotone_matrix - monotone_matrix @ base
+    assert torch.linalg.matrix_norm(commutator) > 1e-6
 
 
 def test_last_monotone_model_matches_matrix_path():

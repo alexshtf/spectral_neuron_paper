@@ -59,6 +59,18 @@ def _squareplus_identity_coefficient(
 
 
 @torch.no_grad()
+def _jittered_identity_diagonals(
+    identity_coefficients: torch.Tensor, *, dim: int, fan_in: int
+) -> torch.Tensor:
+    """Draw diagonals alpha_i + epsilon_i for jittered identity matrices."""
+    bound = 1 / (20 * fan_in)
+    jitter = identity_coefficients.new_empty(
+        (*identity_coefficients.shape, dim)
+    ).uniform_(-bound, bound)
+    return identity_coefficients.unsqueeze(-1) + jitter
+
+
+@torch.no_grad()
 def _reset_spectral_pencil_(
     base_tril: torch.Tensor,
     feature_tril: torch.Tensor,
@@ -67,7 +79,7 @@ def _reset_spectral_pencil_(
     eig_idx: int,
     fan_in: int,
 ) -> None:
-    """Set A0 = Q diag(sign(j - k)) Q.T and Ai = alpha_i I."""
+    """Initialize a gapped A0 and jittered-identity feature matrices."""
     tril_i, tril_j = torch.tril_indices(dim, dim, device=base_tril.device)
     diag = tril_i == tril_j
 
@@ -77,7 +89,11 @@ def _reset_spectral_pencil_(
         feature_tril.shape[:-1],
         fan_in=fan_in,
     )
-    feature_tril[..., diag] = coefficients.unsqueeze(-1)
+    feature_tril[..., diag] = _jittered_identity_diagonals(
+        coefficients,
+        dim=dim,
+        fan_in=fan_in,
+    )
 
     q, r = torch.linalg.qr(base_tril.new_empty(dim, dim).normal_())
     signs = torch.where(r.diagonal() < 0, -1, 1)
@@ -91,9 +107,14 @@ def _reset_spectral_pencil_(
 
 
 @torch.no_grad()
-def _reset_positive_identity_(raw_diag: torch.Tensor, *, fan_in: int) -> None:
+def _reset_positive_diagonal_(raw_diag: torch.Tensor, *, fan_in: int) -> None:
     coefficient = _squareplus_identity_coefficient(raw_diag, fan_in=fan_in)
-    raw_diag.fill_(coefficient - 1 / (4 * coefficient))
+    diagonal = _jittered_identity_diagonals(
+        coefficient,
+        dim=raw_diag.numel(),
+        fan_in=fan_in,
+    )
+    raw_diag.copy_(diagonal - 1 / (4 * diagonal))
 
 
 class TrilEmbed(nn.Module):
@@ -306,7 +327,7 @@ class KthEigvalLastMonotone(nn.Module):
             eig_idx=self.eig_idx,
             fan_in=self.num_features,
         )
-        _reset_positive_identity_(self.last_diag, fan_in=self.num_features)
+        _reset_positive_diagonal_(self.last_diag, fan_in=self.num_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1:] != (self.num_features,):
