@@ -30,7 +30,10 @@ def _higgs_deviation_results(
         features,
         range(magnitude_bins),
     ):
-        counts = np.arange(1, ratio_bins + 1) * (magnitude_bin_index + 1)
+        counts = np.roll(
+            np.arange(1, ratio_bins + 1),
+            dimensions.index(dim),
+        ) * (magnitude_bin_index + 1)
         row = {
             "dim": dim,
             "data_seed": 0,
@@ -66,22 +69,38 @@ def test_plot_higgs_deviation_shell_grid_uses_disjoint_ranges_and_feature_order(
     )
     ax = fig.axes[0]
 
+    assert len(fig.subfigs) == 2
     assert len(fig.axes) == 8
-    assert [axis.get_title() for axis in fig.axes[:4]] == [
+    assert [fig.axes[index].get_title() for index in (0, 4)] == [
+        "lepton pT",
+        "lepton η",
+    ]
+    assert ax.get_xlim() == pytest.approx((0, 1))
+    assert fig.get_supxlabel() == "Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)"
+    assert [subfigure.get_supylabel() for subfigure in fig.subfigs] == [
+        "Perturbation-magnitude shell",
+        "Perturbation-magnitude shell",
+    ]
+    assert [axis.get_ylabel() for axis in fig.axes[:4]] == [
         "|δ| ∈ [0, 0.125)",
         "|δ| ∈ [0.125, 0.25)",
         "|δ| ∈ [0.25, 0.375)",
         "|δ| ∈ [0.375, 0.5]",
     ]
-    assert ax.get_xlim() == pytest.approx((0, 1))
-    assert fig.get_supxlabel() == "Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)"
-    assert fig.get_supylabel() == "Feature"
     assert _legend_labels(fig) == ["3", "7"]
     assert fig.legends[0].get_title().get_text() == "Matrix dimension"
-    assert fig.get_figheight() == pytest.approx(24 / 25.4)
-    assert fig.axes[0].get_ylabel() == "lepton pT"
-    assert fig.axes[4].get_ylabel() == "lepton η"
+    assert fig.get_figwidth() == pytest.approx(24 / 25.4)
+    assert fig.get_figheight() == pytest.approx(224 / 25.4)
+    assert ax.get_box_aspect() == pytest.approx(18 / 24)
     assert fig.axes[0].yaxis.label.get_fontsize() == 8
+    np.testing.assert_allclose(
+        ax.lines[0].get_ydata(),
+        [0.1, 0.2, 0.3, 0.4, 0.4],
+    )
+    np.testing.assert_allclose(
+        ax.lines[1].get_ydata(),
+        [0.4, 0.1, 0.2, 0.3, 0.3],
+    )
 
 
 def test_mean_higgs_deviation_shells_aggregates_disjoint_shells():

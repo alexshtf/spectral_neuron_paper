@@ -107,9 +107,10 @@ def plot_higgs_deviation_shell_grid(
     results: pd.DataFrame,
     *,
     shell_count: int = 4,
-    feature_row_height_mm: float = 12.0,
+    feature_column_width_mm: float = 24.0,
+    shell_row_height_mm: float = 18.0,
 ) -> Figure:
-    """Plot raw histogram probabilities with one y-scale per grid cell."""
+    """Plot dimension curves in two shell-by-feature subfigures."""
     noise_level, ratio_columns, averaged = _mean_higgs_deviation_shells(
         results, shell_count=shell_count
     )
@@ -131,81 +132,105 @@ def plot_higgs_deviation_shell_grid(
     )
     ratio_edges = np.linspace(0, 1, len(ratio_columns) + 1)
     shell_edges = np.linspace(0, noise_level, shell_count + 1)
+    shell_labels = [
+        (
+            f"|δ| ∈ [{shell_edges[index]:g}, {shell_edges[index + 1]:g}"
+            f"{']' if index == shell_count - 1 else ')'}"
+        )
+        for index in range(shell_count)
+    ]
+    feature_split = (len(features) + 1) // 2
+    feature_groups = (
+        features.iloc[:feature_split],
+        features.iloc[feature_split:],
+    )
 
-    fig, axes = plt.subplots(
-        len(features),
-        shell_count,
+    fig = plt.figure(
         figsize=(
-            max(90, 45 * shell_count) / 25.4,
-            feature_row_height_mm * len(features) / 25.4,
+            feature_column_width_mm * max(map(len, feature_groups)) / 25.4,
+            2 * (shell_row_height_mm * shell_count + 40) / 25.4,
         ),
-        sharex=True,
-        squeeze=False,
         layout="constrained",
     )
-    for feature_row, feature in enumerate(features.itertuples(index=False)):
-        feature_index = int(feature.feature_index)
-        for shell_index, ax in enumerate(axes[feature_row]):
-            cell = averaged.loc[
-                (averaged["feature_index"] == feature_index)
-                & (averaged["shell_index"] == shell_index)
-            ]
-            for style in styles:
-                histogram = cell.loc[
-                    cell["dim"] == style.dimension, ratio_columns
+    subfigures = fig.subfigures(2, 1)
+    for subfigure, feature_group in zip(
+        subfigures, feature_groups, strict=True
+    ):
+        axes = subfigure.subplots(
+            shell_count,
+            len(feature_group),
+            sharex=True,
+            squeeze=False,
+        )
+        subfigure.supylabel("Perturbation-magnitude shell", fontsize=8)
+        for shell_index, row_axes in enumerate(axes):
+            for feature_column, (feature, ax) in enumerate(
+                zip(feature_group.itertuples(index=False), row_axes, strict=True)
+            ):
+                feature_index = int(feature.feature_index)
+                cell = averaged.loc[
+                    (averaged["feature_index"] == feature_index)
+                    & (averaged["shell_index"] == shell_index)
                 ]
-                if histogram.empty or histogram.iloc[0].isna().all():
-                    continue
+                for style in styles:
+                    histogram = cell.loc[
+                        cell["dim"] == style.dimension, ratio_columns
+                    ]
+                    if histogram.empty or histogram.iloc[0].isna().all():
+                        continue
 
-                heights = histogram.iloc[0].fillna(0).to_numpy()
-                heights = np.r_[heights, heights[-1]]
-                ax.fill_between(
-                    ratio_edges,
-                    0,
-                    heights,
-                    step="post",
-                    color=style.color,
-                    alpha=0.07,
-                    linewidth=0,
-                )
-                ax.step(
-                    ratio_edges,
-                    heights,
-                    where="post",
-                    color=style.color,
-                    linestyle=style.linestyle,
-                    linewidth=1.1,
-                )
+                    heights = histogram.iloc[0].fillna(0).to_numpy()
+                    heights = np.r_[heights, heights[-1]]
+                    ax.fill_between(
+                        ratio_edges,
+                        0,
+                        heights,
+                        step="post",
+                        color=style.color,
+                        alpha=0.07,
+                        linewidth=0,
+                    )
+                    ax.step(
+                        ratio_edges,
+                        heights,
+                        where="post",
+                        color=style.color,
+                        linestyle=style.linestyle,
+                        linewidth=1.1,
+                    )
 
-            peak = cell_peaks.at[(feature_index, shell_index)]
-            ax.axhline(0, color="#d9d9d9", linewidth=0.4, zorder=0)
-            ax.axvline(1, color="#555555", linestyle="--", linewidth=0.8)
-            ax.set(xlim=(0, 1), ylim=(0, peak / 0.85))
-            ax.set_xticks(np.linspace(0, 1, 6))
-            ax.set_yticks([])
-            ax.tick_params(
-                axis="x",
-                labelsize=7,
-                labelbottom=feature_row == len(features) - 1,
-            )
-            if shell_index == 0:
-                ax.set_ylabel(
-                    feature.feature_name,
-                    fontsize=8,
-                    rotation=0,
-                    ha="right",
-                    va="center",
-                    labelpad=3,
+                peak = cell_peaks.at[(feature_index, shell_index)]
+                ax.axhline(0, color="#d9d9d9", linewidth=0.4, zorder=0)
+                ax.axvline(1, color="#555555", linestyle="--", linewidth=0.8)
+                ax.set(xlim=(0, 1), ylim=(0, peak / 0.85))
+                ax.set_box_aspect(shell_row_height_mm / feature_column_width_mm)
+                ax.set_xticks(np.linspace(0, 1, 3))
+                ax.set_yticks([])
+                ax.tick_params(
+                    axis="x",
+                    labelsize=7,
+                    labelbottom=shell_index == shell_count - 1,
                 )
-            if feature_row == 0:
-                bracket = "]" if shell_index == shell_count - 1 else ")"
-                ax.set_title(
-                    f"|δ| ∈ [{shell_edges[shell_index]:g}, "
-                    f"{shell_edges[shell_index + 1]:g}{bracket}",
-                    fontsize=8,
-                )
-            ax.grid(axis="x", alpha=0.2, linewidth=0.5)
-            sns.despine(ax=ax, left=True)
+                if feature_column == 0:
+                    ax.set_ylabel(
+                        shell_labels[shell_index],
+                        fontsize=8,
+                        rotation=0,
+                        ha="right",
+                        va="center",
+                        labelpad=3,
+                    )
+                if shell_index == 0:
+                    ax.set_title(
+                        feature.feature_name,
+                        fontsize=8,
+                        rotation=45,
+                        ha="left",
+                        va="bottom",
+                        pad=4,
+                    )
+                ax.grid(axis="x", alpha=0.2, linewidth=0.5)
+                sns.despine(ax=ax, left=True)
 
     fig.suptitle(
         (
@@ -217,7 +242,6 @@ def plot_higgs_deviation_shell_grid(
         fontsize=9,
     )
     fig.supxlabel("Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)", fontsize=8)
-    fig.supylabel("Feature", fontsize=8)
 
     handles = [
         Line2D(
