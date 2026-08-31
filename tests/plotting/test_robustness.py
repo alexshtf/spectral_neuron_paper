@@ -30,7 +30,10 @@ def _higgs_deviation_results(
         features,
         range(magnitude_bins),
     ):
-        counts = np.arange(1, ratio_bins + 1) * (magnitude_bin_index + 1)
+        counts = np.roll(
+            np.arange(1, ratio_bins + 1),
+            dimensions.index(dim),
+        ) * (magnitude_bin_index + 1)
         row = {
             "dim": dim,
             "data_seed": 0,
@@ -67,29 +70,37 @@ def test_plot_higgs_deviation_shell_grid_uses_disjoint_ranges_and_feature_order(
     ax = fig.axes[0]
 
     assert len(fig.subfigs) == 2
-    assert len(fig.axes) == 4
-    assert [fig.axes[index].get_title() for index in (0, 2)] == [
+    assert len(fig.axes) == 8
+    assert [fig.axes[index].get_title() for index in (0, 4)] == [
         "lepton pT",
         "lepton η",
     ]
     assert ax.get_xlim() == pytest.approx((0, 1))
     assert fig.get_supxlabel() == "Deviation ratio  |Δf| / (|δ| ‖Aⱼ‖₂)"
     assert [subfigure.get_supylabel() for subfigure in fig.subfigs] == [
-        "Matrix dimension",
-        "Matrix dimension",
+        "Perturbation-magnitude shell",
+        "Perturbation-magnitude shell",
     ]
-    assert _legend_labels(fig) == [
+    assert [axis.get_ylabel() for axis in fig.axes[:4]] == [
         "|δ| ∈ [0, 0.125)",
         "|δ| ∈ [0.125, 0.25)",
         "|δ| ∈ [0.25, 0.375)",
         "|δ| ∈ [0.375, 0.5]",
     ]
-    assert fig.legends[0].get_title().get_text() == "Perturbation-magnitude shell"
+    assert _legend_labels(fig) == ["3", "7"]
+    assert fig.legends[0].get_title().get_text() == "Matrix dimension"
     assert fig.get_figwidth() == pytest.approx(24 / 25.4)
-    assert fig.get_figheight() == pytest.approx(152 / 25.4)
+    assert fig.get_figheight() == pytest.approx(224 / 25.4)
     assert ax.get_box_aspect() == pytest.approx(18 / 24)
-    assert [axis.get_ylabel() for axis in fig.axes] == ["3", "7", "3", "7"]
     assert fig.axes[0].yaxis.label.get_fontsize() == 8
+    np.testing.assert_allclose(
+        ax.lines[0].get_ydata(),
+        [0.1, 0.2, 0.3, 0.4, 0.4],
+    )
+    np.testing.assert_allclose(
+        ax.lines[1].get_ydata(),
+        [0.4, 0.1, 0.2, 0.3, 0.3],
+    )
 
 
 def test_mean_higgs_deviation_shells_aggregates_disjoint_shells():
@@ -133,54 +144,47 @@ def test_mean_higgs_deviation_shells_aggregates_disjoint_shells():
 def test_higgs_deviation_shells_preserve_probabilities_and_cell_limits():
     rows = []
     feature_counts = {
-        (0, "sharp"): {
-            3: ((9, 1), (1, 1)),
-            7: ((1, 1), (1, 1)),
-        },
-        (1, "flat"): {
-            3: ((1, 1), (1, 1)),
-            7: ((1, 1), (1, 1)),
-        },
+        (0, "sharp"): ((9, 1), (1, 1)),
+        (1, "flat"): ((1, 1), (1, 1)),
     }
-    for (feature_index, feature_name), dimension_counts in feature_counts.items():
-        for dimension, shell_counts in dimension_counts.items():
-            for magnitude_bin_index, counts in enumerate(shell_counts):
-                rows.append(
-                    {
-                        "dim": dimension,
-                        "data_seed": 0,
-                        "init_seed": 0,
-                        "noise_level": 0.5,
-                        "feature_index": feature_index,
-                        "feature_name": feature_name,
-                        "magnitude_bin_index": magnitude_bin_index,
-                        "magnitude_left": magnitude_bin_index / 4,
-                        "magnitude_right": (magnitude_bin_index + 1) / 4,
-                        "total_count": sum(counts),
-                        "zero_bound_count": 0,
-                        "ratio_bin_000_count": counts[0],
-                        "ratio_bin_001_count": counts[1],
-                    }
-                )
+    for (feature_index, feature_name), shell_counts in feature_counts.items():
+        for magnitude_bin_index, counts in enumerate(shell_counts):
+            rows.append(
+                {
+                    "dim": 3,
+                    "data_seed": 0,
+                    "init_seed": 0,
+                    "noise_level": 0.5,
+                    "feature_index": feature_index,
+                    "feature_name": feature_name,
+                    "magnitude_bin_index": magnitude_bin_index,
+                    "magnitude_left": magnitude_bin_index / 4,
+                    "magnitude_right": (magnitude_bin_index + 1) / 4,
+                    "total_count": sum(counts),
+                    "zero_bound_count": 0,
+                    "ratio_bin_000_count": counts[0],
+                    "ratio_bin_001_count": counts[1],
+                }
+            )
 
     results = pd.DataFrame(rows)
     _, ratio_columns, shells = _mean_higgs_deviation_shells(
         results, shell_count=2
     )
-    probabilities = shells.set_index(["dim", "feature_name", "shell_index"])
+    probabilities = shells.set_index(["feature_name", "shell_index"])
     np.testing.assert_allclose(
-        probabilities.loc[(3, "sharp", 0), ratio_columns], [0.9, 0.1]
+        probabilities.loc[("sharp", 0), ratio_columns], [0.9, 0.1]
     )
     np.testing.assert_allclose(
-        probabilities.loc[(3, "sharp", 1), ratio_columns], [0.5, 0.5]
+        probabilities.loc[("sharp", 1), ratio_columns], [0.5, 0.5]
     )
 
     fig = plot_higgs_deviation_shell_grid(results, shell_count=2)
-    sharp_3, sharp_7, flat_3, flat_7 = fig.axes
-    assert sharp_3.get_ylim()[1] == pytest.approx(0.9 / 0.85)
-    assert sharp_7.get_ylim()[1] == pytest.approx(0.9 / 0.85)
-    assert flat_3.get_ylim()[1] == pytest.approx(0.5 / 0.85)
-    assert flat_7.get_ylim()[1] == pytest.approx(0.5 / 0.85)
+    sharp_first, sharp_second, flat_first, flat_second = fig.axes
+    assert sharp_first.get_ylim()[1] == pytest.approx(0.9 / 0.85)
+    assert sharp_second.get_ylim()[1] == pytest.approx(0.5 / 0.85)
+    assert flat_first.get_ylim()[1] == pytest.approx(0.5 / 0.85)
+    assert flat_second.get_ylim()[1] == pytest.approx(0.5 / 0.85)
 
 
 def test_mean_higgs_deviation_shells_weights_runs_equally():

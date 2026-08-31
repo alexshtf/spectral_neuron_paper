@@ -7,31 +7,29 @@ import seaborn as sns
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
-_SHELL_LINESTYLES = ("-", "--", ":", "-.")
+_DIMENSION_LINESTYLES = ("-", "--", ":", "-.")
 
 
 @dataclass(frozen=True)
 class _DeviationCurveStyle:
-    shell_index: int
-    label: str
+    dimension: int
     color: tuple[float, float, float]
     linestyle: str
 
 
 def _deviation_curve_styles(
-    shell_labels: list[str],
+    dimensions: list[int],
 ) -> tuple[_DeviationCurveStyle, ...]:
     return tuple(
         _DeviationCurveStyle(
-            shell_index,
-            label,
+            dimension,
             color,
-            _SHELL_LINESTYLES[shell_index % len(_SHELL_LINESTYLES)],
+            _DIMENSION_LINESTYLES[index % len(_DIMENSION_LINESTYLES)],
         )
-        for shell_index, (label, color) in enumerate(
+        for index, (dimension, color) in enumerate(
             zip(
-                shell_labels,
-                sns.color_palette("colorblind", len(shell_labels)),
+                dimensions,
+                sns.color_palette("colorblind", len(dimensions)),
                 strict=True,
             )
         )
@@ -110,20 +108,23 @@ def plot_higgs_deviation_shell_grid(
     *,
     shell_count: int = 4,
     feature_column_width_mm: float = 24.0,
-    dimension_row_height_mm: float = 18.0,
+    shell_row_height_mm: float = 18.0,
 ) -> Figure:
-    """Plot shell probabilities in two dimension-by-feature subfigures."""
+    """Plot dimension curves in two shell-by-feature subfigures."""
     noise_level, ratio_columns, averaged = _mean_higgs_deviation_shells(
         results, shell_count=shell_count
     )
 
     cell_peaks = (
-        averaged.groupby("feature_index", sort=False)[ratio_columns]
+        averaged.groupby(["feature_index", "shell_index"], sort=False)[
+            ratio_columns
+        ]
         .max()
         .max(axis="columns")
     )
 
     dimensions = sorted(map(int, averaged["dim"].unique()))
+    styles = _deviation_curve_styles(dimensions)
     features = (
         averaged[["feature_index", "feature_name"]]
         .drop_duplicates()
@@ -138,7 +139,6 @@ def plot_higgs_deviation_shell_grid(
         )
         for index in range(shell_count)
     ]
-    styles = _deviation_curve_styles(shell_labels)
     feature_split = (len(features) + 1) // 2
     feature_groups = (
         features.iloc[:feature_split],
@@ -148,7 +148,7 @@ def plot_higgs_deviation_shell_grid(
     fig = plt.figure(
         figsize=(
             feature_column_width_mm * max(map(len, feature_groups)) / 25.4,
-            2 * (dimension_row_height_mm * len(dimensions) + 40) / 25.4,
+            2 * (shell_row_height_mm * shell_count + 40) / 25.4,
         ),
         layout="constrained",
     )
@@ -157,26 +157,24 @@ def plot_higgs_deviation_shell_grid(
         subfigures, feature_groups, strict=True
     ):
         axes = subfigure.subplots(
-            len(dimensions),
+            shell_count,
             len(feature_group),
             sharex=True,
             squeeze=False,
         )
-        subfigure.supylabel("Matrix dimension", fontsize=8)
-        for dimension_row, (dimension, row_axes) in enumerate(
-            zip(dimensions, axes, strict=True)
-        ):
+        subfigure.supylabel("Perturbation-magnitude shell", fontsize=8)
+        for shell_index, row_axes in enumerate(axes):
             for feature_column, (feature, ax) in enumerate(
                 zip(feature_group.itertuples(index=False), row_axes, strict=True)
             ):
                 feature_index = int(feature.feature_index)
                 cell = averaged.loc[
-                    (averaged["dim"] == dimension)
-                    & (averaged["feature_index"] == feature_index)
+                    (averaged["feature_index"] == feature_index)
+                    & (averaged["shell_index"] == shell_index)
                 ]
                 for style in styles:
                     histogram = cell.loc[
-                        cell["shell_index"] == style.shell_index, ratio_columns
+                        cell["dim"] == style.dimension, ratio_columns
                     ]
                     if histogram.empty or histogram.iloc[0].isna().all():
                         continue
@@ -189,7 +187,7 @@ def plot_higgs_deviation_shell_grid(
                         heights,
                         step="post",
                         color=style.color,
-                        alpha=0.05,
+                        alpha=0.07,
                         linewidth=0,
                     )
                     ax.step(
@@ -201,30 +199,28 @@ def plot_higgs_deviation_shell_grid(
                         linewidth=1.1,
                     )
 
-                peak = cell_peaks.at[feature_index]
+                peak = cell_peaks.at[(feature_index, shell_index)]
                 ax.axhline(0, color="#d9d9d9", linewidth=0.4, zorder=0)
                 ax.axvline(1, color="#555555", linestyle="--", linewidth=0.8)
                 ax.set(xlim=(0, 1), ylim=(0, peak / 0.85))
-                ax.set_box_aspect(
-                    dimension_row_height_mm / feature_column_width_mm
-                )
+                ax.set_box_aspect(shell_row_height_mm / feature_column_width_mm)
                 ax.set_xticks(np.linspace(0, 1, 3))
                 ax.set_yticks([])
                 ax.tick_params(
                     axis="x",
                     labelsize=7,
-                    labelbottom=dimension_row == len(dimensions) - 1,
+                    labelbottom=shell_index == shell_count - 1,
                 )
                 if feature_column == 0:
                     ax.set_ylabel(
-                        str(dimension),
+                        shell_labels[shell_index],
                         fontsize=8,
                         rotation=0,
                         ha="right",
                         va="center",
                         labelpad=3,
                     )
-                if dimension_row == 0:
+                if shell_index == 0:
                     ax.set_title(
                         feature.feature_name,
                         fontsize=8,
@@ -254,13 +250,13 @@ def plot_higgs_deviation_shell_grid(
             color=style.color,
             linestyle=style.linestyle,
             linewidth=1.2,
-            label=style.label,
+            label=str(style.dimension),
         )
         for style in styles
     ]
     fig.legend(
         handles=handles,
-        title="Perturbation-magnitude shell",
+        title="Matrix dimension",
         loc="outside upper right",
         ncols=len(handles),
         frameon=False,
