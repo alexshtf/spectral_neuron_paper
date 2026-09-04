@@ -147,6 +147,7 @@ def plot_criteo_models_by_dimension(
         styles=tuple(_CRITEO_MODEL_STYLES.values()),
         col="dimension",
         col_order=dimensions,
+        legend_in_empty_panel=True,
     )
     return _finish_scaling_grid(
         grid,
@@ -174,6 +175,7 @@ def plot_criteo_spectral_comparison(
         styles=tuple(_CRITEO_MODEL_STYLES[variant] for variant in variants),
         col="dim",
         col_order=dimensions,
+        legend_in_empty_panel=True,
     )
     return _finish_scaling_grid(
         grid,

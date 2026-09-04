@@ -100,6 +100,7 @@ def plot_higgs_models_by_dimension(
         col="dimension",
         col_order=dimensions,
         height=3.8,
+        legend_in_empty_panel=True,
     )
     grid.set_axis_labels(
         TRAIN_SIZE_LABEL,
@@ -111,6 +112,9 @@ def plot_higgs_models_by_dimension(
         ax.grid(True, alpha=0.25)
     if grid.legend is not None:
         grid.legend.set_title("model")
+    for ax in grid.figure.axes:
+        if ax.get_legend() is not None:
+            ax.get_legend().set_title("model")
     grid.figure.suptitle(
         f"HIGGS {BINARY_METRIC_LABELS[metric]}: matched model families",
         y=0.99,

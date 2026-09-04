@@ -117,6 +117,9 @@ def _finish_scaling_grid(
         ax.grid(True, alpha=0.25)
     if grid.legend is not None:
         grid.legend.set_title(legend_title)
+    for ax in grid.figure.axes:
+        if ax.get_legend() is not None:
+            ax.get_legend().set_title(legend_title)
     grid.figure.suptitle(title, y=1.02)
     return grid.figure
 
@@ -204,6 +207,7 @@ def _summary_curve_grid(
     col: str | None = None,
     col_order: Sequence[object] | None = None,
     height: float = 3.5,
+    legend_in_empty_panel: bool = False,
 ) -> sns.FacetGrid:
     median, q25, q75 = _summary_metric_columns(summary, metric)
     required = {by}
@@ -247,8 +251,23 @@ def _summary_curve_grid(
         q25=q25,
         q75=q75,
     )
+    legend_data = {style.label: _legend_handle(style) for style in styles}
+    if (
+        legend_in_empty_panel
+        and col is not None
+        and len(facets) > 1
+        and len(facets) % 2
+    ):
+        spec = grid.axes[-1].get_subplotspec().get_gridspec()
+        legend_ax = grid.figure.add_subplot(spec[-1])
+        legend_ax.set_axis_off()
+        legend_ax.legend(
+            legend_data.values(), labels, title=by, loc="center", frameon=False
+        )
+        return grid
+
     grid.add_legend(
-        legend_data={style.label: _legend_handle(style) for style in styles},
+        legend_data=legend_data,
         label_order=labels,
         title=by,
         adjust_subtitles=True,

@@ -101,6 +101,26 @@ def test_spectral_comparison_filters_and_facets_by_dimension():
 
 
 @pytest.mark.parametrize(
+    "plot", [plot_criteo_models_by_dimension, plot_criteo_spectral_comparison]
+)
+def test_three_dimensions_place_legend_in_empty_panel(plot):
+    summary = _criteo_summary()
+    extra = summary.loc[summary["dim"] == 5].assign(dim=7)
+    fig = plot(pd.concat((summary, extra)))
+    fig.canvas.draw()
+
+    legend_ax = fig.axes[-1]
+    legend = legend_ax.get_legend()
+    assert not fig.legends
+    assert not legend_ax.axison
+    assert legend.get_title().get_text() == "model"
+    assert legend_ax.get_position().x0 == pytest.approx(fig.axes[1].get_position().x0)
+    assert legend_ax.get_position().y1 < fig.axes[1].get_position().y0
+    panel_bounds = legend_ax.get_window_extent()
+    assert all(panel_bounds.contains(*point) for point in legend.get_window_extent().get_points())
+
+
+@pytest.mark.parametrize(
     "variant", ["spectral-bucketed", "spectral-continuous"]
 )
 def test_plot_criteo_spectral_dimensions_supports_zoom(variant):
